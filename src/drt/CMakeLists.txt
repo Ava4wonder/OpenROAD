@@ -118,12 +118,17 @@ if(ENABLE_DRT_REDESIGN)
     PRIVATE
       src/redesign/PhysicalState.cpp
       src/redesign/simd/Geom.cpp
+      src/redesign/legality/CpuDrcOracle.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
 
   add_executable(redesign_simd_test test/redesign_simd_test.cpp)
   target_link_libraries(redesign_simd_test PRIVATE drt_lib)
   target_include_directories(redesign_simd_test PRIVATE src)
+
+  add_executable(redesign_legality_test test/redesign_legality_test.cpp)
+  target_link_libraries(redesign_legality_test PRIVATE drt_lib)
+  target_include_directories(redesign_legality_test PRIVATE src)
 endif()
 
 target_sources(drt
