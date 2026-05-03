@@ -94,6 +94,12 @@ class CpuDrcOracle
                 std::size_t context_count,
                 Verdict* verdicts);
 
+  // Total number of (candidate, active-context) predicate dispatches in
+  // the most recent Evaluate() call. Used for benchmark normalization in
+  // pair/sec, the unit drt_redesign_execution_plan.md P2.2 exit
+  // criterion is phrased in. Reset to 0 by each Evaluate().
+  std::size_t LastPairsEvaluated() const noexcept;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

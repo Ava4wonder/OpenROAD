@@ -18,6 +18,7 @@ struct CpuDrcOracle::Impl
   const RuleEntry* rules = nullptr;
   std::size_t rule_count = 0;
   std::int32_t max_halo = 0;
+  std::size_t last_pairs = 0;
 
   // Active set: indices into `context` whose x2 + max_halo >= sweep_x.
   // Maintained as an unsorted vector; entries removed lazily during
@@ -59,6 +60,7 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
   for (std::size_t i = 0; i < candidates_count; ++i) {
     verdicts[i] = Verdict{};
   }
+  impl_->last_pairs = 0;
   if (candidates_count == 0) {
     return;
   }
@@ -97,6 +99,7 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
       const Shape& ctx = context[idx];
       for (std::size_t r = 0; r < impl_->rule_count; ++r) {
         const RuleEntry& rule = impl_->rules[r];
+        ++impl_->last_pairs;
         if (rule.predicate(cand, ctx, rule.opaque)) {
           verdicts[c].legal = false;
           verdicts[c].triggered_rules
@@ -107,6 +110,11 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
       }
     }
   }
+}
+
+std::size_t CpuDrcOracle::LastPairsEvaluated() const noexcept
+{
+  return impl_->last_pairs;
 }
 
 }  // namespace drt::redesign::legality
