@@ -4,6 +4,10 @@
 include("openroad")
 
 option(DEBUG_DRT_UNDERFLOW "Check for underflow in drt cost calculations" OFF)
+option(ENABLE_DRT_REDESIGN
+  "Build the redesigned DRT transactional state engine (Phase 1 scaffolding only). \
+See topics/.../drt_redesign_plan.md."
+  OFF)
 
 project(drt
   LANGUAGES CXX
@@ -108,6 +112,14 @@ target_link_libraries(drt_lib
     ${Boost_LIBRARIES}
     ZLIB::ZLIB
 )
+
+if(ENABLE_DRT_REDESIGN)
+  target_sources(drt_lib
+    PRIVATE
+      src/redesign/PhysicalState.cpp
+  )
+  target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
+endif()
 
 target_sources(drt
   PRIVATE
