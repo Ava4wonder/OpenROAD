@@ -377,12 +377,141 @@ bool TestSweepLineAllRulesMatchReference()
   return true;
 }
 
+// ---------- P2.2.c: Mode A equivalence under halo relaxation ----------
+//
+// Mode A = oracle-internal equivalence: a tight per-rule halo set MUST
+// produce the same verdicts as a loose halo set (since the per-rule halo
+// pre-filter only skips pair-rule tuples where the predicate would have
+// returned false anyway, given the rule's geometric precondition).
+//
+// Mode B (oracle vs upstream FlexGCWorker conservative correctness) lives
+// in P2.2.d/e and is intentionally not exercised here.
+
+bool TestModeAEquivalenceUnderHaloRelaxation()
+{
+  std::mt19937 rng(0xE17E);
+  std::uniform_int_distribution<std::int32_t> coord(0, 800);
+  std::uniform_int_distribution<std::int16_t> layer_dist(1, 4);
+
+  lg::MetalShortConfig short_cfg{};
+  lg::PrlSpacingConfig prl_cfg{15, 30};
+  lg::EolSpacingConfig eol_cfg{40, 20, 5};
+  lg::CutSpacingConfig cut_cfg{25};
+
+  // Tight halos: the actual x-axis precondition of each rule.
+  lg::RuleEntry tight[4] = {
+      {lg::RuleType::MetalShort, 0, lg::MetalShortReference, &short_cfg},
+      {lg::RuleType::PrlSpacing,
+       prl_cfg.min_spacing,
+       lg::PrlSpacingReference,
+       &prl_cfg},
+      {lg::RuleType::EolSpacing,
+       std::max(eol_cfg.eol_spacing, eol_cfg.eol_within),
+       lg::EolSpacingReference,
+       &eol_cfg},
+      {lg::RuleType::CutSpacing,
+       cut_cfg.min_spacing,
+       lg::CutSpacingReference,
+       &cut_cfg},
+  };
+  // Loose halos: all rules set to the max tight halo, so the per-rule
+  // pre-filter never trips (LastPairsAvoided will be 0).
+  std::int32_t max_halo = 0;
+  for (const auto& r : tight) {
+    max_halo = std::max(max_halo, r.halo);
+  }
+  lg::RuleEntry loose[4] = {tight[0], tight[1], tight[2], tight[3]};
+  for (auto& r : loose) {
+    r.halo = max_halo;
+  }
+
+  for (int trial = 0; trial < 50; ++trial) {
+    const std::size_t cc = 1 + (rng() % 150);
+    const std::size_t kc = 1 + (rng() % 150);
+    std::vector<lg::Shape> cands(cc);
+    std::vector<lg::Shape> context(kc);
+    for (auto& s : cands) {
+      s.x1 = coord(rng);
+      s.y1 = coord(rng);
+      s.x2 = s.x1 + 5 + (rng() % 40);
+      s.y2 = s.y1 + 5 + (rng() % 40);
+      s.layer = layer_dist(rng);
+      s.net_id = 1 + (rng() % 30);
+    }
+    for (auto& s : context) {
+      s.x1 = coord(rng);
+      s.y1 = coord(rng);
+      s.x2 = s.x1 + 5 + (rng() % 40);
+      s.y2 = s.y1 + 5 + (rng() % 40);
+      s.layer = layer_dist(rng);
+      s.net_id = (rng() % 4 == 0) ? 0 : 1 + (rng() % 30);
+    }
+    SortByX1(cands);
+    SortByX1(context);
+
+    std::vector<lg::Verdict> v_tight(cc);
+    std::vector<lg::Verdict> v_loose(cc);
+
+    lg::CpuDrcOracle o_tight;
+    o_tight.SetRules(tight, 4);
+    o_tight.Evaluate(cands.data(), cc, context.data(), kc, v_tight.data());
+    const std::size_t pairs_eval_tight = o_tight.LastPairsEvaluated();
+    const std::size_t pairs_avoid_tight = o_tight.LastPairsAvoided();
+
+    lg::CpuDrcOracle o_loose;
+    o_loose.SetRules(loose, 4);
+    o_loose.Evaluate(cands.data(), cc, context.data(), kc, v_loose.data());
+    const std::size_t pairs_eval_loose = o_loose.LastPairsEvaluated();
+    const std::size_t pairs_avoid_loose = o_loose.LastPairsAvoided();
+
+    for (std::size_t i = 0; i < cc; ++i) {
+      if (v_tight[i].legal != v_loose[i].legal
+          || v_tight[i].triggered_rules != v_loose[i].triggered_rules) {
+        std::fprintf(
+            stderr,
+            "FAIL TestModeAEquivalence trial=%d i=%zu tight(%d, %u) loose(%d, "
+            "%u)\n",
+            trial,
+            i,
+            v_tight[i].legal,
+            v_tight[i].triggered_rules,
+            v_loose[i].legal,
+            v_loose[i].triggered_rules);
+        return false;
+      }
+    }
+    if (pairs_avoid_loose != 0) {
+      std::fprintf(stderr,
+                   "FAIL TestModeAEquivalence trial=%d: loose halo set "
+                   "should not avoid any pair, got %zu\n",
+                   trial,
+                   pairs_avoid_loose);
+      return false;
+    }
+    // tight + avoided should equal loose total
+    if (pairs_eval_tight + pairs_avoid_tight != pairs_eval_loose) {
+      std::fprintf(stderr,
+                   "FAIL TestModeAEquivalence trial=%d: pair accounting: "
+                   "tight_eval=%zu + tight_avoid=%zu != loose_eval=%zu\n",
+                   trial,
+                   pairs_eval_tight,
+                   pairs_avoid_tight,
+                   pairs_eval_loose);
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------- Pair-counted bench (P2 exit-criterion unit) ----------
 
 struct BenchOut
 {
   double cands_per_s;
   double pairs_per_s;
+  std::size_t pairs_admitted;  // by outer max-halo sweep-line
+  std::size_t pairs_evaluated; // predicate actually called
+  std::size_t pairs_avoided;   // skipped by per-rule halo pre-filter
 };
 
 BenchOut BenchSweepLine(std::size_t cc, std::size_t kc, int iters)
@@ -423,7 +552,7 @@ BenchOut BenchSweepLine(std::size_t cc, std::size_t kc, int iters)
        lg::PrlSpacingReference,
        &prl_cfg},
       {lg::RuleType::EolSpacing,
-       eol_cfg.eol_spacing,
+       std::max(eol_cfg.eol_spacing, eol_cfg.eol_within),
        lg::EolSpacingReference,
        &eol_cfg},
       {lg::RuleType::CutSpacing,
@@ -436,9 +565,12 @@ BenchOut BenchSweepLine(std::size_t cc, std::size_t kc, int iters)
   oracle.SetRules(rules, 4);
   std::vector<lg::Verdict> verdicts(cc);
 
-  // Warm-up + measure
+  // Warm-up + capture pair counts (constant across iters for fixed input).
   oracle.Evaluate(cands.data(), cc, context.data(), kc, verdicts.data());
-  std::size_t pairs_per_iter = oracle.LastPairsEvaluated();
+  const std::size_t pairs_eval_per_iter = oracle.LastPairsEvaluated();
+  const std::size_t pairs_avoid_per_iter = oracle.LastPairsAvoided();
+  const std::size_t pairs_admitted_per_iter
+      = pairs_eval_per_iter + pairs_avoid_per_iter;
 
   const auto t0 = std::chrono::steady_clock::now();
   for (int it = 0; it < iters; ++it) {
@@ -447,8 +579,12 @@ BenchOut BenchSweepLine(std::size_t cc, std::size_t kc, int iters)
   const auto t1 = std::chrono::steady_clock::now();
   const double secs = std::chrono::duration<double>(t1 - t0).count();
   const double total_cands = static_cast<double>(iters) * cc;
-  const double total_pairs = static_cast<double>(iters) * pairs_per_iter;
-  return {total_cands / secs, total_pairs / secs};
+  const double total_pairs = static_cast<double>(iters) * pairs_eval_per_iter;
+  return {total_cands / secs,
+          total_pairs / secs,
+          pairs_admitted_per_iter,
+          pairs_eval_per_iter,
+          pairs_avoid_per_iter};
 }
 
 }  // namespace
@@ -490,12 +626,31 @@ int main()
   std::printf(
       "PASS TestSweepLineAllRulesMatchReference (4 rules, 80 trials)\n");
 
-  const BenchOut b = BenchSweepLine(2048, 2048, 20);
-  std::printf("Bench 2048 cands x 2048 ctx, 4 rules: %.3f Mcand/s, %.3f Mpair/s\n",
-              b.cands_per_s / 1e6,
-              b.pairs_per_s / 1e6);
+  if (!TestModeAEquivalenceUnderHaloRelaxation()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestModeAEquivalenceUnderHaloRelaxation (50 trials, "
+      "tight vs loose halo, exact verdict equivalence + pair accounting)\n");
 
-  // P2 exit-criterion check (single-thread CPU oracle): >= 1M pair/s.
+  const BenchOut b = BenchSweepLine(2048, 2048, 20);
+  const double avoid_ratio = b.pairs_admitted == 0
+                                 ? 0.0
+                                 : 100.0 * static_cast<double>(b.pairs_avoided)
+                                       / static_cast<double>(b.pairs_admitted);
+  std::printf("Bench 2048 cands x 2048 ctx, 4 rules:\n"
+              "  throughput          : %.3f Mcand/s, %.3f Mpair/s\n"
+              "  pairs admitted/iter : %zu (by outer max-halo sweep-line)\n"
+              "  pairs evaluated/iter: %zu (predicate actually called)\n"
+              "  pairs avoided/iter  : %zu (per-rule halo pre-filter)\n"
+              "  pre-filter savings  : %.1f%% of admitted pairs\n",
+              b.cands_per_s / 1e6,
+              b.pairs_per_s / 1e6,
+              b.pairs_admitted,
+              b.pairs_evaluated,
+              b.pairs_avoided,
+              avoid_ratio);
+
   if (b.pairs_per_s < 1.0e6) {
     std::fprintf(stderr,
                  "FAIL P2 single-thread CPU exit criterion: %.3f Mpair/s "

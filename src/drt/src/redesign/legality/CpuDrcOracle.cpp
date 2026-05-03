@@ -19,6 +19,7 @@ struct CpuDrcOracle::Impl
   std::size_t rule_count = 0;
   std::int32_t max_halo = 0;
   std::size_t last_pairs = 0;
+  std::size_t last_pairs_avoided = 0;
 
   // Active set: indices into `context` whose x2 + max_halo >= sweep_x.
   // Maintained as an unsorted vector; entries removed lazily during
@@ -61,6 +62,7 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
     verdicts[i] = Verdict{};
   }
   impl_->last_pairs = 0;
+  impl_->last_pairs_avoided = 0;
   if (candidates_count == 0) {
     return;
   }
@@ -94,11 +96,25 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
         [&](std::size_t idx) { return context[idx].x2 + halo < window_lo; });
     impl_->active.erase(new_end, impl_->active.end());
 
-    // 3) For each active context shape, dispatch all rules.
+    // 3) For each active context shape, dispatch only the rules whose
+    //    individual halo admits this pair on the x-axis.
     for (const std::size_t idx : impl_->active) {
       const Shape& ctx = context[idx];
+      // x-edge-distance: 0 if x-overlapping, otherwise the gap.
+      std::int32_t x_dist;
+      if (cand.x1 > ctx.x2) {
+        x_dist = cand.x1 - ctx.x2;
+      } else if (ctx.x1 > cand.x2) {
+        x_dist = ctx.x1 - cand.x2;
+      } else {
+        x_dist = 0;
+      }
       for (std::size_t r = 0; r < impl_->rule_count; ++r) {
         const RuleEntry& rule = impl_->rules[r];
+        if (x_dist > rule.halo) {
+          ++impl_->last_pairs_avoided;
+          continue;
+        }
         ++impl_->last_pairs;
         if (rule.predicate(cand, ctx, rule.opaque)) {
           verdicts[c].legal = false;
@@ -115,6 +131,11 @@ void CpuDrcOracle::Evaluate(const Shape* candidates,
 std::size_t CpuDrcOracle::LastPairsEvaluated() const noexcept
 {
   return impl_->last_pairs;
+}
+
+std::size_t CpuDrcOracle::LastPairsAvoided() const noexcept
+{
+  return impl_->last_pairs_avoided;
 }
 
 }  // namespace drt::redesign::legality

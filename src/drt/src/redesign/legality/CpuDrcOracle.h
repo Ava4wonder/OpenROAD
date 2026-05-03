@@ -56,7 +56,15 @@ using RulePredicate = bool (*)(const Shape& candidate,
 struct RuleEntry
 {
   RuleType type;
-  std::int32_t halo;       // x-axis active-region halo for this rule
+  // Per-rule x-axis admission halo. CONTRACT: `halo` MUST be an upper
+  // bound on the x-edge-distance at which `predicate` can return true.
+  // Setting it tighter than the predicate's actual precondition produces
+  // false negatives (BAD); setting it looser is wasteful but safe.
+  // The oracle uses this for two things:
+  //   (1) Outer sweep-line active-set width = max over rules of `halo`.
+  //   (2) Per-(candidate,context,rule) pre-filter: skip the predicate
+  //       when x-edge-distance(candidate, context) > halo.
+  std::int32_t halo;
   RulePredicate predicate;
   void* opaque;            // pointer-to-rule-deck context; owned by caller
 };
@@ -94,11 +102,20 @@ class CpuDrcOracle
                 std::size_t context_count,
                 Verdict* verdicts);
 
-  // Total number of (candidate, active-context) predicate dispatches in
-  // the most recent Evaluate() call. Used for benchmark normalization in
-  // pair/sec, the unit drt_redesign_execution_plan.md P2.2 exit
-  // criterion is phrased in. Reset to 0 by each Evaluate().
+  // Total number of (candidate, active-context, rule) tuples for which
+  // the predicate was actually called in the most recent Evaluate(). Used
+  // for benchmark normalization in pair/sec, the unit
+  // drt_redesign_execution_plan.md P2.2 exit criterion is phrased in.
+  // Reset by each Evaluate().
   std::size_t LastPairsEvaluated() const noexcept;
+
+  // Tuples skipped by the per-rule x-halo pre-filter (i.e. tuples that
+  // were admitted by the outer max-halo active set but whose
+  // x-edge-distance exceeded the individual rule's `halo`, so the
+  // predicate was not called). Sum with LastPairsEvaluated() yields the
+  // total tuples that the outer active-set filter admitted. Reset by
+  // each Evaluate().
+  std::size_t LastPairsAvoided() const noexcept;
 
  private:
   struct Impl;
