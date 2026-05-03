@@ -993,6 +993,7 @@ void FlexGCWorker::Impl::initPA1()
 
 void FlexGCWorker::Impl::updateGCWorker()
 {
+  ProfileTask _prof("GC:updateGCWorker");
   if (!getDRWorker()) {
     std::cout << "Error: updateGCWorker expects a valid DRWorker\n";
     exit(1);

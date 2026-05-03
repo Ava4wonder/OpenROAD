@@ -42,6 +42,7 @@
 #include "odb/isotropy.h"
 #include "utl/Logger.h"
 
+#include "frProfileTask.h"
 using odb::dbTechLayerDir;
 using odb::dbTechLayerType;
 
@@ -2274,6 +2275,7 @@ void FlexDRWorker::route_queue_addMarkerCost()
 void FlexDRWorker::route_queue_init_queue(
     std::queue<RouteQueueEntry>& rerouteQueue)
 {
+  ProfileTask _p_v4("DRW:init_route_queue_entry");
   frOrderedIdSet<frBlockObject*> uniqueVictims;
   frOrderedIdSet<frBlockObject*> uniqueAggressors;
   std::vector<RouteQueueEntry> checks;
@@ -2658,6 +2660,7 @@ void FlexDRWorker::initMazeCost_guide_helper(drNet* net, const bool isAdd)
 
 void FlexDRWorker::initMazeCost(const frDesign* design)
 {
+  ProfileTask _p_v4("DRW:init_maze_cost");
   // init Maze cost by snet shapes and blockages
   initMazeCost_fixedObj(design);
   initMazeCost_ap();
@@ -3174,6 +3177,7 @@ void FlexDRWorker::initMazeCost_boundary_helper(drNet* net, bool isAddPathCost)
 
 void FlexDRWorker::initMarkers(const frDesign* design)
 {
+  ProfileTask _prof("DRW:initMarkers");
   std::vector<frMarker*> result;
   // get all markers within drc box
   design->getRegionQuery()->queryMarker(getDrcBox(), result);
@@ -3197,6 +3201,7 @@ void FlexDRWorker::initMarkers(const frDesign* design)
 
 void FlexDRWorker::init(const frDesign* design)
 {
+  ProfileTask _p_v4("DRW:init_worker");
   initNets(design);
   if (nets_.empty()
       && (getRipupMode() == RipUpMode::ALL

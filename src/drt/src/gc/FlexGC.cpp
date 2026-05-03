@@ -25,6 +25,7 @@
 #include "global.h"
 #include "utl/Logger.h"
 
+#include "frProfileTask.h"
 namespace drt {
 
 namespace {
@@ -108,6 +109,7 @@ FlexGCWorker::Impl::Impl(frTechObject* techIn,
 
 void FlexGCWorker::Impl::addMarker(std::unique_ptr<frMarker> in)
 {
+  ProfileTask _p_v4("DRW:marker_insert_gc");
   odb::Rect bbox = in->getBBox();
   auto layerNum = in->getLayerNum();
   auto con = in->getConstraint();

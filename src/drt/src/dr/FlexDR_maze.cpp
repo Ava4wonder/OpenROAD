@@ -1575,6 +1575,7 @@ bool FlexDRWorker::mazeIterInit_sortRerouteNets(
     int mazeIter,
     std::vector<drNet*>& rerouteNets)
 {
+  ProfileTask _p_v4("DRW:net_ordering");
   auto rerouteNetsComp = [](drNet* const& a, drNet* const& b) {
     if (a->getPriority() > b->getPriority()) {
       return true;
@@ -1623,6 +1624,7 @@ bool FlexDRWorker::mazeIterInit_sortRerouteQueue(
     int mazeIter,
     std::vector<RouteQueueEntry>& rerouteNets)
 {
+  ProfileTask _p_v4("DRW:net_ordering_q");
   auto rerouteNetsComp
       = [](RouteQueueEntry const& a, RouteQueueEntry const& b) {
           auto block1 = a.block;
@@ -1720,6 +1722,7 @@ void FlexDRWorker::writeGCPatchesToDRWorker(
 
 void FlexDRWorker::route_queue()
 {
+  ProfileTask _prof_rq("DRW:route_queue");
   std::queue<RouteQueueEntry> rerouteQueue;
 
   if (needRecheck_) {
@@ -1882,6 +1885,7 @@ void FlexDRWorker::identifyCongestionLevel()
 
 void FlexDRWorker::route_queue_main(std::queue<RouteQueueEntry>& rerouteQueue)
 {
+  ProfileTask _prof("DRW:route_queue_main");
   int gc_version = 1;
   std::map<frBlockObject*, std::pair<int, int>> obj_gc_version;
   auto& workerRegionQuery = getWorkerRegionQuery();
@@ -1914,6 +1918,8 @@ void FlexDRWorker::route_queue_main(std::queue<RouteQueueEntry>& rerouteQueue)
       if (graphics_) {
         graphics_->startNet(net);
       }
+      {  // DRW:ripup begin
+        ProfileTask _p_v4("DRW:ripup");
       for (auto& uConnFig : net->getRouteConnFigs()) {
         subPathCost(uConnFig.get(), false, true);
         workerRegionQuery.remove(uConnFig.get());  // worker region query
@@ -1930,6 +1936,7 @@ void FlexDRWorker::route_queue_main(std::queue<RouteQueueEntry>& rerouteQueue)
         initMazeCost_via_helper(net, false);
       }
       net->clear();
+      }  // DRW:ripup end
       if (getDRIter() >= beginDebugIter) {
         logger_->info(DRT, 2002, "Routing net {}", net->getFrNet()->getName());
       }
@@ -2430,6 +2437,7 @@ void FlexDRWorker::routeNet_postAstarUpdate(
     std::map<FlexMazeIdx, frOrderedIdSet<drPin*>>& mazeIdx2unConnPins,
     bool isFirstConn)
 {
+  ProfileTask _prof("DRW:postAstarUpdate");
   // first point is dst
   std::set<FlexMazeIdx> localConnComps;
   if (!path.empty()) {
@@ -2529,6 +2537,7 @@ void FlexDRWorker::routeNet_postAstarWritePath(
     std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
     const std::set<FlexMazeIdx>& apMazeIdx)
 {
+  ProfileTask _prof("DRW:postAstarWritePath");
   if (points.empty()) {
     return;
   }
@@ -3211,6 +3220,7 @@ void FlexDRWorker::routeNet_prepAreaMap(drNet* net,
 
 bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
 {
+  ProfileTask _prof("DRW:routeNet");
   //  ProfileTask profile("DR:routeNet");
 
   // Verify if net has jumpers
@@ -3310,6 +3320,7 @@ void FlexDRWorker::routeNet_postAstarPatchMinAreaVio(
     const std::vector<FlexMazeIdx>& path,
     const std::map<FlexMazeIdx, frCoord>& areaMap)
 {
+  ProfileTask _prof("DRW:postAstarPatchMinAreaVio");
   if (path.empty()) {
     return;
   }
@@ -3674,6 +3685,7 @@ void FlexDRWorker::routeNet_postAstarAddPatchMetal(drNet* net,
                                                    bool bpPatchLeft,
                                                    bool epPatchLeft)
 {
+  ProfileTask _prof("DRW:postAstarAddPatchMetal");
   bool isPatchHorz;
   // bool isLeftClean = true;
   frLayerNum layerNum = gridGraph_.getLayerNum(bpIdx.z());

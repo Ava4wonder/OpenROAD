@@ -20,6 +20,7 @@
 #include "odb/dbTypes.h"
 #include "odb/geom.h"
 
+#include "frProfileTask.h"
 using odb::dbTechLayerDir;
 using odb::dbTechLayerType;
 
@@ -442,6 +443,7 @@ void FlexGridGraph::init(const frDesign* design,
                          bool initDR,
                          bool followGuide)
 {
+  ProfileTask _p_v4("DRW:maze_grid_init");
   auto* via_data = getDRWorker()->getViaData();
   halfViaEncArea_ = &via_data->halfViaEncArea;
 
@@ -510,6 +512,7 @@ void FlexGridGraph::initTracks(
 
 void FlexGridGraph::resetStatus()
 {
+  ProfileTask _p_v4("DRW:maze_grid_reset");
   resetSrc();
   resetDst();
   resetPrevNodeDir();

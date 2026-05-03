@@ -22,6 +22,7 @@
 #include "frDesign.h"
 #include "odb/geom.h"
 
+#include "frProfileTask.h"
 namespace drt {
 
 void FlexDRWorker::endGetModNets(frOrderedIdSet<frNet*>& modNets)
@@ -626,6 +627,7 @@ void FlexDRWorker::endAddNets(
 
 void FlexDRWorker::endRemoveMarkers(frDesign* design)
 {
+  ProfileTask _p_v4("DRW:marker_remove");
   auto regionQuery = design->getRegionQuery();
   auto topBlock = design->getTopBlock();
   std::vector<frMarker*> result;
@@ -663,6 +665,7 @@ void FlexDRWorker::endAddMarkers(frDesign* design)
 
 void FlexDRWorker::cleanup()
 {
+  ProfileTask _p_v4("DRW:worker_teardown");
   apSVia_.clear();
   planarHistoryMarkers_.clear();
   viaHistoryMarkers_.clear();

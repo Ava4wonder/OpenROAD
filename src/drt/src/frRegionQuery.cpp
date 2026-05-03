@@ -22,6 +22,7 @@
 #include "utl/Logger.h"
 #include "utl/algorithms.h"
 
+#include "frProfileTask.h"
 namespace drt {
 
 class FlexDR;
@@ -115,6 +116,7 @@ void frRegionQuery::addDRObj(frShape* shape)
 
 void frRegionQuery::addMarker(frMarker* in)
 {
+  ProfileTask _p_v4("DRW:marker_insert");
   odb::Rect frb = in->getBBox();
   impl_->markers.at(in->getLayerNum()).insert(std::make_pair(frb, in));
 }

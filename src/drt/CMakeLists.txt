@@ -4,6 +4,7 @@
 include("openroad")
 
 option(DEBUG_DRT_UNDERFLOW "Check for underflow in drt cost calculations" OFF)
+option(PROFILE_CSV "Emit per-task CSV timing from DRT (topic: drt-gpu)" OFF)
 
 project(drt
   LANGUAGES CXX
@@ -222,3 +223,10 @@ if (Python3_FOUND AND BUILD_PYTHON)
 endif()
 
 add_subdirectory(test)
+
+
+# DRT profile-CSV instrumentation (topic: design-gpu-kernels-for-the-drt-phase-of-openroad...)
+if(PROFILE_CSV)
+  target_sources(drt_lib PRIVATE src/frProfileTaskCsv.cpp)
+  target_compile_definitions(drt_lib PRIVATE PROFILE_CSV=1)
+endif()

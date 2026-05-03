@@ -22,6 +22,7 @@
 #include "odb/dbTypes.h"
 #include "odb/geom.h"
 
+#include "frProfileTask.h"
 using odb::dbTechLayerDir;
 
 namespace drt {
@@ -721,6 +722,7 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
                            std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
                            bool route_with_jumpers)
 {
+  ProfileTask _prof_search("DRW:maze_search");
   if (debug_) {
     dump_file_.open("expansions.dump");
   }

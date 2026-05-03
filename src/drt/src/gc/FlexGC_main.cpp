@@ -4168,6 +4168,7 @@ void FlexGCWorker::Impl::modifyMarkers()
 
 int FlexGCWorker::Impl::main()
 {
+  ProfileTask _prof_gc("DRW:gc_main");
   // incremental updates
   pwires_.clear();
   clearMarkers();
@@ -4187,17 +4188,35 @@ int FlexGCWorker::Impl::main()
   // clear existing markers
   clearMarkers();
   // check LEF58CornerSpacing and LEF58WidthTable ORTH
-  checkMetalCornerSpacing();
+  {
+    ProfileTask _p("GC:checkMetalCornerSpacing");
+    checkMetalCornerSpacing();
+  }
   // check Short, NSMet, MetSpc based on max rectangles
-  checkMetalSpacing();
+  {
+    ProfileTask _p("GC:checkMetalSpacing");
+    checkMetalSpacing();
+  }
   // check MinWid, MinStp, RectOnly based on polygon
-  checkMetalShape(false);
+  {
+    ProfileTask _p("GC:checkMetalShape");
+    checkMetalShape(false);
+  }
   // check eolSpc based on polygon
-  checkMetalEndOfLine();
+  {
+    ProfileTask _p("GC:checkMetalEndOfLine");
+    checkMetalEndOfLine();
+  }
   // check CShort, cutSpc, enclosure
-  checkCutSpacing();
+  {
+    ProfileTask _p("GC:checkCutSpacing");
+    checkCutSpacing();
+  }
   // check SpacingTable Influence
-  checkMetalSpacingTableInfluence();
+  {
+    ProfileTask _p("GC:checkMetalSpacingTableInfluence");
+    checkMetalSpacingTableInfluence();
+  }
   // check MINIMUMCUT
   checkMinimumCut();
   // check LEF58_METALWIDTHVIATABLE
