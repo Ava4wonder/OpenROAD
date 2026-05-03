@@ -117,8 +117,13 @@ if(ENABLE_DRT_REDESIGN)
   target_sources(drt_lib
     PRIVATE
       src/redesign/PhysicalState.cpp
+      src/redesign/simd/Geom.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
+
+  add_executable(redesign_simd_test test/redesign_simd_test.cpp)
+  target_link_libraries(redesign_simd_test PRIVATE drt_lib)
+  target_include_directories(redesign_simd_test PRIVATE src)
 endif()
 
 target_sources(drt
