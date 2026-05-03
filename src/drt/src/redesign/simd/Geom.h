@@ -59,4 +59,20 @@ void SameNetMask(const std::uint64_t* lhs_net_ids,
 // (Always false on non-x86 builds.)
 bool UsingAvx2();
 
+// Forced-scalar variant of AnyOverlap. Same contract as AnyOverlap but
+// bypasses runtime SIMD dispatch. Intended for benchmarking the SIMD/scalar
+// ratio and for the correctness reference path; production code should call
+// AnyOverlap() instead.
+void AnyOverlapScalar(const std::int32_t* lhs_x1,
+                      const std::int32_t* lhs_y1,
+                      const std::int32_t* lhs_x2,
+                      const std::int32_t* lhs_y2,
+                      std::size_t lhs_count,
+                      const std::int32_t* rhs_x1,
+                      const std::int32_t* rhs_y1,
+                      const std::int32_t* rhs_x2,
+                      const std::int32_t* rhs_y2,
+                      std::size_t rhs_count,
+                      std::uint8_t* output);
+
 }  // namespace drt::redesign::simd

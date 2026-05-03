@@ -209,7 +209,13 @@ bool TestBoundaryCases()
   return true;
 }
 
-double BenchAnyOverlap(std::size_t lc, std::size_t rc, int iters)
+struct BenchResult
+{
+  double dispatched_pair_per_s;
+  double scalar_pair_per_s;
+};
+
+BenchResult BenchAnyOverlap(std::size_t lc, std::size_t rc, int iters)
 {
   std::mt19937 rng(0xBEEF);
   std::uniform_int_distribution<std::int32_t> dist(0, 100000);
@@ -228,24 +234,28 @@ double BenchAnyOverlap(std::size_t lc, std::size_t rc, int iters)
     ry2[j] = ry1[j] + 1 + (rng() % 1000);
   }
   std::vector<std::uint8_t> out(lc);
+
   const auto t0 = std::chrono::steady_clock::now();
   for (int it = 0; it < iters; ++it) {
-    dr::AnyOverlap(lx1.data(),
-                   ly1.data(),
-                   lx2.data(),
-                   ly2.data(),
-                   lc,
-                   rx1.data(),
-                   ry1.data(),
-                   rx2.data(),
-                   ry2.data(),
-                   rc,
+    dr::AnyOverlap(lx1.data(), ly1.data(), lx2.data(), ly2.data(), lc,
+                   rx1.data(), ry1.data(), rx2.data(), ry2.data(), rc,
                    out.data());
   }
   const auto t1 = std::chrono::steady_clock::now();
-  const double secs
+
+  for (int it = 0; it < iters; ++it) {
+    dr::AnyOverlapScalar(lx1.data(), ly1.data(), lx2.data(), ly2.data(), lc,
+                         rx1.data(), ry1.data(), rx2.data(), ry2.data(), rc,
+                         out.data());
+  }
+  const auto t2 = std::chrono::steady_clock::now();
+
+  const double sec_dispatched
       = std::chrono::duration<double>(t1 - t0).count();
-  return static_cast<double>(iters) * lc * rc / secs;
+  const double sec_scalar
+      = std::chrono::duration<double>(t2 - t1).count();
+  const double total_pairs = static_cast<double>(iters) * lc * rc;
+  return {total_pairs / sec_dispatched, total_pairs / sec_scalar};
 }
 
 }  // namespace
@@ -265,8 +275,23 @@ int main()
   std::printf(
       "PASS TestBoundaryCases (edge-touch, 1-dbu gap, tail, masks, halo)\n");
 
-  const double rate1024 = BenchAnyOverlap(1024, 1024, 20);
-  std::printf("Bench 1024x1024 (active backend): %.2f Mpair/s\n",
-              rate1024 / 1e6);
+  const BenchResult b = BenchAnyOverlap(1024, 1024, 20);
+  const double ratio = b.dispatched_pair_per_s / b.scalar_pair_per_s;
+  std::printf("Bench 1024x1024 dispatched (%s): %.2f Mpair/s\n",
+              dr::UsingAvx2() ? "AVX2" : "scalar",
+              b.dispatched_pair_per_s / 1e6);
+  std::printf("Bench 1024x1024 forced-scalar:   %.2f Mpair/s\n",
+              b.scalar_pair_per_s / 1e6);
+  std::printf("Speedup ratio (dispatched / scalar): %.2fx\n", ratio);
+
+  // Exit criterion from drt_redesign_execution_plan.md P2.1: >= 4x speedup
+  // over scalar for AnyOverlap on 1024-rect batches when AVX2 is selected.
+  if (dr::UsingAvx2() && ratio < 4.0) {
+    std::fprintf(stderr,
+                 "FAIL P2.1 exit criterion: AVX2 speedup %.2fx < 4.0x\n",
+                 ratio);
+    return 1;
+  }
+  std::printf("PASS P2.1 exit criterion (>=4x speedup over scalar)\n");
   return 0;
 }

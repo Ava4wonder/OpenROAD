@@ -27,32 +27,6 @@ bool DetectAvx2()
 
 const bool kUseAvx2 = DetectAvx2();
 
-void AnyOverlapScalar(const std::int32_t* lx1,
-                      const std::int32_t* ly1,
-                      const std::int32_t* lx2,
-                      const std::int32_t* ly2,
-                      std::size_t lc,
-                      const std::int32_t* rx1,
-                      const std::int32_t* ry1,
-                      const std::int32_t* rx2,
-                      const std::int32_t* ry2,
-                      std::size_t rc,
-                      std::uint8_t* out)
-{
-  for (std::size_t i = 0; i < lc; ++i) {
-    std::uint8_t any = 0;
-    for (std::size_t j = 0; j < rc; ++j) {
-      const bool ovl = !(lx2[i] < rx1[j] || rx2[j] < lx1[i]
-                         || ly2[i] < ry1[j] || ry2[j] < ly1[i]);
-      if (ovl) {
-        any = 1;
-        break;
-      }
-    }
-    out[i] = any;
-  }
-}
-
 #if defined(__x86_64__) || defined(_M_X64)
 __attribute__((target("avx2"))) void AnyOverlapAvx2(
     const std::int32_t* lx1,
@@ -122,6 +96,32 @@ __attribute__((target("avx2"))) void AnyOverlapAvx2(
 bool UsingAvx2()
 {
   return kUseAvx2;
+}
+
+void AnyOverlapScalar(const std::int32_t* lx1,
+                      const std::int32_t* ly1,
+                      const std::int32_t* lx2,
+                      const std::int32_t* ly2,
+                      std::size_t lc,
+                      const std::int32_t* rx1,
+                      const std::int32_t* ry1,
+                      const std::int32_t* rx2,
+                      const std::int32_t* ry2,
+                      std::size_t rc,
+                      std::uint8_t* out)
+{
+  for (std::size_t i = 0; i < lc; ++i) {
+    std::uint8_t any = 0;
+    for (std::size_t j = 0; j < rc; ++j) {
+      const bool ovl = !(lx2[i] < rx1[j] || rx2[j] < lx1[i]
+                         || ly2[i] < ry1[j] || ry2[j] < ly1[i]);
+      if (ovl) {
+        any = 1;
+        break;
+      }
+    }
+    out[i] = any;
+  }
 }
 
 void AnyOverlap(const std::int32_t* lhs_x1,
