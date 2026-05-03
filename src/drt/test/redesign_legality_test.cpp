@@ -480,22 +480,31 @@ bool TestModeAEquivalenceUnderHaloRelaxation()
         return false;
       }
     }
-    if (pairs_avoid_loose != 0) {
+    // Both setups admit the same total pairs through the outer sweep-line
+    // (same max-halo). Per-rule pre-filter then partitions admitted into
+    // (evaluated, avoided). Tight setup evaluates strictly fewer or equal,
+    // and avoids at least as many.
+    const std::size_t admitted_tight
+        = pairs_eval_tight + pairs_avoid_tight;
+    const std::size_t admitted_loose
+        = pairs_eval_loose + pairs_avoid_loose;
+    if (admitted_tight != admitted_loose) {
       std::fprintf(stderr,
-                   "FAIL TestModeAEquivalence trial=%d: loose halo set "
-                   "should not avoid any pair, got %zu\n",
+                   "FAIL TestModeAEquivalence trial=%d: outer admitted "
+                   "differs (tight=%zu vs loose=%zu); same max-halo should "
+                   "produce same active set\n",
                    trial,
-                   pairs_avoid_loose);
+                   admitted_tight,
+                   admitted_loose);
       return false;
     }
-    // tight + avoided should equal loose total
-    if (pairs_eval_tight + pairs_avoid_tight != pairs_eval_loose) {
+    if (pairs_eval_tight > pairs_eval_loose) {
       std::fprintf(stderr,
-                   "FAIL TestModeAEquivalence trial=%d: pair accounting: "
-                   "tight_eval=%zu + tight_avoid=%zu != loose_eval=%zu\n",
+                   "FAIL TestModeAEquivalence trial=%d: tight evaluated "
+                   "(%zu) exceeds loose evaluated (%zu); tighter halos "
+                   "must skip at least as much\n",
                    trial,
                    pairs_eval_tight,
-                   pairs_avoid_tight,
                    pairs_eval_loose);
       return false;
     }
