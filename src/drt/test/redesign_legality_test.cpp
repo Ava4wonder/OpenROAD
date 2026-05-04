@@ -11,6 +11,8 @@
 #include <random>
 #include <vector>
 
+#include "db/tech/frConstraint.h"
+#include "frBaseTypes.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/FlexConstraintTranslator.h"
 #include "redesign/legality/Predicates.h"
@@ -627,9 +629,9 @@ bool TestRuleDeckToRuleEntriesRoundTrip()
   return true;
 }
 
-bool TestFlexConstraintTranslatorStub()
+bool TestFlexConstraintTranslatorNullsAreUnsupported()
 {
-  // The stub never inspects the constraint pointers; pass nulls.
+  // Null pointers count as Unsupported (no rule produced).
   lg::FlexConstraintTranslator t;
   const drt::frConstraint* fake_inputs[3] = {nullptr, nullptr, nullptr};
   auto deck = t.Translate(fake_inputs, 3);
@@ -637,18 +639,299 @@ bool TestFlexConstraintTranslatorStub()
   if (cov.total_input != 3 || cov.supported != 0 || cov.fallback != 0
       || cov.unsupported != 3) {
     std::fprintf(stderr,
-                 "FAIL TestFlexConstraintTranslatorStub: got (total=%zu, "
-                 "sup=%zu, fb=%zu, unsup=%zu)\n",
+                 "FAIL TestFlexConstraintTranslatorNullsAreUnsupported: "
+                 "(total=%zu, sup=%zu, fb=%zu, unsup=%zu)\n",
                  cov.total_input,
                  cov.supported,
                  cov.fallback,
                  cov.unsupported);
     return false;
   }
-  if (deck.ToRuleEntries().size() != 0) {
+  return true;
+}
+
+// ---------- P2.2.d translation tests against real upstream constraints ----------
+
+bool TestTranslateShort()
+{
+  drt::frShortConstraint sc;
+  const drt::frConstraint* in[1] = {&sc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().supported != 1 || deck.Size() != 1) {
     std::fprintf(stderr,
-                 "FAIL TestFlexConstraintTranslatorStub: stub deck must "
-                 "produce zero RuleEntries\n");
+                 "FAIL TestTranslateShort: expected 1 supported rule\n");
+    return false;
+  }
+  const auto& r = deck.At(0);
+  if (r.family != lg::RuleFamily::MetalShort
+      || r.coverage != lg::RuleCoverage::Supported || r.halo != 0) {
+    std::fprintf(stderr, "FAIL TestTranslateShort: unexpected rule shape\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateSpacing()
+{
+  drt::frSpacingConstraint sc(75);
+  const drt::frConstraint* in[1] = {&sc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().supported != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateSpacing: expected supported=1, got %zu\n",
+                 deck.GetCoverage().supported);
+    return false;
+  }
+  const auto& r = deck.At(0);
+  if (r.family != lg::RuleFamily::PrlSpacing
+      || r.coverage != lg::RuleCoverage::Supported || r.halo != 75) {
+    std::fprintf(stderr, "FAIL TestTranslateSpacing: shape\n");
+    return false;
+  }
+  const auto* cfg = std::get_if<lg::PrlSpacingConfig>(&r.params);
+  if (cfg == nullptr || cfg->min_spacing != 75 || cfg->prl_threshold != 0) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateSpacing: params mismatch\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateSpacingSamenetIsFallback()
+{
+  drt::frSpacingSamenetConstraint sc(50, false);
+  const drt::frConstraint* in[1] = {&sc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().fallback != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateSpacingSamenetIsFallback: expected "
+                 "fallback=1, got %zu\n",
+                 deck.GetCoverage().fallback);
+    return false;
+  }
+  const auto& r = deck.At(0);
+  if (r.family != lg::RuleFamily::PrlSpacing
+      || r.coverage != lg::RuleCoverage::Fallback) {
+    std::fprintf(stderr, "FAIL TestTranslateSpacingSamenetIsFallback: shape\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateEolSupported()
+{
+  drt::frSpacingEndOfLineConstraint ec;
+  ec.setMinSpacing(20);
+  ec.setEolWidth(40);
+  ec.setEolWithin(8);
+  // No setParSpace -> hasParallelEdge() == false; no setTwoEdges
+  const drt::frConstraint* in[1] = {&ec};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().supported != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateEolSupported: expected supported=1\n");
+    return false;
+  }
+  const auto& r = deck.At(0);
+  if (r.family != lg::RuleFamily::EolSpacing
+      || r.coverage != lg::RuleCoverage::Supported) {
+    std::fprintf(stderr, "FAIL TestTranslateEolSupported: shape\n");
+    return false;
+  }
+  const auto* cfg = std::get_if<lg::EolSpacingConfig>(&r.params);
+  if (cfg == nullptr || cfg->eol_width_threshold != 40 || cfg->eol_spacing != 20
+      || cfg->eol_within != 8) {
+    std::fprintf(stderr, "FAIL TestTranslateEolSupported: params\n");
+    return false;
+  }
+  if (r.halo != std::max(20, 8)) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateEolSupported: halo expected 20 got %d\n",
+                 r.halo);
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateEolWithParallelEdgeIsFallback()
+{
+  drt::frSpacingEndOfLineConstraint ec;
+  ec.setMinSpacing(20);
+  ec.setEolWidth(40);
+  ec.setEolWithin(8);
+  ec.setParSpace(10);   // activates parallel-edge condition
+  ec.setParWithin(5);
+  const drt::frConstraint* in[1] = {&ec};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().fallback != 1) {
+    std::fprintf(
+        stderr,
+        "FAIL TestTranslateEolWithParallelEdgeIsFallback: expected fallback=1, "
+        "got %zu\n",
+        deck.GetCoverage().fallback);
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateCutSpacingMinimal()
+{
+  drt::frCutSpacingConstraint cc(/*cutSpacing*/ 30,
+                                 /*centerToCenter*/ false,
+                                 /*sameNet*/ false,
+                                 /*secondLayerName*/ {},
+                                 /*stack*/ false,
+                                 /*adjacentCuts*/ -1,
+                                 /*cutWithin*/ -1,
+                                 /*isExceptSamePGNet*/ false,
+                                 /*isParallelOverlap*/ false,
+                                 /*cutArea*/ -1);
+  const drt::frConstraint* in[1] = {&cc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().supported != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateCutSpacingMinimal: expected supported=1\n");
+    return false;
+  }
+  const auto& r = deck.At(0);
+  const auto* cfg = std::get_if<lg::CutSpacingConfig>(&r.params);
+  if (cfg == nullptr || cfg->min_spacing != 30 || r.halo != 30) {
+    std::fprintf(stderr, "FAIL TestTranslateCutSpacingMinimal: params/halo\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateCutSpacingExtendedIsFallback()
+{
+  // adjacentCuts > -1 activates the extended ADJACENTCUTS path.
+  drt::frCutSpacingConstraint cc(/*cutSpacing*/ 30,
+                                 /*centerToCenter*/ false,
+                                 /*sameNet*/ false,
+                                 /*secondLayerName*/ {},
+                                 /*stack*/ false,
+                                 /*adjacentCuts*/ 3,
+                                 /*cutWithin*/ 50,
+                                 /*isExceptSamePGNet*/ false,
+                                 /*isParallelOverlap*/ false,
+                                 /*cutArea*/ -1);
+  const drt::frConstraint* in[1] = {&cc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().fallback != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateCutSpacingExtendedIsFallback: expected "
+                 "fallback=1, got %zu\n",
+                 deck.GetCoverage().fallback);
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateUnknownIsUnsupported()
+{
+  // frMinWidthConstraint isn't in any of our families.
+  drt::frMinWidthConstraint mw;
+  const drt::frConstraint* in[1] = {&mw};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+  if (deck.GetCoverage().unsupported != 1 || deck.Size() != 0) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateUnknownIsUnsupported: (unsup=%zu, "
+                 "deck.Size=%zu)\n",
+                 deck.GetCoverage().unsupported,
+                 deck.Size());
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateBatchCoverageMix()
+{
+  drt::frShortConstraint sc;
+  drt::frSpacingConstraint sp(40);
+  drt::frSpacingSamenetConstraint sn(50, false);  // Fallback
+  drt::frMinWidthConstraint mw;                   // Unsupported
+  const drt::frConstraint* in[4] = {&sc, &sp, &sn, &mw};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 4);
+  const auto cov = deck.GetCoverage();
+  if (cov.total_input != 4 || cov.supported != 2 || cov.fallback != 1
+      || cov.unsupported != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateBatchCoverageMix: (total=%zu, sup=%zu, "
+                 "fb=%zu, unsup=%zu)\n",
+                 cov.total_input,
+                 cov.supported,
+                 cov.fallback,
+                 cov.unsupported);
+    return false;
+  }
+  // Materialize: only the 2 Supported should appear.
+  if (deck.ToRuleEntries().size() != 2) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateBatchCoverageMix: ToRuleEntries=%zu "
+                 "(expected 2)\n",
+                 deck.ToRuleEntries().size());
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateThenOracleEvaluate()
+{
+  // End-to-end: translate real upstream constraints, hand them to the
+  // oracle, verify the resulting verdict on a tiny synthetic clip.
+  drt::frShortConstraint sc;
+  drt::frSpacingConstraint sp(50);
+  const drt::frConstraint* in[2] = {&sc, &sp};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 2);
+  auto entries = deck.ToRuleEntries();
+  if (entries.size() != 2) {
+    std::fprintf(
+        stderr,
+        "FAIL TestTranslateThenOracleEvaluate: expected 2 entries, got %zu\n",
+        entries.size());
+    return false;
+  }
+
+  lg::CpuDrcOracle oracle;
+  oracle.SetRules(entries.data(), entries.size());
+
+  // Two shapes on layer 1 different nets, 30 dbu apart in x: should
+  // violate the spacing rule (50 > 30) but not the short rule.
+  std::vector<lg::Shape> cands{{0, 0, 10, 10, 1, 100}};
+  std::vector<lg::Shape> context{{40, 0, 50, 10, 1, 200}};
+  std::vector<lg::Verdict> verdicts(1);
+  oracle.Evaluate(cands.data(), 1, context.data(), 1, verdicts.data());
+  if (verdicts[0].legal) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateThenOracleEvaluate: spacing 30<50 should "
+                 "violate\n");
+    return false;
+  }
+  const auto prl_bit = static_cast<std::uint16_t>(
+      1u << static_cast<std::uint8_t>(lg::RuleType::PrlSpacing));
+  const auto short_bit = static_cast<std::uint16_t>(
+      1u << static_cast<std::uint8_t>(lg::RuleType::MetalShort));
+  if ((verdicts[0].triggered_rules & prl_bit) == 0) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateThenOracleEvaluate: PrlSpacing bit not "
+                 "set, mask=%u\n",
+                 verdicts[0].triggered_rules);
+    return false;
+  }
+  if (verdicts[0].triggered_rules & short_bit) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateThenOracleEvaluate: MetalShort bit "
+                 "spuriously set on non-overlapping pair\n");
     return false;
   }
   return true;
@@ -794,12 +1077,52 @@ int main()
   std::printf(
       "PASS TestRuleDeckToRuleEntriesRoundTrip (oracle drives "
       "materialized entries)\n");
-  if (!TestFlexConstraintTranslatorStub()) {
+  if (!TestFlexConstraintTranslatorNullsAreUnsupported()) {
+    return 1;
+  }
+  std::printf("PASS TestFlexConstraintTranslatorNullsAreUnsupported\n");
+  if (!TestTranslateShort()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateShort\n");
+  if (!TestTranslateSpacing()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateSpacing\n");
+  if (!TestTranslateSpacingSamenetIsFallback()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateSpacingSamenetIsFallback\n");
+  if (!TestTranslateEolSupported()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateEolSupported\n");
+  if (!TestTranslateEolWithParallelEdgeIsFallback()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateEolWithParallelEdgeIsFallback\n");
+  if (!TestTranslateCutSpacingMinimal()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateCutSpacingMinimal\n");
+  if (!TestTranslateCutSpacingExtendedIsFallback()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateCutSpacingExtendedIsFallback\n");
+  if (!TestTranslateUnknownIsUnsupported()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateUnknownIsUnsupported\n");
+  if (!TestTranslateBatchCoverageMix()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateBatchCoverageMix (4 inputs across all 3 coverages)\n");
+  if (!TestTranslateThenOracleEvaluate()) {
     return 1;
   }
   std::printf(
-      "PASS TestFlexConstraintTranslatorStub (preflight: empty deck, "
-      "all-unsupported accounting)\n");
+      "PASS TestTranslateThenOracleEvaluate (real upstream -> normalized "
+      "-> oracle verdict)\n");
 
   const BenchOut b = BenchSweepLine(2048, 2048, 20);
   const double avoid_ratio = b.pairs_admitted == 0
