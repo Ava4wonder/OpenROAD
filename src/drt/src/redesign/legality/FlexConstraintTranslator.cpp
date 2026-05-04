@@ -197,7 +197,10 @@ std::optional<NormalizedRule> FlexConstraintTranslator::TranslateOne(
   }
   NormalizedRule& rule = sem.rule;
 
-  // Layer attribution: discovered_layer wins when present.
+  // Layer attribution policy: discovered_layer WINS when present.
+  // Object-layer is consulted only as fallback when discovered is null.
+  // Conflicts are resolved in favor of discovered and counted via
+  // LayerConflictsSeen() so audit can flag the disagreement.
   ::drt::frLayer* obj_layer = c->getLayer();
   if (discovered_layer != nullptr) {
     if (obj_layer != nullptr && obj_layer != discovered_layer) {

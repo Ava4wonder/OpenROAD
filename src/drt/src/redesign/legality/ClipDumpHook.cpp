@@ -192,9 +192,10 @@ void ClipDumpHook::EnsureRuleDeckDumped(const ::drt::frTechObject* tech)
       const auto cov = deck.GetCoverage();
       std::fprintf(
           stderr,
-          "[drt::redesign] ruledeck dump: path=%s pid=%u layers_walked=%u "
-          "constraints_seen=%u  cov(total=%zu sup=%zu sup_explicit=%zu "
-          "sup_unknown=%zu fb=%zu unsup=%zu)  per_type={",
+          "[drt::redesign] ruledeck dump: path=%s pid=%u layer-attrib-"
+          "policy=discovered_wins layers_walked=%u constraints_seen=%u  "
+          "cov(total=%zu sup=%zu sup_explicit=%zu sup_unknown=%zu fb=%zu "
+          "unsup=%zu)  per_type={",
           ruledeck_path.c_str(),
           prov.pid,
           prov.layers_walked,
