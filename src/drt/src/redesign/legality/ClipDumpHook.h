@@ -91,6 +91,11 @@ class ClipDumpHook
   const std::string& PdkHint() const { return pdk_hint_; }
   std::uint64_t NextClipId() { return next_clip_id_.fetch_add(1u); }
 
+  // Process-local session identifier (currently the PID). Stored in
+  // both ClipMeta.session_id and RuleDeckProvenance.session_id so the
+  // offline audit can join the two artifact families.
+  std::uint64_t SessionId() const noexcept { return session_id_; }
+
   // Offer a record. Internally:
   //   1. Compute bucket key.
   //   2. Pass to BucketedReservoir::Offer (locked under mu_).
