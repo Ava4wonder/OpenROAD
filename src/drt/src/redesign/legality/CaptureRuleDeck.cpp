@@ -9,6 +9,7 @@
 
 #include "CaptureRuleDeck.h"
 
+#include <utility>
 #include <vector>
 
 #include "FlexConstraintTranslator.h"
@@ -38,69 +39,73 @@ RuleDeck CaptureRuleDeck(const ::drt::frTechObject* tech,
   if (tech == nullptr) {
     return deck;
   }
+  FlexConstraintTranslator t;
 
-  std::vector<const ::drt::frConstraint*> all;
-  for (const auto& layer : tech->getLayers()) {
+  // Per-layer translation so the discovered layer pointer flows into
+  // the translator's attribution contract. The discovered layer is the
+  // authoritative source; the object-stored layer (when populated) is
+  // a fallback. See FlexConstraintTranslator::TranslateOne for the
+  // contract details.
+  auto handle = [&](const ::drt::frConstraint* c,
+                    const ::drt::frLayer* discovered_layer) {
+    AccountConstraint(c, counters);
+    auto opt = t.TranslateOne(c, discovered_layer);
+    if (opt.has_value()) {
+      deck.Add(*opt);
+    } else {
+      deck.AddUnsupported();
+    }
+  };
+
+  for (const auto& layer_uptr : tech->getLayers()) {
+    const ::drt::frLayer* lp = layer_uptr.get();
     if (counters != nullptr) {
       ++counters->layers_walked;
     }
 
-    // Single-pointer accessors. nullptr-safe.
-    if (auto* c = layer->getShortConstraint()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    // Single-pointer accessors.
+    if (auto* c = layer_uptr->getShortConstraint()) {
+      handle(c, lp);
     }
-    if (auto* c = layer->getMinSpacing()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    if (auto* c = layer_uptr->getMinSpacing()) {
+      handle(c, lp);
     }
-    if (auto* c = layer->getSpacingSamenet()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    if (auto* c = layer_uptr->getSpacingSamenet()) {
+      handle(c, lp);
     }
-    if (auto* c = layer->getSpacingTableInfluence()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    if (auto* c = layer_uptr->getSpacingTableInfluence()) {
+      handle(c, lp);
     }
 
     // Vector accessors.
-    for (auto* c : layer->getEolSpacing()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c : layer_uptr->getEolSpacing()) {
+      handle(c, lp);
     }
-    for (auto* c : layer->getCutSpacing(/*samenet=*/false)) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c : layer_uptr->getCutSpacing(/*samenet=*/false)) {
+      handle(c, lp);
     }
-    for (auto* c : layer->getCutSpacing(/*samenet=*/true)) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c : layer_uptr->getCutSpacing(/*samenet=*/true)) {
+      handle(c, lp);
     }
-    if (layer->hasLef58SpacingEndOfLineConstraints()) {
-      for (auto* c : layer->getLef58SpacingEndOfLineConstraints()) {
-        AccountConstraint(c, counters);
-        all.push_back(c);
+    if (layer_uptr->hasLef58SpacingEndOfLineConstraints()) {
+      for (auto* c : layer_uptr->getLef58SpacingEndOfLineConstraints()) {
+        handle(c, lp);
       }
     }
-    for (auto* c : layer->getLef58CutSpacingConstraints(/*samenet=*/false)) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c :
+         layer_uptr->getLef58CutSpacingConstraints(/*samenet=*/false)) {
+      handle(c, lp);
     }
-    for (auto* c : layer->getLef58CutSpacingConstraints(/*samenet=*/true)) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c :
+         layer_uptr->getLef58CutSpacingConstraints(/*samenet=*/true)) {
+      handle(c, lp);
     }
-    for (auto* c : layer->getSpacingRangeConstraints()) {
-      AccountConstraint(c, counters);
-      all.push_back(c);
+    for (auto* c : layer_uptr->getSpacingRangeConstraints()) {
+      handle(c, lp);
     }
   }
 
-  // Hand the flat vector to the translator. Provenance counters above
-  // describe traversal; deck.GetCoverage() will describe translation
-  // outcomes; both get serialized so audit can distinguish them.
-  FlexConstraintTranslator t;
-  return t.Translate(all.data(), all.size());
+  return deck;
 }
 
 }  // namespace drt::redesign::legality

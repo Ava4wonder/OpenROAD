@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, The OpenROAD Authors
 //
-// P2.2.d — FlexConstraint -> NormalizedRule translation. The only file
-// in the legality/ tree that includes upstream constraint headers; this
-// is the abstraction boundary the user explicitly required.
+// P2.2.d / P2.2.e.2.b.1 — FlexConstraint -> NormalizedRule translation.
+// The only file in the legality/ tree that includes upstream constraint
+// headers; this is the abstraction boundary the user explicitly
+// required.
 //
 // See GcWorkerClipBuilder.cpp top-of-file for the bridge-file
 // conventions that apply here as well (include placement, `::drt::`
@@ -12,6 +13,8 @@
 #include "FlexConstraintTranslator.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 
 #include "db/tech/frConstraint.h"
 #include "db/tech/frLayer.h"
@@ -21,101 +24,71 @@ namespace drt::redesign::legality {
 
 namespace {
 
-// Outcome of translating ONE upstream constraint.
-struct OneResult
+std::atomic<std::uint64_t> g_layer_conflicts{0};
+
+// Outcome of deriving family + params + halo from one constraint's
+// SUBCLASS only. Layer attribution is filled in by the caller per the
+// TranslateOne contract.
+struct SemanticResult
 {
-  bool produced_rule = false;  // false => caller calls AddUnsupported()
+  bool recognized = false;  // false => caller should AddUnsupported
   NormalizedRule rule;
 };
 
-// Pull layer info out of an upstream constraint via the public
-// frConstraint::getLayer() accessor. Sets layer_filter + layer_knownness
-// in-place. If the upstream binding is absent (constraint not yet
-// attached to a layer, e.g. a freshly-constructed test fixture), we
-// stay Unknown rather than fabricate a layer number.
-void PopulateLayer(NormalizedRule& nr, const drt::frConstraint* c)
+SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
 {
-  drt::frLayer* layer = c->getLayer();
-  if (layer == nullptr) {
-    nr.layer_filter = std::nullopt;
-    nr.layer_knownness = LayerKnownness::Unknown;
-    return;
-  }
-  nr.layer_filter
-      = static_cast<std::int16_t>(layer->getLayerNum());
-  nr.layer_knownness = LayerKnownness::Explicit;
-}
-
-// Tag literals are static-storage; NormalizedRule.tag is std::string and
-// owns its copy.
-OneResult TranslateOne(const drt::frConstraint* c)
-{
-  OneResult out;
+  SemanticResult out;
   if (c == nullptr) {
-    out.rule.tag = "null";
-    return out;  // counts as Unsupported
+    return out;
   }
-
-  using Type = drt::frConstraintTypeEnum;
+  using Type = ::drt::frConstraintTypeEnum;
 
   switch (c->typeId()) {
-    // --- MetalShort: same-layer different-net AABB overlap ----------
     case Type::frcShortConstraint: {
       out.rule.family = RuleFamily::MetalShort;
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = MetalShortConfig{};
       out.rule.halo = 0;
-      PopulateLayer(out.rule, c);
       out.rule.tag = "frShortConstraint";
-      out.produced_rule = true;
+      out.recognized = true;
       return out;
     }
-
-    // --- PrlSpacing: basic min-spacing rule ------------------------
     case Type::frcSpacingConstraint: {
-      const auto* sc = static_cast<const drt::frSpacingConstraint*>(c);
+      const auto* sc = static_cast<const ::drt::frSpacingConstraint*>(c);
       const auto min_sp = static_cast<std::int32_t>(sc->getMinSpacing());
       out.rule.family = RuleFamily::PrlSpacing;
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = PrlSpacingConfig{min_sp, 0};
       out.rule.halo = min_sp;
-      PopulateLayer(out.rule, c);
       out.rule.tag = "frSpacingConstraint";
-      out.produced_rule = true;
+      out.recognized = true;
       return out;
     }
-
-    // --- EolSpacing: simple eolWidth/eolWithin/spacing tuple --------
     case Type::frcSpacingEndOfLineConstraint: {
       const auto* ec
-          = static_cast<const drt::frSpacingEndOfLineConstraint*>(c);
+          = static_cast<const ::drt::frSpacingEndOfLineConstraint*>(c);
       out.rule.family = RuleFamily::EolSpacing;
-      // Out-of-scope: parallel-edge condition or two-edges condition.
-      // Both broaden the rule into territory the simple predicate does
-      // not model; mark Fallback so the upstream exact checker handles
-      // affected geometry.
       if (ec->hasParallelEdge() || ec->hasTwoEdges()) {
         out.rule.coverage = RuleCoverage::Fallback;
         out.rule.tag = "frSpacingEndOfLineConstraint(parallel/twoEdges)";
-        out.produced_rule = true;
+        out.recognized = true;
         return out;
       }
       const auto eol_width = static_cast<std::int32_t>(ec->getEolWidth());
-      const auto eol_within = static_cast<std::int32_t>(ec->getEolWithin());
-      const auto eol_spacing = static_cast<std::int32_t>(ec->getMinSpacing());
+      const auto eol_within
+          = static_cast<std::int32_t>(ec->getEolWithin());
+      const auto eol_spacing
+          = static_cast<std::int32_t>(ec->getMinSpacing());
       EolSpacingConfig cfg{eol_width, eol_spacing, eol_within};
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = std::max(cfg.eol_spacing, cfg.eol_within);
-      PopulateLayer(out.rule, c);
       out.rule.tag = "frSpacingEndOfLineConstraint";
-      out.produced_rule = true;
+      out.recognized = true;
       return out;
     }
-
-    // --- CutSpacing: minimal edge-to-edge variant ------------------
     case Type::frcCutSpacingConstraint: {
-      const auto* cc = static_cast<const drt::frCutSpacingConstraint*>(c);
+      const auto* cc = static_cast<const ::drt::frCutSpacingConstraint*>(c);
       out.rule.family = RuleFamily::CutSpacing;
       const bool extended
           = cc->isAdjacentCuts() || cc->hasSecondLayer()
@@ -125,24 +98,19 @@ OneResult TranslateOne(const drt::frConstraint* c)
       if (extended) {
         out.rule.coverage = RuleCoverage::Fallback;
         out.rule.tag = "frCutSpacingConstraint(extended)";
-        out.produced_rule = true;
+        out.recognized = true;
         return out;
       }
       CutSpacingConfig cfg{static_cast<std::int32_t>(cc->getCutSpacing())};
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = cfg.min_spacing;
-      PopulateLayer(out.rule, c);
       out.rule.tag = "frCutSpacingConstraint";
-      out.produced_rule = true;
+      out.recognized = true;
       return out;
     }
 
-    // --- Recognized as one of our families but explicitly out of scope.
-    //     We add to the deck (with Fallback coverage) so the deck
-    //     reflects "the design has rules of this family that we declined
-    //     to evaluate" — distinct from "we didn't recognize the rule
-    //     at all" (Unsupported, counter-only).
+    // Recognized as one of our families but explicitly out of scope.
     case Type::frcSpacingSamenetConstraint:
       out.rule.family = RuleFamily::PrlSpacing;
       out.rule.tag = "frSpacingSamenetConstraint";
@@ -185,28 +153,79 @@ OneResult TranslateOne(const drt::frConstraint* c)
       goto fallback;
 
     default:
-      // Unrecognized: not in any of our four families. Counter-only.
-      out.rule.tag = "unrecognized";
-      return out;
+      // Unrecognized; not in any of our four families.
+      return out;  // recognized=false
   }
 
 fallback:
   out.rule.coverage = RuleCoverage::Fallback;
-  out.produced_rule = true;
+  out.recognized = true;
   return out;
+}
+
+void NoteLayerConflict(const ::drt::frLayer* discovered,
+                       const ::drt::frLayer* obj)
+{
+  const auto count = g_layer_conflicts.fetch_add(1) + 1;
+  // Warn on the first few; silence afterwards to avoid log spam.
+  if (count <= 5) {
+    std::fprintf(
+        stderr,
+        "[drt::redesign] WARNING traversal-context layer conflict #%llu: "
+        "discovered layer #%d but constraint->getLayer() reports #%d. "
+        "Discovered layer is preferred per attribution contract.\n",
+        static_cast<unsigned long long>(count),
+        discovered != nullptr ? discovered->getLayerNum() : -1,
+        obj != nullptr ? obj->getLayerNum() : -1);
+  }
 }
 
 }  // namespace
 
+std::uint64_t FlexConstraintTranslator::LayerConflictsSeen()
+{
+  return g_layer_conflicts.load();
+}
+
+std::optional<NormalizedRule> FlexConstraintTranslator::TranslateOne(
+    const ::drt::frConstraint* c,
+    const ::drt::frLayer* discovered_layer)
+{
+  auto sem = DeriveSemantics(c);
+  if (!sem.recognized) {
+    return std::nullopt;
+  }
+  NormalizedRule& rule = sem.rule;
+
+  // Layer attribution: discovered_layer wins when present.
+  ::drt::frLayer* obj_layer = c->getLayer();
+  if (discovered_layer != nullptr) {
+    if (obj_layer != nullptr && obj_layer != discovered_layer) {
+      NoteLayerConflict(discovered_layer, obj_layer);
+    }
+    rule.layer_filter
+        = static_cast<std::int16_t>(discovered_layer->getLayerNum());
+    rule.layer_knownness = LayerKnownness::Explicit;
+  } else if (obj_layer != nullptr) {
+    rule.layer_filter
+        = static_cast<std::int16_t>(obj_layer->getLayerNum());
+    rule.layer_knownness = LayerKnownness::Explicit;
+  } else {
+    rule.layer_filter = std::nullopt;
+    rule.layer_knownness = LayerKnownness::Unknown;
+  }
+  return rule;
+}
+
 RuleDeck FlexConstraintTranslator::Translate(
-    const drt::frConstraint* const* upstream,
+    const ::drt::frConstraint* const* upstream,
     std::size_t upstream_count)
 {
   RuleDeck deck;
   for (std::size_t i = 0; i < upstream_count; ++i) {
-    auto r = TranslateOne(upstream[i]);
-    if (r.produced_rule) {
-      deck.Add(r.rule);
+    auto opt = TranslateOne(upstream[i], /*discovered_layer=*/nullptr);
+    if (opt.has_value()) {
+      deck.Add(*opt);
     } else {
       deck.AddUnsupported();
     }

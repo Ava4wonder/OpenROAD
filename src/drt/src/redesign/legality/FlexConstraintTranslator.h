@@ -9,13 +9,17 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 
+#include "NormalizedRule.h"
 #include "RuleDeck.h"
 
-// Forward-declared upstream type. Including the real frConstraint.h here
-// would defeat the abstraction boundary.
+// Forward-declared upstream types. Including the real frConstraint.h /
+// frLayer.h here would defeat the abstraction boundary.
 namespace drt {
 class frConstraint;
+class frLayer;
 }  // namespace drt
 
 namespace drt::redesign::legality {
@@ -51,17 +55,56 @@ namespace drt::redesign::legality {
 class FlexConstraintTranslator
 {
  public:
-  // Translate the supplied upstream constraint pointers. The translator
-  // never modifies upstream state. The returned RuleDeck owns its
-  // NormalizedRule storage; param pointers handed to the oracle remain
-  // valid until the next call into this RuleDeck.
+  // Translate one upstream constraint.
   //
-  // P2.2.d preflight stub: this implementation returns an empty deck,
-  // marks every input as Unsupported (so coverage accounting still
-  // reflects the input population), and never inspects the constraint
-  // pointers. The real wiring lands in P2.2.d proper.
+  // RETURN:
+  //   nullopt — constraint is unrecognized (none of our 4 families).
+  //             Caller should account for it via RuleDeck::AddUnsupported.
+  //   set     — populated NormalizedRule with family / coverage / params
+  //             derived from the frConstraint subclass + layer
+  //             attribution per the rules below.
+  //
+  // LAYER ATTRIBUTION CONTRACT (P2.2.e.2.b.1):
+  //   `discovered_layer` is the authoritative layer container through
+  //   which the caller reached this constraint during traversal. When
+  //   non-null:
+  //     - layer_filter      <- discovered_layer->getLayerNum()
+  //     - layer_knownness   <- Explicit
+  //   When null:
+  //     - if constraint->getLayer() is non-null, use that as a fallback
+  //       (Explicit, with the object-stored layer's number).
+  //     - else layer_filter <- nullopt; layer_knownness <- Unknown.
+  //
+  //   This ordering reflects the upstream reality that
+  //   frConstraint::layer_ is set inconsistently for constraints stored
+  //   in frLayer's per-family collections (setLayer is not always
+  //   called by upstream parsers). The traversal-context layer is the
+  //   defensible truth source; the object-layer accessor is fallback.
+  //
+  // CONFLICT DETECTION:
+  //   When both discovered_layer and constraint->getLayer() are
+  //   non-null AND disagree, we prefer discovered_layer per the
+  //   contract above, but increment a static counter exposed via
+  //   LayerConflictsSeen() so audit can flag the disagreement. A
+  //   non-zero counter at end-of-process is a signal that traversal
+  //   assumptions or upstream metadata may be inconsistent.
+  //
+  // The constraint's frConstraint subclass continues to determine rule
+  // family + params; this method changes ONLY attribution.
+  std::optional<NormalizedRule> TranslateOne(
+      const drt::frConstraint* c,
+      const drt::frLayer* discovered_layer = nullptr);
+
+  // Bulk translate. Used when the caller has no traversal context
+  // (object-stored layer is the only attribution source). Internally
+  // dispatches to TranslateOne(c, nullptr) per element.
   RuleDeck Translate(const drt::frConstraint* const* upstream,
                      std::size_t upstream_count);
+
+  // Process-wide diagnostic: number of times TranslateOne saw a
+  // (discovered_layer, constraint->getLayer()) disagreement. Honest
+  // reporting metric per the conflict-detection contract.
+  static std::uint64_t LayerConflictsSeen();
 };
 
 }  // namespace drt::redesign::legality

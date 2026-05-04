@@ -752,6 +752,122 @@ bool TestTranslateShortWithExplicitLayer()
   return true;
 }
 
+// ---------- P2.2.e.2.b.1 — TranslateOne with discovered_layer ----------
+
+bool TestTranslateOneObjectLayerOnly()
+{
+  // No discovered_layer passed; constraint has setLayer.
+  drt::frLayer m3;
+  m3.setLayerNum(3);
+  drt::frShortConstraint sc;
+  sc.setLayer(&m3);
+  lg::FlexConstraintTranslator t;
+  auto opt = t.TranslateOne(&sc, /*discovered_layer=*/nullptr);
+  if (!opt.has_value()) {
+    std::fprintf(stderr, "FAIL TestTranslateOneObjectLayerOnly: nullopt\n");
+    return false;
+  }
+  if (opt->layer_knownness != lg::LayerKnownness::Explicit
+      || !opt->layer_filter.has_value() || opt->layer_filter.value() != 3) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateOneObjectLayerOnly: expected (3, Explicit)\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateOneDiscoveredLayerOnly()
+{
+  // No setLayer on constraint; discovered_layer non-null. Discovered wins.
+  drt::frLayer m5;
+  m5.setLayerNum(5);
+  drt::frShortConstraint sc;  // intentionally no setLayer
+  lg::FlexConstraintTranslator t;
+  auto opt = t.TranslateOne(&sc, &m5);
+  if (!opt.has_value()) {
+    std::fprintf(stderr, "FAIL TestTranslateOneDiscoveredLayerOnly: nullopt\n");
+    return false;
+  }
+  if (opt->layer_knownness != lg::LayerKnownness::Explicit
+      || !opt->layer_filter.has_value() || opt->layer_filter.value() != 5) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateOneDiscoveredLayerOnly: expected "
+                 "(5, Explicit) got (%d, %d)\n",
+                 opt->layer_filter.value_or(-1),
+                 static_cast<int>(opt->layer_knownness));
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateOneBothAgree()
+{
+  // Both set, same layer pointer. Should NOT increment conflict counter.
+  drt::frLayer m7;
+  m7.setLayerNum(7);
+  drt::frShortConstraint sc;
+  sc.setLayer(&m7);
+  const std::uint64_t before
+      = lg::FlexConstraintTranslator::LayerConflictsSeen();
+  lg::FlexConstraintTranslator t;
+  auto opt = t.TranslateOne(&sc, &m7);
+  if (!opt.has_value() || opt->layer_filter.value_or(-1) != 7) {
+    std::fprintf(stderr, "FAIL TestTranslateOneBothAgree: layer mismatch\n");
+    return false;
+  }
+  const std::uint64_t after
+      = lg::FlexConstraintTranslator::LayerConflictsSeen();
+  if (after != before) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateOneBothAgree: conflict counter "
+                 "incremented from %llu to %llu when layers agree\n",
+                 (unsigned long long) before,
+                 (unsigned long long) after);
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateOneConflictDetected()
+{
+  // setLayer to one layer, pass DIFFERENT discovered_layer. Discovered
+  // wins (per contract); counter increments.
+  drt::frLayer m1;
+  m1.setLayerNum(1);
+  drt::frLayer m2;
+  m2.setLayerNum(2);
+  drt::frShortConstraint sc;
+  sc.setLayer(&m1);  // object says layer 1
+
+  const std::uint64_t before
+      = lg::FlexConstraintTranslator::LayerConflictsSeen();
+  lg::FlexConstraintTranslator t;
+  auto opt = t.TranslateOne(&sc, &m2);  // discovered says layer 2
+  if (!opt.has_value()) {
+    std::fprintf(stderr, "FAIL TestTranslateOneConflictDetected: nullopt\n");
+    return false;
+  }
+  // Discovered wins.
+  if (opt->layer_filter.value_or(-1) != 2) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateOneConflictDetected: expected discovered "
+                 "(2) to win, got %d\n",
+                 opt->layer_filter.value_or(-1));
+    return false;
+  }
+  const std::uint64_t after
+      = lg::FlexConstraintTranslator::LayerConflictsSeen();
+  if (after != before + 1) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateOneConflictDetected: counter expected "
+                 "%llu got %llu\n",
+                 (unsigned long long) (before + 1),
+                 (unsigned long long) after);
+    return false;
+  }
+  return true;
+}
+
 bool TestTranslateSpacing()
 {
   drt::frSpacingConstraint sc(75);
@@ -1727,6 +1843,25 @@ int main()
     return 1;
   }
   std::printf("PASS TestTranslateShortWithExplicitLayer\n");
+  if (!TestTranslateOneObjectLayerOnly()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateOneObjectLayerOnly\n");
+  if (!TestTranslateOneDiscoveredLayerOnly()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestTranslateOneDiscoveredLayerOnly (object null, discovered wins)\n");
+  if (!TestTranslateOneBothAgree()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestTranslateOneBothAgree (no conflict counter increment)\n");
+  if (!TestTranslateOneConflictDetected()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestTranslateOneConflictDetected (discovered wins, counter +1)\n");
   if (!TestTranslateSpacing()) {
     return 1;
   }
