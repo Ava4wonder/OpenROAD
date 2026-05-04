@@ -127,6 +127,7 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/legality/GcWorkerClipBuilder.cpp
       src/redesign/legality/RuleDeckDump.cpp
       src/redesign/legality/CaptureRuleDeck.cpp
+      src/redesign/legality/AuditReport.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
 
@@ -137,6 +138,10 @@ if(ENABLE_DRT_REDESIGN)
   add_executable(redesign_legality_test test/redesign_legality_test.cpp)
   target_link_libraries(redesign_legality_test PRIVATE drt_lib)
   target_include_directories(redesign_legality_test PRIVATE src)
+
+  add_executable(redesign_e2_audit test/redesign_e2_audit.cpp)
+  target_link_libraries(redesign_e2_audit PRIVATE drt_lib)
+  target_include_directories(redesign_e2_audit PRIVATE src)
 endif()
 
 target_sources(drt
