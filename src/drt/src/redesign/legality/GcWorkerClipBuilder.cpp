@@ -68,11 +68,13 @@ ClipRecord BuildClipRecord(
     ::drt::frLayerNum min_layer_num,
     ::drt::frLayerNum max_layer_num,
     std::uint64_t clip_id,
+    std::uint64_t session_id,
     const std::string& design,
     const std::string& pdk)
 {
   ClipRecord rec;
   rec.meta.clip_id = clip_id;
+  rec.meta.session_id = session_id;
   rec.meta.design = design;
   rec.meta.pdk = pdk;
   rec.meta.tech_hash = 0;

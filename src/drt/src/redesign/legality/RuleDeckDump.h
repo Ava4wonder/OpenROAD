@@ -53,21 +53,30 @@
 namespace drt::redesign::legality {
 
 inline constexpr std::uint32_t kRuleDeckDumpMagic = 0x50444452u;  // 'RDDP'
-// v1.1 (0x00010001): adds provenance block between header and coverage.
-//   v1.0 readers reject v1.1 files via the exact-version check; v1.1
-//   readers cannot read v1.0 files. Acceptable because our only v1.0
-//   producer was test-only (P2.2.e.2.a) and is now updated.
-inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010001u;
+// v1.1: adds provenance block between header and coverage.
+// v1.2 (0x00010002): adds session_id, design, pdk to provenance so the
+//   audit can join clip-dump and rule-deck artifacts on session_id and
+//   surface the design name uniformly across both sides.
+inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010002u;
 
 // Per amendment-derived requirements from P2.2.e.2.b review:
 // provenance lives INSIDE the file (not just in the filename) so audit
 // can be done on a moved file.
 struct RuleDeckProvenance
 {
+  // Process-local session identifier matching ClipMeta.session_id from
+  // the same FlexGCWorker hook. Audit joins on this. Currently
+  // populated as getpid().
+  std::uint64_t session_id = 0;
   // Bumped by FlexConstraintTranslator when its translation logic
   // changes meaningfully. Different from the file format version.
   std::uint32_t translator_version = 1;
   std::uint32_t pid = 0;
+  // Design + PDK names as supplied via DRT_DUMP_DESIGN / DRT_DUMP_PDK.
+  // Mirror the same fields in ClipMeta so audit shows one design key
+  // for both rule-deck and clip artifacts in the same session.
+  std::string design;
+  std::string pdk;
   // Unix epoch seconds at capture time. 0 if not set.
   std::int64_t capture_timestamp = 0;
   // Optional git SHAs (env-var supplied at process start). Empty when

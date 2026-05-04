@@ -26,25 +26,41 @@ const char* FamilyName(RuleFamily f)
   return "?";
 }
 
-PerDesignStats& EnsureDesign(AuditReport* out, const std::string& design)
+SessionStats& EnsureSession(AuditReport* out, std::uint64_t session_id)
 {
-  auto& s = out->per_design[design];
-  if (s.design.empty()) {
-    s.design = design;
+  auto& s = out->per_session[session_id];
+  if (s.session_id == 0) {
+    s.session_id = session_id;
   }
   return s;
+}
+
+const char* JoinStatusName(JoinStatus js)
+{
+  switch (js) {
+    case JoinStatus::Joined:
+      return "joined";
+    case JoinStatus::RuleDeckOnly:
+      return "ruledeck-only";
+    case JoinStatus::ClipsOnly:
+      return "clips-only";
+  }
+  return "?";
 }
 
 }  // namespace
 
 void IngestRuleDeck(const RuleDeck& deck,
-                    const RuleDeckProvenance& /*prov*/,
-                    const std::string& design_hint,
+                    const RuleDeckProvenance& prov,
                     AuditReport* out)
 {
-  const std::string key
-      = design_hint.empty() ? std::string("(unknown)") : design_hint;
-  PerDesignStats& s = EnsureDesign(out, key);
+  SessionStats& s = EnsureSession(out, prov.session_id);
+  if (s.design.empty()) {
+    s.design = prov.design;
+  }
+  if (s.pdk.empty()) {
+    s.pdk = prov.pdk;
+  }
   const auto cov = deck.GetCoverage();
   s.total_input += cov.total_input;
   s.supported += cov.supported;
@@ -82,14 +98,16 @@ void IngestRuleDeck(const RuleDeck& deck,
 }
 
 void IngestClipRecords(const std::vector<ClipRecord>& clips,
-                       const std::string& design_hint,
                        AuditReport* out)
 {
   for (const auto& c : clips) {
-    const std::string key = !c.meta.design.empty() ? c.meta.design
-                            : !design_hint.empty() ? design_hint
-                                                   : std::string("(unknown)");
-    PerDesignStats& s = EnsureDesign(out, key);
+    SessionStats& s = EnsureSession(out, c.meta.session_id);
+    if (s.design.empty()) {
+      s.design = c.meta.design;
+    }
+    if (s.pdk.empty()) {
+      s.pdk = c.meta.pdk;
+    }
     ++s.clips_seen;
     bool any_marker = false;
     for (const auto& l : c.labels) {
@@ -104,14 +122,49 @@ void IngestClipRecords(const std::vector<ClipRecord>& clips,
   }
 }
 
+void FinalizeJoinStatus(AuditReport* out)
+{
+  for (auto& [sid, s] : out->per_session) {
+    const bool has_ruledeck = (s.total_input != 0);
+    const bool has_clips = (s.clips_seen != 0);
+    if (has_ruledeck && has_clips) {
+      s.join_status = JoinStatus::Joined;
+    } else if (has_ruledeck) {
+      s.join_status = JoinStatus::RuleDeckOnly;
+    } else {
+      s.join_status = JoinStatus::ClipsOnly;
+    }
+  }
+}
+
 void RenderReport(const AuditReport& report, std::ostream& os)
 {
   os << "# Redesign E2 audit report\n";
   os << "# layer-attrib-policy=discovered_wins\n";
-  os << "# designs: " << report.designs() << "\n\n";
+  os << "# sessions: " << report.sessions() << "\n";
+  // Join-status summary up top.
+  std::size_t joined = 0, ruledeck_only = 0, clips_only = 0;
+  for (const auto& [sid, s] : report.per_session) {
+    switch (s.join_status) {
+      case JoinStatus::Joined:
+        ++joined;
+        break;
+      case JoinStatus::RuleDeckOnly:
+        ++ruledeck_only;
+        break;
+      case JoinStatus::ClipsOnly:
+        ++clips_only;
+        break;
+    }
+  }
+  os << "# join_status: joined=" << joined
+     << " ruledeck_only=" << ruledeck_only
+     << " clips_only=" << clips_only << "\n\n";
 
-  for (const auto& [design, s] : report.per_design) {
-    os << "## design: " << design << "\n";
+  for (const auto& [sid, s] : report.per_session) {
+    os << "## session " << sid << "  design=" << s.design
+       << "  pdk=" << s.pdk << "  join_status=" << JoinStatusName(s.join_status)
+       << "\n";
     os << "  rule-deck:\n";
     os << "    total_input        = " << s.total_input << "\n";
     os << "    supported          = " << s.supported << "\n";

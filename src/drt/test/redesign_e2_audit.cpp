@@ -40,9 +40,7 @@ bool EndsWith(const std::string& s, const std::string& suffix)
          && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-bool ProcessRuleDeckFile(const fs::path& path,
-                         const std::string& design_hint,
-                         lg::AuditReport* out)
+bool ProcessRuleDeckFile(const fs::path& path, lg::AuditReport* out)
 {
   std::ifstream is(path, std::ios::binary);
   if (!is.is_open()) {
@@ -58,13 +56,11 @@ bool ProcessRuleDeckFile(const fs::path& path,
     std::fprintf(stderr, "[audit] WARNING failed to parse %s\n", path.c_str());
     return false;
   }
-  lg::IngestRuleDeck(deck, prov, design_hint, out);
+  lg::IngestRuleDeck(deck, prov, out);
   return true;
 }
 
-bool ProcessClipDumpFile(const fs::path& path,
-                         const std::string& design_hint,
-                         lg::AuditReport* out)
+bool ProcessClipDumpFile(const fs::path& path, lg::AuditReport* out)
 {
   std::ifstream is(path, std::ios::binary);
   if (!is.is_open()) {
@@ -98,7 +94,7 @@ bool ProcessClipDumpFile(const fs::path& path,
     }
     clips.push_back(std::move(r));
   }
-  lg::IngestClipRecords(clips, design_hint, out);
+  lg::IngestClipRecords(clips, out);
   return true;
 }
 
@@ -158,18 +154,14 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  // Use the prefix as a fallback design hint when an individual file
-  // doesn't carry a design field. ClipMeta.design is preferred.
-  const std::string design_hint = prefix;
-
   lg::AuditReport report;
   for (const auto& p : ruledeck_files) {
-    ProcessRuleDeckFile(p, design_hint, &report);
+    ProcessRuleDeckFile(p, &report);
   }
   for (const auto& p : clip_files) {
-    ProcessClipDumpFile(p, design_hint, &report);
+    ProcessClipDumpFile(p, &report);
   }
-
+  lg::FinalizeJoinStatus(&report);
   lg::RenderReport(report, std::cout);
   return 0;
 }

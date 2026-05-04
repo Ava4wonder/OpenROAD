@@ -33,54 +33,63 @@ struct FamilyCellStats
   std::size_t fallback = 0;
 };
 
-struct PerDesignStats
-{
-  std::string design;  // ClipMeta.design or RuleDeckProvenance hint
+// Per-session join status. Each session is one openroad-process
+// FlexGCWorker run.
+enum class JoinStatus : std::uint8_t {
+  // Both .ruledeck and clip-dump files for this session were found
+  // and parsed.
+  Joined,
+  // Only the .ruledeck side was found (clip dump missing or empty).
+  RuleDeckOnly,
+  // Only the clip-dump side was found.
+  ClipsOnly,
+};
 
-  // From RuleDeck::Coverage (rolled up across all .ruledeck files for
-  // this design).
+struct SessionStats
+{
+  std::uint64_t session_id = 0;
+  std::string design;
+  std::string pdk;
+  JoinStatus join_status = JoinStatus::ClipsOnly;
+
+  // Rule-deck side.
   std::size_t total_input = 0;
   std::size_t supported = 0;
   std::size_t supported_explicit = 0;
   std::size_t supported_unknown = 0;
   std::size_t fallback = 0;
   std::size_t unsupported = 0;
-
-  // Sum of LayerConflictsSeen counters reported via provenance for
-  // every process. Currently we don't ship this counter into the file;
-  // see TODO in CollectAudit. Stays 0 until added.
   std::uint64_t layer_conflicts_seen = 0;
-
-  // Per-family breakdown.
   std::map<RuleFamily, FamilyCellStats> by_family;
-
-  // Layer set discovered in the rule deck (Explicit only).
   std::map<std::int16_t, std::size_t> rules_per_layer;
 
-  // Clip-side rollup (from clip-dump files for this design).
+  // Clip-side.
   std::size_t clips_seen = 0;
   std::size_t clips_marker_present = 0;
 };
 
 struct AuditReport
 {
-  std::map<std::string, PerDesignStats> per_design;
+  // Keyed by session_id (one entry per FlexGCWorker process).
+  std::map<std::uint64_t, SessionStats> per_session;
 
-  // Aggregate cross-design view, derived from per_design at
-  // serialization time.
-  std::size_t designs() const noexcept { return per_design.size(); }
+  std::size_t sessions() const noexcept { return per_session.size(); }
 };
 
-// Build/extend an AuditReport from one rule-deck dump.
+// Build/extend an AuditReport from one rule-deck dump. Joined into the
+// session keyed by prov.session_id.
 void IngestRuleDeck(const RuleDeck& deck,
                     const RuleDeckProvenance& prov,
-                    const std::string& design_hint,
                     AuditReport* out);
 
 // Build/extend an AuditReport from one clip-dump file's ClipRecords.
+// Each record carries its own session_id.
 void IngestClipRecords(const std::vector<ClipRecord>& clips,
-                       const std::string& design_hint,
                        AuditReport* out);
+
+// Mark sessions that received content from both sides as Joined; the
+// rest stay RuleDeckOnly or ClipsOnly. Idempotent.
+void FinalizeJoinStatus(AuditReport* out);
 
 // Render to a structured text report on the given stream.
 void RenderReport(const AuditReport& report, std::ostream& os);

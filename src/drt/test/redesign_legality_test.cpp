@@ -1151,7 +1151,8 @@ bool LabelsEqual(const lg::ProjectedUpstreamLabel& a,
 
 bool MetaEqual(const lg::ClipMeta& a, const lg::ClipMeta& b)
 {
-  return a.clip_id == b.clip_id && a.design == b.design && a.pdk == b.pdk
+  return a.clip_id == b.clip_id && a.session_id == b.session_id
+         && a.design == b.design && a.pdk == b.pdk
          && a.tech_hash == b.tech_hash
          && a.rule_deck_fingerprint == b.rule_deck_fingerprint
          && a.clip_x1 == b.clip_x1 && a.clip_y1 == b.clip_y1
@@ -1164,6 +1165,7 @@ lg::ClipRecord MakeSyntheticRecord()
 {
   lg::ClipRecord r;
   r.meta.clip_id = 0xDEADBEEFCAFEBABEull;
+  r.meta.session_id = 0x12345ull;
   r.meta.design = "asap7_gcd";
   r.meta.pdk = "asap7";
   r.meta.tech_hash = 0x0102030405060708ull;
@@ -1566,8 +1568,11 @@ bool TestRuleDeckDumpRoundTrip()
   original.AddUnsupported();
 
   lg::RuleDeckProvenance prov_in;
+  prov_in.session_id = 0xABCD12345ull;
   prov_in.translator_version = 7;
   prov_in.pid = 12345;
+  prov_in.design = "asap7_swerv";
+  prov_in.pdk = "asap7";
   prov_in.capture_timestamp = 1714500000;
   prov_in.openroad_git_sha = "abc123def4567890";
   prov_in.redesign_git_sha = "redes111";
@@ -1587,8 +1592,10 @@ bool TestRuleDeckDumpRoundTrip()
     return false;
   }
   // Provenance round-trip.
-  if (prov_out.translator_version != prov_in.translator_version
+  if (prov_out.session_id != prov_in.session_id
+      || prov_out.translator_version != prov_in.translator_version
       || prov_out.pid != prov_in.pid
+      || prov_out.design != prov_in.design || prov_out.pdk != prov_in.pdk
       || prov_out.capture_timestamp != prov_in.capture_timestamp
       || prov_out.openroad_git_sha != prov_in.openroad_git_sha
       || prov_out.redesign_git_sha != prov_in.redesign_git_sha

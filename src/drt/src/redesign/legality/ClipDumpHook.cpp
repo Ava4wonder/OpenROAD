@@ -111,6 +111,7 @@ ClipDumpHook::ClipDumpHook()
   per_bucket_cap_
       = static_cast<std::size_t>(EnvU64Or("DRT_DUMP_RESERVOIR", 64));
   seed_ = EnvU64Or("DRT_DUMP_SEED", 42);
+  session_id_ = static_cast<std::uint64_t>(::getpid());
   reservoir_ = std::make_unique<
       BucketedReservoir<ClipBucketKey, ClipRecord>>(per_bucket_cap_, seed_);
   active_ = true;
@@ -168,8 +169,11 @@ void ClipDumpHook::EnsureRuleDeckDumped(const ::drt::frTechObject* tech)
       RuleDeck deck = CaptureRuleDeck(tech, &cnt);
 
       RuleDeckProvenance prov;
+      prov.session_id = session_id_;
       prov.translator_version = 1;
       prov.pid = static_cast<std::uint32_t>(::getpid());
+      prov.design = design_hint_;
+      prov.pdk = pdk_hint_;
       prov.capture_timestamp = static_cast<std::int64_t>(std::time(nullptr));
       prov.openroad_git_sha = EnvOrEmpty("DRT_DUMP_OPENROAD_SHA");
       prov.redesign_git_sha = EnvOrEmpty("DRT_DUMP_REDESIGN_SHA");

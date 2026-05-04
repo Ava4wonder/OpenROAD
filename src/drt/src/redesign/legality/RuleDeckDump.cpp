@@ -141,8 +141,11 @@ void WriteRuleDeck(std::ostream& os,
   WriteLE<std::uint32_t>(os, kRuleDeckDumpMagic);
   WriteLE<std::uint32_t>(os, kRuleDeckDumpVersion);
   // Provenance block.
+  WriteLE<std::uint64_t>(os, prov.session_id);
   WriteLE<std::uint32_t>(os, prov.translator_version);
   WriteLE<std::uint32_t>(os, prov.pid);
+  WriteString(os, prov.design);
+  WriteString(os, prov.pdk);
   WriteLE<std::int64_t>(os, prov.capture_timestamp);
   WriteString(os, prov.openroad_git_sha);
   WriteString(os, prov.redesign_git_sha);
@@ -194,7 +197,9 @@ bool ReadRuleDeck(std::istream& is,
   }
   // Provenance block.
   RuleDeckProvenance prov;
-  if (!ReadLE(is, &prov.translator_version) || !ReadLE(is, &prov.pid)
+  if (!ReadLE(is, &prov.session_id)
+      || !ReadLE(is, &prov.translator_version) || !ReadLE(is, &prov.pid)
+      || !ReadString(is, &prov.design) || !ReadString(is, &prov.pdk)
       || !ReadLE(is, &prov.capture_timestamp)
       || !ReadString(is, &prov.openroad_git_sha)
       || !ReadString(is, &prov.redesign_git_sha)

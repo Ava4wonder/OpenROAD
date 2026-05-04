@@ -167,6 +167,7 @@ void WriteRecord(std::ostream& os, const ClipRecord& r)
   // typical run output (kB to MB).
   std::ostringstream body;
   WriteLE<std::uint64_t>(body, r.meta.clip_id);
+  WriteLE<std::uint64_t>(body, r.meta.session_id);
   WriteString(body, r.meta.design);
   WriteString(body, r.meta.pdk);
   WriteLE<std::uint64_t>(body, r.meta.tech_hash);
@@ -211,6 +212,9 @@ bool ReadRecord(std::istream& is, ClipRecord* out)
   }
 
   if (!ReadLE(is, &out->meta.clip_id)) {
+    return false;
+  }
+  if (!ReadLE(is, &out->meta.session_id)) {
     return false;
   }
   if (!ReadString(is, &out->meta.design)) {

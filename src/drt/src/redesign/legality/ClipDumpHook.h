@@ -125,6 +125,7 @@ class ClipDumpHook
   std::string pdk_hint_;
   std::size_t per_bucket_cap_ = 64;
   std::uint64_t seed_ = 42;
+  std::uint64_t session_id_ = 0;
   std::atomic<std::uint64_t> next_clip_id_{0};
   std::mutex mu_;
   std::unique_ptr<BucketedReservoir<ClipBucketKey, ClipRecord>> reservoir_;

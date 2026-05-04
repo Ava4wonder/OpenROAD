@@ -4234,6 +4234,7 @@ int FlexGCWorker::Impl::main()
             getMinLayerNum(),
             getMaxLayerNum(),
             hook.NextClipId(),
+            hook.SessionId(),
             hook.DesignHint(),
             hook.PdkHint());
         hook.Dump(std::move(rec));

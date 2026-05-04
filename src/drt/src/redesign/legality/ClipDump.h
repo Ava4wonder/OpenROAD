@@ -36,7 +36,9 @@
 namespace drt::redesign::legality {
 
 inline constexpr std::uint32_t kClipDumpMagic = 0x44434450u;  // 'DCDP'
-inline constexpr std::uint32_t kClipDumpVersion = 0x00010000u;  // 1.0
+// v1.1 (0x00010001): adds session_id to ClipMeta. Old v1.0 readers
+// reject via exact-version check.
+inline constexpr std::uint32_t kClipDumpVersion = 0x00010001u;
 inline constexpr std::uint32_t kMaxStringLen = 4096u;
 inline constexpr std::uint32_t kMaxShapeCount = 1u << 24;  // sanity cap
 
@@ -44,6 +46,11 @@ inline constexpr std::uint32_t kMaxShapeCount = 1u << 24;  // sanity cap
 struct ClipMeta
 {
   std::uint64_t clip_id = 0;
+  // Process-local identifier matching RuleDeckProvenance.session_id
+  // emitted by the same FlexGCWorker hook. Audit harness joins clip
+  // dumps and rule-deck dumps on this field. Currently populated as
+  // getpid() at hook init; one session per openroad process.
+  std::uint64_t session_id = 0;
   std::string design;
   std::string pdk;
   std::uint64_t tech_hash = 0;             // populated by future commits
