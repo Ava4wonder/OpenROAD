@@ -17,7 +17,9 @@
 #include "db/tech/frConstraint.h"
 #include "db/tech/frLayer.h"
 #include "frBaseTypes.h"
+#include "redesign/legality/BucketedReservoir.h"
 #include "redesign/legality/ClipDump.h"
+#include "redesign/legality/ClipDumpHook.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/FlexConstraintTranslator.h"
 #include "redesign/legality/Predicates.h"
@@ -1187,6 +1189,152 @@ bool TestClipDumpBadMagicRejected()
   return true;
 }
 
+// ---------- P2.2.e.1.c: BucketedReservoir + bucket key ----------
+
+bool TestBucketedReservoirBelowCap()
+{
+  lg::BucketedReservoir<int, int> r(10, 42);
+  for (int i = 0; i < 5; ++i) {
+    r.Offer(0, int{i});  // single bucket
+  }
+  if (r.TotalSeen() != 5 || r.TotalRetained() != 5
+      || r.BucketCount() != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestBucketedReservoirBelowCap: seen=%lu retained=%zu "
+                 "buckets=%zu\n",
+                 (unsigned long) r.TotalSeen(),
+                 r.TotalRetained(),
+                 r.BucketCount());
+    return false;
+  }
+  // All 5 retained verbatim (below cap).
+  std::vector<int> got;
+  r.ForEachRetained([&](int, int v) { got.push_back(v); });
+  std::sort(got.begin(), got.end());
+  for (int i = 0; i < 5; ++i) {
+    if (got[i] != i) {
+      std::fprintf(stderr, "FAIL TestBucketedReservoirBelowCap content\n");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestBucketedReservoirCapEnforced()
+{
+  lg::BucketedReservoir<int, int> r(10, 7);
+  for (int i = 0; i < 1000; ++i) {
+    r.Offer(0, int{i});
+  }
+  if (r.TotalSeen() != 1000) {
+    std::fprintf(stderr,
+                 "FAIL TestBucketedReservoirCapEnforced seen=%lu\n",
+                 (unsigned long) r.TotalSeen());
+    return false;
+  }
+  if (r.TotalRetained() != 10) {
+    std::fprintf(stderr,
+                 "FAIL TestBucketedReservoirCapEnforced retained=%zu "
+                 "(expected 10)\n",
+                 r.TotalRetained());
+    return false;
+  }
+  return true;
+}
+
+bool TestBucketedReservoirDeterministicSeed()
+{
+  // Two reservoirs, same seed and inputs, should retain identical values.
+  lg::BucketedReservoir<int, int> a(8, 12345);
+  lg::BucketedReservoir<int, int> b(8, 12345);
+  for (int i = 0; i < 500; ++i) {
+    a.Offer(i % 3, int{i});
+    b.Offer(i % 3, int{i});
+  }
+  std::vector<std::pair<int, int>> as;
+  std::vector<std::pair<int, int>> bs;
+  a.ForEachRetained([&](int k, int v) { as.emplace_back(k, v); });
+  b.ForEachRetained([&](int k, int v) { bs.emplace_back(k, v); });
+  if (as != bs) {
+    std::fprintf(
+        stderr,
+        "FAIL TestBucketedReservoirDeterministicSeed: same-seed runs "
+        "diverged\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestBucketedReservoirMultiBucket()
+{
+  lg::BucketedReservoir<int, int> r(4, 99);
+  // 3 distinct buckets; each gets above-cap traffic.
+  for (int i = 0; i < 50; ++i) {
+    r.Offer(i % 3, int{i});
+  }
+  auto stats = r.Stats();
+  if (stats.size() != 3) {
+    std::fprintf(stderr,
+                 "FAIL TestBucketedReservoirMultiBucket bucket count=%zu\n",
+                 stats.size());
+    return false;
+  }
+  for (const auto& [k, s] : stats) {
+    if (s.retained > 4) {
+      std::fprintf(stderr,
+                   "FAIL TestBucketedReservoirMultiBucket k=%d retained=%zu "
+                   "exceeds cap\n",
+                   k,
+                   s.retained);
+      return false;
+    }
+  }
+  if (r.TotalRetained() != 12) {
+    std::fprintf(stderr,
+                 "FAIL TestBucketedReservoirMultiBucket total_retained=%zu "
+                 "(expected 12)\n",
+                 r.TotalRetained());
+    return false;
+  }
+  return true;
+}
+
+bool TestLogBinAndBucketKey()
+{
+  // Spot-check the bin function.
+  if (lg::LogBin(0) != 0 || lg::LogBin(1) != 1 || lg::LogBin(4) != 1
+      || lg::LogBin(5) != 2 || lg::LogBin(16) != 2 || lg::LogBin(17) != 3
+      || lg::LogBin(64) != 3 || lg::LogBin(65) != 4 || lg::LogBin(256) != 4
+      || lg::LogBin(257) != 5 || lg::LogBin(1024) != 5
+      || lg::LogBin(1025) != 6 || lg::LogBin(1u << 20) != 6) {
+    std::fprintf(stderr, "FAIL TestLogBinAndBucketKey LogBin spot-check\n");
+    return false;
+  }
+
+  // Marker present detection.
+  lg::ClipRecord r;
+  r.candidates.assign(7, lg::Shape{});
+  r.context.assign(70, lg::Shape{});
+  r.labels.assign(7, lg::ProjectedUpstreamLabel{});
+  auto k1 = lg::ComputeBucketKey(r);
+  if (k1.cand_bin != 2 || k1.ctx_bin != 4 || k1.marker_present != 0) {
+    std::fprintf(
+        stderr,
+        "FAIL TestLogBinAndBucketKey expected bins (2, 4, 0) got (%u, %u, %u)\n",
+        (unsigned) k1.cand_bin,
+        (unsigned) k1.ctx_bin,
+        (unsigned) k1.marker_present);
+    return false;
+  }
+  r.labels[3].projected_marker_count = 1;
+  auto k2 = lg::ComputeBucketKey(r);
+  if (k2.marker_present != 1) {
+    std::fprintf(stderr, "FAIL TestLogBinAndBucketKey marker_present\n");
+    return false;
+  }
+  return true;
+}
+
 // ---------- Pair-counted bench (P2 exit-criterion unit) ----------
 
 struct BenchOut
@@ -1388,6 +1536,32 @@ int main()
     return 1;
   }
   std::printf("PASS TestClipDumpBadMagicRejected\n");
+
+  if (!TestBucketedReservoirBelowCap()) {
+    return 1;
+  }
+  std::printf("PASS TestBucketedReservoirBelowCap\n");
+  if (!TestBucketedReservoirCapEnforced()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestBucketedReservoirCapEnforced (1000 offers, cap=10, single "
+      "bucket)\n");
+  if (!TestBucketedReservoirDeterministicSeed()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestBucketedReservoirDeterministicSeed (same seed -> same "
+      "retained set)\n");
+  if (!TestBucketedReservoirMultiBucket()) {
+    return 1;
+  }
+  std::printf("PASS TestBucketedReservoirMultiBucket (3 buckets, cap=4)\n");
+  if (!TestLogBinAndBucketKey()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestLogBinAndBucketKey (LogBin spot-check + ComputeBucketKey)\n");
 
   const BenchOut b = BenchSweepLine(2048, 2048, 20);
   const double avoid_ratio = b.pairs_admitted == 0

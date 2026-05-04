@@ -4,6 +4,10 @@
 // P2.2.d — FlexConstraint -> NormalizedRule translation. The only file
 // in the legality/ tree that includes upstream constraint headers; this
 // is the abstraction boundary the user explicitly required.
+//
+// See GcWorkerClipBuilder.cpp top-of-file for the bridge-file
+// conventions that apply here as well (include placement, `::drt::`
+// anchoring, single-bridge-per-upstream-subsystem rule).
 
 #include "FlexConstraintTranslator.h"
 

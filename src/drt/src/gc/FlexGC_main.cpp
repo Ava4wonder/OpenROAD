@@ -4224,7 +4224,7 @@ int FlexGCWorker::Impl::main()
     auto& hook = redesign::legality::ClipDumpHook::Instance();
     if (hook.IsActive()) {
       try {
-        const auto rec = redesign::legality::BuildClipRecord(
+        auto rec = redesign::legality::BuildClipRecord(
             nets_,
             markers_,
             drcBox_,
@@ -4234,7 +4234,7 @@ int FlexGCWorker::Impl::main()
             hook.NextClipId(),
             hook.DesignHint(),
             hook.PdkHint());
-        hook.Dump(rec);
+        hook.Dump(std::move(rec));
       } catch (...) {
         // Swallowed: routing must continue. ClipDumpHook will log on
         // its own failures; here we silence build-side exceptions

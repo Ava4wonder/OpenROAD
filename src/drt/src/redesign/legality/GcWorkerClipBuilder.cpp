@@ -2,6 +2,38 @@
 // Copyright (c) 2026, The OpenROAD Authors
 //
 // P2.2.e.1.b — extract ClipRecord from upstream gcNet + frMarker state.
+//
+// ---------------------------------------------------------------------
+// Bridge-file conventions (apply to all .cpp files in legality/ that
+// include upstream OpenROAD headers — currently this file and
+// FlexConstraintTranslator.cpp). Documented after we tripped over each
+// of these in P2.2.e.1.b:
+//
+//   1. Place upstream-header #includes (e.g. "db/gcObj/gcNet.h",
+//      "db/tech/frConstraint.h") at the TOP of the .cpp, BEFORE any
+//      `namespace drt::redesign::legality { ... }` block opens.
+//      Including them inside our nested namespace double-nests them as
+//      drt::drt::* and the resulting type lookup explodes.
+//
+//   2. From inside `namespace drt::redesign::legality`, prefix references
+//      to upstream types with `::drt::` to anchor at global scope.
+//      Plain `drt::Type` re-resolves to `drt::drt::Type` (does not
+//      compile). Watch the `<::` digraph: write `< ::drt::Type >` with
+//      explicit spaces so the parser doesn't see `[`.
+//
+//   3. From within `namespace drt { }` blocks in upstream sources (e.g.
+//      FlexGC_main.cpp), our redesign types resolve as
+//      `redesign::legality::Type` because lookup descends drt:: first.
+//      Hoist redesign #includes ABOVE the `namespace drt {` opener in
+//      such files so the included headers' `namespace drt::redesign::`
+//      blocks register at the correct depth.
+//
+//   4. This file is the SOLE bridge from FlexGCWorker / gcNet / frMarker
+//      into NormalizedX. FlexConstraintTranslator.cpp is the SOLE bridge
+//      from frConstraint. New cross-namespace bridges should be named
+//      consistently (`*Builder.cpp` or `*Translator.cpp`) and should be
+//      the only files including their respective upstream headers.
+// ---------------------------------------------------------------------
 
 #include "GcWorkerClipBuilder.h"
 
