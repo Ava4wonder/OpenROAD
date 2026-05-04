@@ -1299,6 +1299,28 @@ bool TestBucketedReservoirMultiBucket()
   return true;
 }
 
+bool TestResolveDumpPath()
+{
+  if (!lg::ResolveDumpPath("", 12345).empty()) {
+    std::fprintf(stderr,
+                 "FAIL TestResolveDumpPath: empty base must produce empty\n");
+    return false;
+  }
+  if (lg::ResolveDumpPath("/tmp/foo", 12345) != "/tmp/foo.12345") {
+    std::fprintf(stderr,
+                 "FAIL TestResolveDumpPath: got '%s'\n",
+                 lg::ResolveDumpPath("/tmp/foo", 12345).c_str());
+    return false;
+  }
+  if (lg::ResolveDumpPath("/x.bin", 1) != "/x.bin.1") {
+    std::fprintf(stderr,
+                 "FAIL TestResolveDumpPath: got '%s'\n",
+                 lg::ResolveDumpPath("/x.bin", 1).c_str());
+    return false;
+  }
+  return true;
+}
+
 bool TestLogBinAndBucketKey()
 {
   // Spot-check the bin function.
@@ -1557,6 +1579,10 @@ int main()
     return 1;
   }
   std::printf("PASS TestBucketedReservoirMultiBucket (3 buckets, cap=4)\n");
+  if (!TestResolveDumpPath()) {
+    return 1;
+  }
+  std::printf("PASS TestResolveDumpPath (PID-suffix derivation)\n");
   if (!TestLogBinAndBucketKey()) {
     return 1;
   }

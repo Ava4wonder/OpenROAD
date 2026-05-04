@@ -13,7 +13,11 @@
 //   * is deterministic under a fixed seed (env DRT_DUMP_SEED).
 //
 // Env vars:
-//   DRT_DUMP_GC_CLIPS=<path>     activate dumping; output file path
+//   DRT_DUMP_GC_CLIPS=<path>     activate dumping; output file BASE path.
+//                                Actual path is <path>.<pid> so multi-
+//                                process flows (ORFS spawns one openroad
+//                                per stage) don't truncate each other.
+//                                Glob with <path>.* to read all.
 //   DRT_DUMP_DESIGN=<name>       optional, written to ClipMeta.design
 //   DRT_DUMP_PDK=<name>          optional, written to ClipMeta.pdk
 //   DRT_DUMP_RESERVOIR=<n>       per-bucket retention cap (default 64)
@@ -67,6 +71,11 @@ struct ClipBucketKey
 std::uint8_t LogBin(std::uint64_t n);
 
 ClipBucketKey ComputeBucketKey(const ClipRecord& record);
+
+// Resolve a base output path to a per-process file path by appending
+// "."<pid>. Empty input returns empty (caller treats as "no dump").
+// Pure function; used by both the live hook and unit tests.
+std::string ResolveDumpPath(const std::string& base, int pid);
 
 class ClipDumpHook
 {

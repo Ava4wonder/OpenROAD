@@ -5,6 +5,8 @@
 
 #include "ClipDumpHook.h"
 
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -59,6 +61,14 @@ std::uint8_t LogBin(std::uint64_t n)
   return 6;
 }
 
+std::string ResolveDumpPath(const std::string& base, int pid)
+{
+  if (base.empty()) {
+    return {};
+  }
+  return base + "." + std::to_string(pid);
+}
+
 ClipBucketKey ComputeBucketKey(const ClipRecord& record)
 {
   ClipBucketKey k;
@@ -83,10 +93,15 @@ ClipDumpHook& ClipDumpHook::Instance()
 
 ClipDumpHook::ClipDumpHook()
 {
-  out_path_ = EnvOrEmpty("DRT_DUMP_GC_CLIPS");
-  if (out_path_.empty()) {
+  const std::string base = EnvOrEmpty("DRT_DUMP_GC_CLIPS");
+  if (base.empty()) {
     return;
   }
+  // Per-process file naming: ORFS spawns multiple openroad processes
+  // (one per flow stage) and they must not truncate each other.
+  // Resolved path becomes <base>.<pid>; consumer reads via glob
+  // <base>.* in P2.2.e.2 and onward.
+  out_path_ = ResolveDumpPath(base, ::getpid());
   design_hint_ = EnvOrEmpty("DRT_DUMP_DESIGN");
   pdk_hint_ = EnvOrEmpty("DRT_DUMP_PDK");
   per_bucket_cap_
