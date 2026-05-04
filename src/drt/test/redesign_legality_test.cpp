@@ -1449,12 +1449,38 @@ bool TestRuleDeckDumpRoundTrip()
   original.AddUnsupported();
   original.AddUnsupported();
 
+  lg::RuleDeckProvenance prov_in;
+  prov_in.translator_version = 7;
+  prov_in.pid = 12345;
+  prov_in.capture_timestamp = 1714500000;
+  prov_in.openroad_git_sha = "abc123def4567890";
+  prov_in.redesign_git_sha = "redes111";
+  prov_in.layers_walked = 11;
+  prov_in.constraints_seen = 42;
+  prov_in.per_type_counts[0] = 5;     // frcShortConstraint
+  prov_in.per_type_counts[3] = 11;    // frcSpacingConstraint
+  prov_in.per_type_counts[4] = 7;     // frcSpacingEndOfLineConstraint
+
   std::stringstream s;
-  lg::WriteRuleDeck(s, original);
+  lg::WriteRuleDeck(s, original, prov_in);
 
   lg::RuleDeck rt;
-  if (!lg::ReadRuleDeck(s, &rt)) {
+  lg::RuleDeckProvenance prov_out;
+  if (!lg::ReadRuleDeck(s, &rt, &prov_out)) {
     std::fprintf(stderr, "FAIL TestRuleDeckDumpRoundTrip: ReadRuleDeck\n");
+    return false;
+  }
+  // Provenance round-trip.
+  if (prov_out.translator_version != prov_in.translator_version
+      || prov_out.pid != prov_in.pid
+      || prov_out.capture_timestamp != prov_in.capture_timestamp
+      || prov_out.openroad_git_sha != prov_in.openroad_git_sha
+      || prov_out.redesign_git_sha != prov_in.redesign_git_sha
+      || prov_out.layers_walked != prov_in.layers_walked
+      || prov_out.constraints_seen != prov_in.constraints_seen
+      || prov_out.per_type_counts != prov_in.per_type_counts) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckDumpRoundTrip: provenance mismatch\n");
     return false;
   }
   // Coverage equality
@@ -1509,7 +1535,8 @@ bool TestRuleDeckDumpBadMagicRejected()
   const char garbage[8] = {'X', 'Y', 'Z', 'W', 0, 0, 0, 0};
   s.write(garbage, 8);
   lg::RuleDeck out;
-  if (lg::ReadRuleDeck(s, &out)) {
+  lg::RuleDeckProvenance prov;
+  if (lg::ReadRuleDeck(s, &out, &prov)) {
     std::fprintf(stderr,
                  "FAIL TestRuleDeckDumpBadMagicRejected: should fail\n");
     return false;
@@ -1526,10 +1553,11 @@ bool TestRuleDeckDumpEmptyDeck()
   original.AddUnsupported();
 
   std::stringstream s;
-  lg::WriteRuleDeck(s, original);
+  lg::WriteRuleDeck(s, original, lg::RuleDeckProvenance{});
 
   lg::RuleDeck rt;
-  if (!lg::ReadRuleDeck(s, &rt)) {
+  lg::RuleDeckProvenance prov_unused;
+  if (!lg::ReadRuleDeck(s, &rt, &prov_unused)) {
     std::fprintf(stderr, "FAIL TestRuleDeckDumpEmptyDeck: ReadRuleDeck\n");
     return false;
   }

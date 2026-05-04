@@ -4224,6 +4224,8 @@ int FlexGCWorker::Impl::main()
     auto& hook = redesign::legality::ClipDumpHook::Instance();
     if (hook.IsActive()) {
       try {
+        // Once per process. Cheap on subsequent calls.
+        hook.EnsureRuleDeckDumped(tech_);
         auto rec = redesign::legality::BuildClipRecord(
             nets_,
             markers_,

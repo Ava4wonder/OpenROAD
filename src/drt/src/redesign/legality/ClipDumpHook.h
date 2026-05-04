@@ -40,6 +40,10 @@
 #include "BucketedReservoir.h"
 #include "ClipDump.h"
 
+namespace drt {
+class frTechObject;
+}  // namespace drt
+
 namespace drt::redesign::legality {
 
 struct ClipBucketKey
@@ -98,6 +102,14 @@ class ClipDumpHook
   // After Flush() the hook stops accepting new records. Idempotent.
   void Flush();
 
+  // Capture-once-per-process: walk `tech` for constraints, translate
+  // via FlexConstraintTranslator, serialize to <out_path>.ruledeck. The
+  // first thread to call this races-and-wins via std::call_once;
+  // subsequent calls (any thread, any FlexGCWorker) are no-ops. If the
+  // hook is inactive or `tech` is null, no-op. Exception-isolated per
+  // guardrail 5 — failures log once and never propagate.
+  void EnsureRuleDeckDumped(const ::drt::frTechObject* tech);
+
  private:
   ClipDumpHook();
   ~ClipDumpHook();
@@ -117,6 +129,7 @@ class ClipDumpHook
   std::mutex mu_;
   std::unique_ptr<BucketedReservoir<ClipBucketKey, ClipRecord>> reservoir_;
   std::atomic<bool> warned_once_{false};
+  std::once_flag ruledeck_once_;
 };
 
 }  // namespace drt::redesign::legality

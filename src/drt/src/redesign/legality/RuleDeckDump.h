@@ -45,19 +45,68 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <map>
+#include <string>
 
 #include "RuleDeck.h"
 
 namespace drt::redesign::legality {
 
 inline constexpr std::uint32_t kRuleDeckDumpMagic = 0x50444452u;  // 'RDDP'
-inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010000u;
+// v1.1 (0x00010001): adds provenance block between header and coverage.
+//   v1.0 readers reject v1.1 files via the exact-version check; v1.1
+//   readers cannot read v1.0 files. Acceptable because our only v1.0
+//   producer was test-only (P2.2.e.2.a) and is now updated.
+inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010001u;
 
-void WriteRuleDeck(std::ostream& os, const RuleDeck& deck);
+// Per amendment-derived requirements from P2.2.e.2.b review:
+// provenance lives INSIDE the file (not just in the filename) so audit
+// can be done on a moved file.
+struct RuleDeckProvenance
+{
+  // Bumped by FlexConstraintTranslator when its translation logic
+  // changes meaningfully. Different from the file format version.
+  std::uint32_t translator_version = 1;
+  std::uint32_t pid = 0;
+  // Unix epoch seconds at capture time. 0 if not set.
+  std::int64_t capture_timestamp = 0;
+  // Optional git SHAs (env-var supplied at process start). Empty when
+  // not detectable.
+  std::string openroad_git_sha;
+  std::string redesign_git_sha;
 
-// Reads header + body. Returns true on success. On failure (bad magic,
-// version mismatch, truncated stream, or invalid family/coverage byte)
-// leaves *out in an indeterminate state and returns false.
-bool ReadRuleDeck(std::istream& is, RuleDeck* out);
+  // Traversal instrumentation per yellow flag 1 of the P2.2.e.2.b
+  // review: separates "translator scope is too narrow" from "we walked
+  // the wrong tree."
+  std::uint32_t layers_walked = 0;
+  std::uint32_t constraints_seen = 0;
+  // Count of seen constraints keyed by frConstraintTypeEnum value
+  // (cast to u32). Allows offline auditor to spot families that
+  // upstream emits but the translator drops as Unsupported.
+  std::map<std::uint32_t, std::uint32_t> per_type_counts;
+};
+
+// Format:
+//   Header: magic + version
+//   Provenance:
+//     translator_version    (u32)
+//     pid                   (u32)
+//     capture_timestamp     (i64)
+//     openroad_git_sha      (length-prefixed string)
+//     redesign_git_sha      (length-prefixed string)
+//     layers_walked         (u32)
+//     constraints_seen      (u32)
+//     per_type_count_n      (u32)
+//     per type: type_id u32 + count u32
+//   Coverage + rules: same as v1.0 body.
+void WriteRuleDeck(std::ostream& os,
+                   const RuleDeck& deck,
+                   const RuleDeckProvenance& prov);
+
+// Reads header + provenance + body. Returns true on success. On
+// failure leaves *out / *prov_out in an indeterminate state.
+bool ReadRuleDeck(std::istream& is,
+                  RuleDeck* out,
+                  RuleDeckProvenance* prov_out);
 
 }  // namespace drt::redesign::legality

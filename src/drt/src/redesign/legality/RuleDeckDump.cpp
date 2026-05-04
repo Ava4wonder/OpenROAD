@@ -134,10 +134,27 @@ bool ReadParams(std::istream& is, NormalizedRule* r)
 
 }  // namespace
 
-void WriteRuleDeck(std::ostream& os, const RuleDeck& deck)
+void WriteRuleDeck(std::ostream& os,
+                   const RuleDeck& deck,
+                   const RuleDeckProvenance& prov)
 {
   WriteLE<std::uint32_t>(os, kRuleDeckDumpMagic);
   WriteLE<std::uint32_t>(os, kRuleDeckDumpVersion);
+  // Provenance block.
+  WriteLE<std::uint32_t>(os, prov.translator_version);
+  WriteLE<std::uint32_t>(os, prov.pid);
+  WriteLE<std::int64_t>(os, prov.capture_timestamp);
+  WriteString(os, prov.openroad_git_sha);
+  WriteString(os, prov.redesign_git_sha);
+  WriteLE<std::uint32_t>(os, prov.layers_walked);
+  WriteLE<std::uint32_t>(os, prov.constraints_seen);
+  WriteLE<std::uint32_t>(os,
+                         static_cast<std::uint32_t>(prov.per_type_counts.size()));
+  for (const auto& [type_id, count] : prov.per_type_counts) {
+    WriteLE<std::uint32_t>(os, type_id);
+    WriteLE<std::uint32_t>(os, count);
+  }
+
   const auto cov = deck.GetCoverage();
   WriteLE<std::uint64_t>(os, cov.total_input);
   WriteLE<std::uint64_t>(os, cov.supported);
@@ -163,7 +180,9 @@ void WriteRuleDeck(std::ostream& os, const RuleDeck& deck)
   }
 }
 
-bool ReadRuleDeck(std::istream& is, RuleDeck* out)
+bool ReadRuleDeck(std::istream& is,
+                  RuleDeck* out,
+                  RuleDeckProvenance* prov_out)
 {
   std::uint32_t magic = 0;
   std::uint32_t version = 0;
@@ -173,6 +192,32 @@ bool ReadRuleDeck(std::istream& is, RuleDeck* out)
   if (!ReadLE(is, &version) || version != kRuleDeckDumpVersion) {
     return false;
   }
+  // Provenance block.
+  RuleDeckProvenance prov;
+  if (!ReadLE(is, &prov.translator_version) || !ReadLE(is, &prov.pid)
+      || !ReadLE(is, &prov.capture_timestamp)
+      || !ReadString(is, &prov.openroad_git_sha)
+      || !ReadString(is, &prov.redesign_git_sha)
+      || !ReadLE(is, &prov.layers_walked)
+      || !ReadLE(is, &prov.constraints_seen)) {
+    return false;
+  }
+  std::uint32_t per_type_n = 0;
+  if (!ReadLE(is, &per_type_n)) {
+    return false;
+  }
+  for (std::uint32_t i = 0; i < per_type_n; ++i) {
+    std::uint32_t type_id = 0;
+    std::uint32_t count = 0;
+    if (!ReadLE(is, &type_id) || !ReadLE(is, &count)) {
+      return false;
+    }
+    prov.per_type_counts[type_id] = count;
+  }
+  if (prov_out != nullptr) {
+    *prov_out = std::move(prov);
+  }
+
   RuleDeck::Coverage cov;
   if (!ReadLE(is, &cov.total_input) || !ReadLE(is, &cov.supported)
       || !ReadLE(is, &cov.supported_explicit)

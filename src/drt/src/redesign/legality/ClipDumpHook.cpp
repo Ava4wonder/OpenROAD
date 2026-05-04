@@ -9,9 +9,13 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <fstream>
 #include <sstream>
+
+#include "CaptureRuleDeck.h"
+#include "RuleDeckDump.h"
 
 namespace drt::redesign::legality {
 
@@ -147,6 +151,81 @@ void ClipDumpHook::Dump(ClipRecord&& record)
                    "non-std::exception. Subsequent failures silenced.\n");
     }
   }
+}
+
+void ClipDumpHook::EnsureRuleDeckDumped(const ::drt::frTechObject* tech)
+{
+  if (!active_ || tech == nullptr) {
+    return;
+  }
+  // call_once: exactly one winner across all threads. Subsequent calls
+  // (any thread) become no-ops. If the winner throws, the flag stays
+  // un-flagged and we'd retry — wrap the entire body in try/catch and
+  // mark the flag manually via the call_once block returning normally.
+  std::call_once(ruledeck_once_, [this, tech]() {
+    try {
+      CaptureCounters cnt;
+      RuleDeck deck = CaptureRuleDeck(tech, &cnt);
+
+      RuleDeckProvenance prov;
+      prov.translator_version = 1;
+      prov.pid = static_cast<std::uint32_t>(::getpid());
+      prov.capture_timestamp = static_cast<std::int64_t>(std::time(nullptr));
+      prov.openroad_git_sha = EnvOrEmpty("DRT_DUMP_OPENROAD_SHA");
+      prov.redesign_git_sha = EnvOrEmpty("DRT_DUMP_REDESIGN_SHA");
+      prov.layers_walked = cnt.layers_walked;
+      prov.constraints_seen = cnt.constraints_seen;
+      prov.per_type_counts = std::move(cnt.per_type_counts);
+
+      const std::string ruledeck_path = out_path_ + ".ruledeck";
+      std::ofstream f(ruledeck_path, std::ios::binary | std::ios::trunc);
+      if (!f.is_open()) {
+        std::fprintf(stderr,
+                     "[drt::redesign] WARNING ruledeck path %s not writable; "
+                     "skipping rule-deck dump.\n",
+                     ruledeck_path.c_str());
+        return;
+      }
+      WriteRuleDeck(f, deck, prov);
+      f.flush();
+
+      const auto cov = deck.GetCoverage();
+      std::fprintf(
+          stderr,
+          "[drt::redesign] ruledeck dump: path=%s pid=%u layers_walked=%u "
+          "constraints_seen=%u  cov(total=%zu sup=%zu sup_explicit=%zu "
+          "sup_unknown=%zu fb=%zu unsup=%zu)  per_type={",
+          ruledeck_path.c_str(),
+          prov.pid,
+          prov.layers_walked,
+          prov.constraints_seen,
+          cov.total_input,
+          cov.supported,
+          cov.supported_explicit,
+          cov.supported_unknown,
+          cov.fallback,
+          cov.unsupported);
+      bool first = true;
+      for (const auto& [type_id, count] : prov.per_type_counts) {
+        std::fprintf(stderr,
+                     "%s%u:%u",
+                     first ? "" : ",",
+                     type_id,
+                     count);
+        first = false;
+      }
+      std::fprintf(stderr, "}\n");
+    } catch (const std::exception& e) {
+      std::fprintf(stderr,
+                   "[drt::redesign] WARNING rule-deck capture failed: %s. "
+                   "Continuing without rule-deck dump.\n",
+                   e.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "[drt::redesign] WARNING rule-deck capture failed with "
+                   "non-std::exception. Continuing without rule-deck dump.\n");
+    }
+  });
 }
 
 void ClipDumpHook::Flush()

@@ -126,6 +126,7 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/legality/ClipDumpHook.cpp
       src/redesign/legality/GcWorkerClipBuilder.cpp
       src/redesign/legality/RuleDeckDump.cpp
+      src/redesign/legality/CaptureRuleDeck.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
 
