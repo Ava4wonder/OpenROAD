@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "db/tech/frConstraint.h"
+#include "db/tech/frLayer.h"
 #include "frBaseTypes.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/FlexConstraintTranslator.h"
@@ -675,6 +676,7 @@ bool TestFlexConstraintTranslatorNullsAreUnsupported()
 
 bool TestTranslateShort()
 {
+  // No layer attached -> translator stays Unknown.
   drt::frShortConstraint sc;
   const drt::frConstraint* in[1] = {&sc};
   lg::FlexConstraintTranslator t;
@@ -690,14 +692,11 @@ bool TestTranslateShort()
     std::fprintf(stderr, "FAIL TestTranslateShort: unexpected rule shape\n");
     return false;
   }
-  // Amendment 4: translator currently can't extract upstream layer info,
-  // so all Supported rules should be marked Unknown rather than carrying
-  // a stale -1 sentinel.
   if (r.layer_knownness != lg::LayerKnownness::Unknown
       || r.layer_filter.has_value()) {
     std::fprintf(stderr,
                  "FAIL TestTranslateShort: layer model expected "
-                 "(no_value, Unknown)\n");
+                 "(no_value, Unknown) when no upstream layer attached\n");
     return false;
   }
   if (deck.GetCoverage().supported_unknown != 1
@@ -707,6 +706,40 @@ bool TestTranslateShort()
                  "(explicit=0, unknown=1) got (explicit=%zu, unknown=%zu)\n",
                  deck.GetCoverage().supported_explicit,
                  deck.GetCoverage().supported_unknown);
+    return false;
+  }
+  return true;
+}
+
+bool TestTranslateShortWithExplicitLayer()
+{
+  // Attach an upstream frLayer with layerNum=4. Translator should now
+  // emit (layer_filter=4, Explicit) and increment supported_explicit.
+  drt::frLayer m4;
+  m4.setLayerNum(4);
+  drt::frShortConstraint sc;
+  sc.setLayer(&m4);
+
+  const drt::frConstraint* in[1] = {&sc};
+  lg::FlexConstraintTranslator t;
+  auto deck = t.Translate(in, 1);
+
+  if (deck.GetCoverage().supported_explicit != 1
+      || deck.GetCoverage().supported_unknown != 0) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateShortWithExplicitLayer: coverage split "
+                 "expected (explicit=1, unknown=0) got (explicit=%zu, "
+                 "unknown=%zu)\n",
+                 deck.GetCoverage().supported_explicit,
+                 deck.GetCoverage().supported_unknown);
+    return false;
+  }
+  const auto& r = deck.At(0);
+  if (r.layer_knownness != lg::LayerKnownness::Explicit
+      || !r.layer_filter.has_value() || r.layer_filter.value() != 4) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateShortWithExplicitLayer: layer model "
+                 "expected (4, Explicit)\n");
     return false;
   }
   return true;
@@ -1125,6 +1158,10 @@ int main()
     return 1;
   }
   std::printf("PASS TestTranslateShort\n");
+  if (!TestTranslateShortWithExplicitLayer()) {
+    return 1;
+  }
+  std::printf("PASS TestTranslateShortWithExplicitLayer\n");
   if (!TestTranslateSpacing()) {
     return 1;
   }

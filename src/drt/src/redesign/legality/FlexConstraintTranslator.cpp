@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "db/tech/frConstraint.h"
+#include "db/tech/frLayer.h"
 #include "frBaseTypes.h"
 
 namespace drt::redesign::legality {
@@ -22,6 +23,24 @@ struct OneResult
   bool produced_rule = false;  // false => caller calls AddUnsupported()
   NormalizedRule rule;
 };
+
+// Pull layer info out of an upstream constraint via the public
+// frConstraint::getLayer() accessor. Sets layer_filter + layer_knownness
+// in-place. If the upstream binding is absent (constraint not yet
+// attached to a layer, e.g. a freshly-constructed test fixture), we
+// stay Unknown rather than fabricate a layer number.
+void PopulateLayer(NormalizedRule& nr, const drt::frConstraint* c)
+{
+  drt::frLayer* layer = c->getLayer();
+  if (layer == nullptr) {
+    nr.layer_filter = std::nullopt;
+    nr.layer_knownness = LayerKnownness::Unknown;
+    return;
+  }
+  nr.layer_filter
+      = static_cast<std::int16_t>(layer->getLayerNum());
+  nr.layer_knownness = LayerKnownness::Explicit;
+}
 
 // Tag literals are static-storage; NormalizedRule.tag is std::string and
 // owns its copy.
@@ -42,7 +61,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = MetalShortConfig{};
       out.rule.halo = 0;
-      out.rule.layer_knownness = LayerKnownness::Unknown;
+      PopulateLayer(out.rule, c);
       out.rule.tag = "frShortConstraint";
       out.produced_rule = true;
       return out;
@@ -56,7 +75,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = PrlSpacingConfig{min_sp, 0};
       out.rule.halo = min_sp;
-      out.rule.layer_knownness = LayerKnownness::Unknown;
+      PopulateLayer(out.rule, c);
       out.rule.tag = "frSpacingConstraint";
       out.produced_rule = true;
       return out;
@@ -84,7 +103,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = std::max(cfg.eol_spacing, cfg.eol_within);
-      out.rule.layer_knownness = LayerKnownness::Unknown;
+      PopulateLayer(out.rule, c);
       out.rule.tag = "frSpacingEndOfLineConstraint";
       out.produced_rule = true;
       return out;
@@ -109,7 +128,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = cfg.min_spacing;
-      out.rule.layer_knownness = LayerKnownness::Unknown;
+      PopulateLayer(out.rule, c);
       out.rule.tag = "frCutSpacingConstraint";
       out.produced_rule = true;
       return out;
