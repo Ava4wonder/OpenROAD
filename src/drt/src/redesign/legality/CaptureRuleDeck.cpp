@@ -77,20 +77,18 @@ RuleDeck CaptureRuleDeck(const ::drt::frTechObject* tech,
       all.push_back(c);
     }
     if (layer->hasLef58SpacingEndOfLineConstraints()) {
-      for (const auto& cu : layer->getLef58SpacingEndOfLineConstraints()) {
-        AccountConstraint(cu.get(), counters);
-        all.push_back(cu.get());
+      for (auto* c : layer->getLef58SpacingEndOfLineConstraints()) {
+        AccountConstraint(c, counters);
+        all.push_back(c);
       }
     }
-    for (const auto& cu :
-         layer->getLef58CutSpacingConstraints(/*samenet=*/false)) {
-      AccountConstraint(cu.get(), counters);
-      all.push_back(cu.get());
+    for (auto* c : layer->getLef58CutSpacingConstraints(/*samenet=*/false)) {
+      AccountConstraint(c, counters);
+      all.push_back(c);
     }
-    for (const auto& cu :
-         layer->getLef58CutSpacingConstraints(/*samenet=*/true)) {
-      AccountConstraint(cu.get(), counters);
-      all.push_back(cu.get());
+    for (auto* c : layer->getLef58CutSpacingConstraints(/*samenet=*/true)) {
+      AccountConstraint(c, counters);
+      all.push_back(c);
     }
     for (auto* c : layer->getSpacingRangeConstraints()) {
       AccountConstraint(c, counters);
