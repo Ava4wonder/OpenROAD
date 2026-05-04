@@ -24,6 +24,7 @@
 #include "redesign/legality/FlexConstraintTranslator.h"
 #include "redesign/legality/Predicates.h"
 #include "redesign/legality/RuleDeck.h"
+#include "redesign/legality/RuleDeckDump.h"
 
 namespace lg = drt::redesign::legality;
 
@@ -1357,6 +1358,195 @@ bool TestLogBinAndBucketKey()
   return true;
 }
 
+// ---------- P2.2.e.2.a: RuleDeckDump round-trip ----------
+
+bool RulesEqual(const lg::NormalizedRule& a, const lg::NormalizedRule& b)
+{
+  if (a.family != b.family || a.coverage != b.coverage
+      || a.layer_knownness != b.layer_knownness
+      || a.layer_filter != b.layer_filter || a.halo != b.halo
+      || a.tag != b.tag) {
+    return false;
+  }
+  // Params equality only matters for Supported.
+  if (a.coverage != lg::RuleCoverage::Supported) {
+    return true;
+  }
+  if (a.params.index() != b.params.index()) {
+    return false;
+  }
+  return std::visit(
+      [&](const auto& av) {
+        using T = std::decay_t<decltype(av)>;
+        const auto& bv = std::get<T>(b.params);
+        if constexpr (std::is_same_v<T, lg::MetalShortConfig>) {
+          (void) av;
+          (void) bv;
+          return true;
+        } else if constexpr (std::is_same_v<T, lg::PrlSpacingConfig>) {
+          return av.min_spacing == bv.min_spacing
+                 && av.prl_threshold == bv.prl_threshold;
+        } else if constexpr (std::is_same_v<T, lg::EolSpacingConfig>) {
+          return av.eol_width_threshold == bv.eol_width_threshold
+                 && av.eol_spacing == bv.eol_spacing
+                 && av.eol_within == bv.eol_within;
+        } else if constexpr (std::is_same_v<T, lg::CutSpacingConfig>) {
+          return av.min_spacing == bv.min_spacing;
+        }
+        return false;
+      },
+      a.params);
+}
+
+bool TestRuleDeckDumpRoundTrip()
+{
+  lg::RuleDeck original;
+
+  lg::NormalizedRule r1{};
+  r1.family = lg::RuleFamily::MetalShort;
+  r1.coverage = lg::RuleCoverage::Supported;
+  r1.params = lg::MetalShortConfig{};
+  r1.layer_filter = std::int16_t{4};
+  r1.layer_knownness = lg::LayerKnownness::Explicit;
+  r1.tag = "M4:short";
+  r1.halo = 0;
+  original.Add(r1);
+
+  lg::NormalizedRule r2{};
+  r2.family = lg::RuleFamily::PrlSpacing;
+  r2.coverage = lg::RuleCoverage::Supported;
+  r2.params = lg::PrlSpacingConfig{50, 25};
+  r2.layer_knownness = lg::LayerKnownness::Unknown;  // no layer info
+  r2.tag = "frSpacingConstraint";
+  r2.halo = 50;
+  original.Add(r2);
+
+  lg::NormalizedRule r3{};
+  r3.family = lg::RuleFamily::EolSpacing;
+  r3.coverage = lg::RuleCoverage::Supported;
+  r3.params = lg::EolSpacingConfig{40, 20, 8};
+  r3.layer_filter = std::int16_t{2};
+  r3.layer_knownness = lg::LayerKnownness::Explicit;
+  r3.tag = "M2:eol";
+  r3.halo = 20;
+  original.Add(r3);
+
+  lg::NormalizedRule r4{};
+  r4.family = lg::RuleFamily::CutSpacing;
+  r4.coverage = lg::RuleCoverage::Supported;
+  r4.params = lg::CutSpacingConfig{30};
+  r4.tag = "VIA1:cut";
+  r4.halo = 30;
+  original.Add(r4);
+
+  lg::NormalizedRule fb{};
+  fb.family = lg::RuleFamily::PrlSpacing;
+  fb.coverage = lg::RuleCoverage::Fallback;
+  fb.tag = "frSpacingTablePrlConstraint";
+  original.Add(fb);
+
+  original.AddUnsupported();
+  original.AddUnsupported();
+  original.AddUnsupported();
+
+  std::stringstream s;
+  lg::WriteRuleDeck(s, original);
+
+  lg::RuleDeck rt;
+  if (!lg::ReadRuleDeck(s, &rt)) {
+    std::fprintf(stderr, "FAIL TestRuleDeckDumpRoundTrip: ReadRuleDeck\n");
+    return false;
+  }
+  // Coverage equality
+  const auto a = original.GetCoverage();
+  const auto b = rt.GetCoverage();
+  if (a.total_input != b.total_input || a.supported != b.supported
+      || a.supported_explicit != b.supported_explicit
+      || a.supported_unknown != b.supported_unknown
+      || a.fallback != b.fallback || a.unsupported != b.unsupported) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckDumpRoundTrip: coverage mismatch "
+                 "total %zu/%zu sup %zu/%zu spx %zu/%zu spu %zu/%zu fb %zu/%zu un %zu/%zu\n",
+                 a.total_input, b.total_input, a.supported, b.supported,
+                 a.supported_explicit, b.supported_explicit,
+                 a.supported_unknown, b.supported_unknown,
+                 a.fallback, b.fallback, a.unsupported, b.unsupported);
+    return false;
+  }
+  // Per-rule equality
+  if (rt.Size() != original.Size()) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckDumpRoundTrip: rule count mismatch "
+                 "%zu vs %zu\n",
+                 rt.Size(), original.Size());
+    return false;
+  }
+  for (std::size_t i = 0; i < original.Size(); ++i) {
+    if (!RulesEqual(original.At(i), rt.At(i))) {
+      std::fprintf(stderr,
+                   "FAIL TestRuleDeckDumpRoundTrip: rule %zu mismatch\n",
+                   i);
+      return false;
+    }
+  }
+
+  // Materializing the round-tripped deck should produce the same number
+  // of RuleEntry objects as the original (count of Supported rules).
+  if (rt.ToRuleEntries().size() != original.ToRuleEntries().size()) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckDumpRoundTrip: ToRuleEntries count "
+                 "%zu vs %zu\n",
+                 rt.ToRuleEntries().size(),
+                 original.ToRuleEntries().size());
+    return false;
+  }
+  return true;
+}
+
+bool TestRuleDeckDumpBadMagicRejected()
+{
+  std::stringstream s;
+  const char garbage[8] = {'X', 'Y', 'Z', 'W', 0, 0, 0, 0};
+  s.write(garbage, 8);
+  lg::RuleDeck out;
+  if (lg::ReadRuleDeck(s, &out)) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckDumpBadMagicRejected: should fail\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestRuleDeckDumpEmptyDeck()
+{
+  // A deck with only AddUnsupported calls and no Add — round-trips to
+  // an empty rule list with non-zero unsupported count.
+  lg::RuleDeck original;
+  original.AddUnsupported();
+  original.AddUnsupported();
+
+  std::stringstream s;
+  lg::WriteRuleDeck(s, original);
+
+  lg::RuleDeck rt;
+  if (!lg::ReadRuleDeck(s, &rt)) {
+    std::fprintf(stderr, "FAIL TestRuleDeckDumpEmptyDeck: ReadRuleDeck\n");
+    return false;
+  }
+  if (rt.Size() != 0 || rt.GetCoverage().total_input != 2
+      || rt.GetCoverage().unsupported != 2) {
+    std::fprintf(
+        stderr,
+        "FAIL TestRuleDeckDumpEmptyDeck: rt.Size=%zu cov.total=%zu "
+        "cov.unsup=%zu\n",
+        rt.Size(),
+        rt.GetCoverage().total_input,
+        rt.GetCoverage().unsupported);
+    return false;
+  }
+  return true;
+}
+
 // ---------- Pair-counted bench (P2 exit-criterion unit) ----------
 
 struct BenchOut
@@ -1588,6 +1778,21 @@ int main()
   }
   std::printf(
       "PASS TestLogBinAndBucketKey (LogBin spot-check + ComputeBucketKey)\n");
+
+  if (!TestRuleDeckDumpRoundTrip()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestRuleDeckDumpRoundTrip (4 supported families + 1 fallback "
+      "+ 3 unsupported; coverage + per-rule equality)\n");
+  if (!TestRuleDeckDumpBadMagicRejected()) {
+    return 1;
+  }
+  std::printf("PASS TestRuleDeckDumpBadMagicRejected\n");
+  if (!TestRuleDeckDumpEmptyDeck()) {
+    return 1;
+  }
+  std::printf("PASS TestRuleDeckDumpEmptyDeck\n");
 
   const BenchOut b = BenchSweepLine(2048, 2048, 20);
   const double avoid_ratio = b.pairs_admitted == 0
