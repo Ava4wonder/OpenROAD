@@ -74,23 +74,26 @@ void IngestRuleDeck(const RuleDeck& deck,
   for (std::size_t i = 0; i < deck.Size(); ++i) {
     const NormalizedRule& r = deck.At(i);
     FamilyCellStats& cell = s.by_family[r.family];
-    switch (r.coverage) {
-      case RuleCoverage::Supported:
-        ++cell.supported;
-        if (r.layer_knownness == LayerKnownness::Explicit) {
-          ++cell.supported_explicit;
-        } else {
-          ++cell.supported_unknown;
-        }
-        break;
-      case RuleCoverage::Fallback:
-        ++cell.fallback;
-        break;
-      case RuleCoverage::Unsupported:
-        // RuleDeck doesn't store NormalizedRule entries for
-        // AddUnsupported() calls, so this case is unreachable here.
-        break;
-    }
+    FamilyCellStats& variant_cell = s.by_family_variant[r.family][r.tag];
+    auto bump = [](FamilyCellStats& c, RuleCoverage cov, LayerKnownness lk) {
+      switch (cov) {
+        case RuleCoverage::Supported:
+          ++c.supported;
+          if (lk == LayerKnownness::Explicit) {
+            ++c.supported_explicit;
+          } else {
+            ++c.supported_unknown;
+          }
+          break;
+        case RuleCoverage::Fallback:
+          ++c.fallback;
+          break;
+        case RuleCoverage::Unsupported:
+          break;
+      }
+    };
+    bump(cell, r.coverage, r.layer_knownness);
+    bump(variant_cell, r.coverage, r.layer_knownness);
     if (r.layer_filter.has_value()) {
       ++s.rules_per_layer[r.layer_filter.value()];
     }
@@ -180,6 +183,13 @@ void RenderReport(const AuditReport& report, std::ostream& os)
          << " (explicit=" << cell.supported_explicit
          << ", unknown=" << cell.supported_unknown
          << ") fallback=" << cell.fallback << "\n";
+      const auto& variants = s.by_family_variant.at(family);
+      for (const auto& [tag, vcell] : variants) {
+        os << "      " << tag << ": supported=" << vcell.supported
+           << " (explicit=" << vcell.supported_explicit
+           << ", unknown=" << vcell.supported_unknown
+           << ") fallback=" << vcell.fallback << "\n";
+      }
     }
 
     os << "  per-layer (Explicit only):\n";

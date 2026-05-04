@@ -61,6 +61,12 @@ struct SessionStats
   std::size_t unsupported = 0;
   std::uint64_t layer_conflicts_seen = 0;
   std::map<RuleFamily, FamilyCellStats> by_family;
+  // Per-variant within family. Variant key is NormalizedRule.tag,
+  // e.g. "frSpacingTablePrlConstraint". Splits fallback into the
+  // specific upstream subclasses driving it so reporting shows which
+  // variants would benefit from semantic widening (Step B2 onward).
+  std::map<RuleFamily, std::map<std::string, FamilyCellStats>>
+      by_family_variant;
   std::map<std::int16_t, std::size_t> rules_per_layer;
 
   // Clip-side.
