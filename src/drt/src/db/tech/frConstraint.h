@@ -55,6 +55,10 @@ class frConstraint
   virtual frConstraintTypeEnum typeId() const = 0;
   virtual void report(utl::Logger* logger) const = 0;
   void setLayer(frLayer* layer) { layer_ = layer; }
+  // Symmetric public accessor for the existing protected `layer_`. The
+  // setter has always been public; this getter completes the pair so
+  // external consumers can read the binding without subclassing.
+  frLayer* getLayer() const { return layer_; }
   void setId(int in) { id_ = in; }
   int getId() const { return id_; }
   std::string getViolName() const;
