@@ -11,9 +11,13 @@
 #include <random>
 #include <vector>
 
+#include <sstream>
+#include <string>
+
 #include "db/tech/frConstraint.h"
 #include "db/tech/frLayer.h"
 #include "frBaseTypes.h"
+#include "redesign/legality/ClipDump.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/FlexConstraintTranslator.h"
 #include "redesign/legality/Predicates.h"
@@ -1010,6 +1014,179 @@ bool TestTranslateThenOracleEvaluate()
   return true;
 }
 
+// ---------- P2.2.e.1.a: ClipDump round-trip ----------
+
+bool ShapesEqual(const lg::Shape& a, const lg::Shape& b)
+{
+  return a.x1 == b.x1 && a.y1 == b.y1 && a.x2 == b.x2 && a.y2 == b.y2
+         && a.layer == b.layer && a.net_id == b.net_id;
+}
+
+bool LabelsEqual(const lg::ProjectedUpstreamLabel& a,
+                 const lg::ProjectedUpstreamLabel& b)
+{
+  return a.projected_marker_count == b.projected_marker_count
+         && a.projected_legal == b.projected_legal
+         && a.projection_ambiguous == b.projection_ambiguous;
+}
+
+bool MetaEqual(const lg::ClipMeta& a, const lg::ClipMeta& b)
+{
+  return a.clip_id == b.clip_id && a.design == b.design && a.pdk == b.pdk
+         && a.tech_hash == b.tech_hash
+         && a.rule_deck_fingerprint == b.rule_deck_fingerprint
+         && a.clip_x1 == b.clip_x1 && a.clip_y1 == b.clip_y1
+         && a.clip_x2 == b.clip_x2 && a.clip_y2 == b.clip_y2
+         && a.route_x1 == b.route_x1 && a.route_y1 == b.route_y1
+         && a.route_x2 == b.route_x2 && a.route_y2 == b.route_y2;
+}
+
+lg::ClipRecord MakeSyntheticRecord()
+{
+  lg::ClipRecord r;
+  r.meta.clip_id = 0xDEADBEEFCAFEBABEull;
+  r.meta.design = "asap7_gcd";
+  r.meta.pdk = "asap7";
+  r.meta.tech_hash = 0x0102030405060708ull;
+  r.meta.rule_deck_fingerprint = 0xAABBCCDDEEFF0011ull;
+  r.meta.clip_x1 = -100;
+  r.meta.clip_y1 = -200;
+  r.meta.clip_x2 = 1000;
+  r.meta.clip_y2 = 1500;
+  r.meta.route_x1 = 0;
+  r.meta.route_y1 = 0;
+  r.meta.route_x2 = 800;
+  r.meta.route_y2 = 1200;
+
+  r.candidates = {
+      {0, 0, 10, 10, 1, 100},
+      {50, 50, 60, 60, 1, 200},
+      {200, 200, 220, 240, 2, 300},
+  };
+  r.context = {
+      {-50, -50, -10, -10, 1, 0},   // blockage (net 0)
+      {500, 500, 510, 510, 2, 400},
+  };
+  r.labels = {
+      {0u, 1u, 0u},  // legal, no markers
+      {3u, 0u, 1u},  // 3 markers, illegal, ambiguous projection
+      {1u, 0u, 0u},  // 1 marker, illegal, unambiguous
+  };
+  return r;
+}
+
+bool TestClipDumpRoundTrip()
+{
+  std::stringstream s;
+  lg::WriteHeader(s);
+
+  const lg::ClipRecord original = MakeSyntheticRecord();
+  lg::WriteRecord(s, original);
+
+  // Write a second record so we exercise sequence handling too.
+  lg::ClipRecord empty_clip;
+  empty_clip.meta.clip_id = 42;
+  empty_clip.meta.design = "asap7_ibex";
+  empty_clip.meta.pdk = "asap7";
+  // Empty candidates / context / labels — must round-trip cleanly.
+  lg::WriteRecord(s, empty_clip);
+
+  std::uint32_t version = 0;
+  if (!lg::ReadHeader(s, &version)) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: ReadHeader\n");
+    return false;
+  }
+  if (version != lg::kClipDumpVersion) {
+    std::fprintf(stderr,
+                 "FAIL TestClipDumpRoundTrip: version mismatch (%08x vs %08x)\n",
+                 version,
+                 lg::kClipDumpVersion);
+    return false;
+  }
+
+  lg::ClipRecord rt;
+  if (!lg::ReadRecord(s, &rt)) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: ReadRecord(0)\n");
+    return false;
+  }
+  if (!MetaEqual(rt.meta, original.meta)) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: meta mismatch\n");
+    return false;
+  }
+  if (rt.candidates.size() != original.candidates.size()
+      || rt.context.size() != original.context.size()
+      || rt.labels.size() != original.labels.size()) {
+    std::fprintf(stderr,
+                 "FAIL TestClipDumpRoundTrip: count mismatch "
+                 "(cand %zu/%zu, ctx %zu/%zu, lbl %zu/%zu)\n",
+                 rt.candidates.size(), original.candidates.size(),
+                 rt.context.size(), original.context.size(),
+                 rt.labels.size(), original.labels.size());
+    return false;
+  }
+  for (std::size_t i = 0; i < original.candidates.size(); ++i) {
+    if (!ShapesEqual(rt.candidates[i], original.candidates[i])) {
+      std::fprintf(stderr,
+                   "FAIL TestClipDumpRoundTrip: candidate %zu mismatch\n",
+                   i);
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < original.context.size(); ++i) {
+    if (!ShapesEqual(rt.context[i], original.context[i])) {
+      std::fprintf(stderr,
+                   "FAIL TestClipDumpRoundTrip: context %zu mismatch\n",
+                   i);
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < original.labels.size(); ++i) {
+    if (!LabelsEqual(rt.labels[i], original.labels[i])) {
+      std::fprintf(stderr,
+                   "FAIL TestClipDumpRoundTrip: label %zu mismatch\n",
+                   i);
+      return false;
+    }
+  }
+
+  // Second record (empty payload).
+  lg::ClipRecord rt2;
+  if (!lg::ReadRecord(s, &rt2)) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: ReadRecord(1)\n");
+    return false;
+  }
+  if (rt2.meta.clip_id != 42 || rt2.meta.design != "asap7_ibex"
+      || !rt2.candidates.empty() || !rt2.context.empty()
+      || !rt2.labels.empty()) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: empty-record mismatch\n");
+    return false;
+  }
+
+  // EOF: third ReadRecord call returns false cleanly.
+  lg::ClipRecord rt_eof;
+  if (lg::ReadRecord(s, &rt_eof)) {
+    std::fprintf(stderr, "FAIL TestClipDumpRoundTrip: expected EOF\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestClipDumpBadMagicRejected()
+{
+  std::stringstream s;
+  // Write something that is NOT the magic prefix.
+  const char garbage[8] = {'X', 'X', 'X', 'X', 0, 0, 0, 0};
+  s.write(garbage, 8);
+
+  std::uint32_t v = 0;
+  if (lg::ReadHeader(s, &v)) {
+    std::fprintf(stderr,
+                 "FAIL TestClipDumpBadMagicRejected: ReadHeader should fail\n");
+    return false;
+  }
+  return true;
+}
+
 // ---------- Pair-counted bench (P2 exit-criterion unit) ----------
 
 struct BenchOut
@@ -1200,6 +1377,17 @@ int main()
   std::printf(
       "PASS TestTranslateThenOracleEvaluate (real upstream -> normalized "
       "-> oracle verdict)\n");
+
+  if (!TestClipDumpRoundTrip()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestClipDumpRoundTrip (header + 2 records, byte-equal "
+      "round-trip + clean EOF)\n");
+  if (!TestClipDumpBadMagicRejected()) {
+    return 1;
+  }
+  std::printf("PASS TestClipDumpBadMagicRejected\n");
 
   const BenchOut b = BenchSweepLine(2048, 2048, 20);
   const double avoid_ratio = b.pairs_admitted == 0
