@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "redesign/legality/CpuDrcOracle.h"
+#include "redesign/legality/FlexConstraintTranslator.h"
 #include "redesign/legality/Predicates.h"
+#include "redesign/legality/RuleDeck.h"
 
 namespace lg = drt::redesign::legality;
 
@@ -512,6 +514,146 @@ bool TestModeAEquivalenceUnderHaloRelaxation()
   return true;
 }
 
+// ---------- P2.2.d preflight: RuleDeck + Translator stub ----------
+
+bool TestRuleDeckCoverageAccounting()
+{
+  lg::RuleDeck deck;
+  if (deck.GetCoverage().total_input != 0
+      || deck.GetCoverage().supported != 0) {
+    std::fprintf(stderr, "FAIL TestRuleDeckCoverageAccounting empty deck\n");
+    return false;
+  }
+
+  lg::NormalizedRule supported{};
+  supported.family = lg::RuleFamily::PrlSpacing;
+  supported.coverage = lg::RuleCoverage::Supported;
+  supported.params = lg::PrlSpacingConfig{15, 30};
+  supported.layer = 1;
+  supported.tag = "M2:test";
+  supported.halo = 15;
+  deck.Add(supported);
+
+  lg::NormalizedRule fallback{};
+  fallback.family = lg::RuleFamily::PrlSpacing;
+  fallback.coverage = lg::RuleCoverage::Fallback;
+  fallback.layer = 2;
+  fallback.tag = "M2:spacing_table";
+  deck.Add(fallback);
+
+  deck.AddUnsupported();
+  deck.AddUnsupported();
+
+  const auto cov = deck.GetCoverage();
+  if (cov.total_input != 4 || cov.supported != 1 || cov.fallback != 1
+      || cov.unsupported != 2) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckCoverageAccounting: got "
+                 "(total=%zu, sup=%zu, fb=%zu, unsup=%zu)\n",
+                 cov.total_input,
+                 cov.supported,
+                 cov.fallback,
+                 cov.unsupported);
+    return false;
+  }
+  if (deck.Size() != 2) {
+    // Note: AddUnsupported() does NOT add a NormalizedRule, only
+    // increments counters; deck size reflects only Add() calls.
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckCoverageAccounting Size=%zu (expected 2)\n",
+                 deck.Size());
+    return false;
+  }
+  return true;
+}
+
+bool TestRuleDeckToRuleEntriesRoundTrip()
+{
+  lg::RuleDeck deck;
+
+  lg::NormalizedRule short_rule{};
+  short_rule.family = lg::RuleFamily::MetalShort;
+  short_rule.coverage = lg::RuleCoverage::Supported;
+  short_rule.params = lg::MetalShortConfig{};
+  short_rule.halo = 0;
+  deck.Add(short_rule);
+
+  lg::NormalizedRule prl{};
+  prl.family = lg::RuleFamily::PrlSpacing;
+  prl.coverage = lg::RuleCoverage::Supported;
+  prl.params = lg::PrlSpacingConfig{20, 50};
+  prl.halo = 20;
+  deck.Add(prl);
+
+  lg::NormalizedRule fallback{};
+  fallback.family = lg::RuleFamily::EolSpacing;
+  fallback.coverage = lg::RuleCoverage::Fallback;
+  deck.Add(fallback);
+
+  auto entries = deck.ToRuleEntries();
+  if (entries.size() != 2) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckToRuleEntriesRoundTrip size=%zu (expected "
+                 "2 supported)\n",
+                 entries.size());
+    return false;
+  }
+
+  // Drive the oracle with the materialized entries on a tiny case to
+  // confirm the param-pointer hand-off works.
+  lg::CpuDrcOracle oracle;
+  oracle.SetRules(entries.data(), entries.size());
+  std::vector<lg::Shape> cands{
+      {0, 0, 10, 10, 1, 100},     // candidate 0
+      {200, 0, 210, 10, 1, 100},  // candidate 1, far from any context
+  };
+  std::vector<lg::Shape> context{
+      {5, 5, 15, 15, 1, 200},  // overlaps cand 0 different net -> short
+  };
+  std::vector<lg::Verdict> verdicts(2);
+  oracle.Evaluate(cands.data(), 2, context.data(), 1, verdicts.data());
+  if (verdicts[0].legal) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckToRuleEntriesRoundTrip: cand 0 should "
+                 "violate MetalShort\n");
+    return false;
+  }
+  if (!verdicts[1].legal) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckToRuleEntriesRoundTrip: cand 1 (far) "
+                 "should be legal\n");
+    return false;
+  }
+  return true;
+}
+
+bool TestFlexConstraintTranslatorStub()
+{
+  // The stub never inspects the constraint pointers; pass nulls.
+  lg::FlexConstraintTranslator t;
+  const drt::frConstraint* fake_inputs[3] = {nullptr, nullptr, nullptr};
+  auto deck = t.Translate(fake_inputs, 3);
+  const auto cov = deck.GetCoverage();
+  if (cov.total_input != 3 || cov.supported != 0 || cov.fallback != 0
+      || cov.unsupported != 3) {
+    std::fprintf(stderr,
+                 "FAIL TestFlexConstraintTranslatorStub: got (total=%zu, "
+                 "sup=%zu, fb=%zu, unsup=%zu)\n",
+                 cov.total_input,
+                 cov.supported,
+                 cov.fallback,
+                 cov.unsupported);
+    return false;
+  }
+  if (deck.ToRuleEntries().size() != 0) {
+    std::fprintf(stderr,
+                 "FAIL TestFlexConstraintTranslatorStub: stub deck must "
+                 "produce zero RuleEntries\n");
+    return false;
+  }
+  return true;
+}
+
 // ---------- Pair-counted bench (P2 exit-criterion unit) ----------
 
 struct BenchOut
@@ -641,6 +783,23 @@ int main()
   std::printf(
       "PASS TestModeAEquivalenceUnderHaloRelaxation (50 trials, "
       "tight vs loose halo, exact verdict equivalence + pair accounting)\n");
+
+  if (!TestRuleDeckCoverageAccounting()) {
+    return 1;
+  }
+  std::printf("PASS TestRuleDeckCoverageAccounting\n");
+  if (!TestRuleDeckToRuleEntriesRoundTrip()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestRuleDeckToRuleEntriesRoundTrip (oracle drives "
+      "materialized entries)\n");
+  if (!TestFlexConstraintTranslatorStub()) {
+    return 1;
+  }
+  std::printf(
+      "PASS TestFlexConstraintTranslatorStub (preflight: empty deck, "
+      "all-unsupported accounting)\n");
 
   const BenchOut b = BenchSweepLine(2048, 2048, 20);
   const double avoid_ratio = b.pairs_admitted == 0

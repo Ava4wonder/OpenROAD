@@ -120,6 +120,8 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/simd/Geom.cpp
       src/redesign/legality/CpuDrcOracle.cpp
       src/redesign/legality/Predicates.cpp
+      src/redesign/legality/RuleDeck.cpp
+      src/redesign/legality/FlexConstraintTranslator.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
 
