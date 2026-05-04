@@ -4169,6 +4169,11 @@ void FlexGCWorker::Impl::modifyMarkers()
   }
 }
 
+#ifdef ENABLE_DRT_REDESIGN
+#include "redesign/legality/ClipDumpHook.h"
+#include "redesign/legality/GcWorkerClipBuilder.h"
+#endif
+
 int FlexGCWorker::Impl::main()
 {
   // incremental updates
@@ -4208,6 +4213,37 @@ int FlexGCWorker::Impl::main()
   // modify markers for pwires
   modifyMarkers();
   normalizeMarkerOrder();
+
+#ifdef ENABLE_DRT_REDESIGN
+  // P2.2.e.1.b — observe-only clip dump. Off unless DRT_DUMP_GC_CLIPS is
+  // set in the environment. Must never propagate exceptions: a dump
+  // failure may not change routing behavior (guardrail 5). The hook
+  // wraps its own writes in try/catch; the BuildClipRecord call is the
+  // only allocation site outside that, so we wrap it here too.
+  {
+    auto& hook = redesign::legality::ClipDumpHook::Instance();
+    if (hook.IsActive()) {
+      try {
+        const auto rec = redesign::legality::BuildClipRecord(
+            nets_,
+            markers_,
+            drcBox_,
+            extBox_,
+            getMinLayerNum(),
+            getMaxLayerNum(),
+            hook.NextClipId(),
+            hook.DesignHint(),
+            hook.PdkHint());
+        hook.Dump(rec);
+      } catch (...) {
+        // Swallowed: routing must continue. ClipDumpHook will log on
+        // its own failures; here we silence build-side exceptions
+        // (e.g. bad_alloc) to honor guardrail 5.
+      }
+    }
+  }
+#endif
+
   return 0;
 }
 
