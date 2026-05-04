@@ -42,6 +42,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = MetalShortConfig{};
       out.rule.halo = 0;
+      out.rule.layer_knownness = LayerKnownness::Unknown;
       out.rule.tag = "frShortConstraint";
       out.produced_rule = true;
       return out;
@@ -55,6 +56,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = PrlSpacingConfig{min_sp, 0};
       out.rule.halo = min_sp;
+      out.rule.layer_knownness = LayerKnownness::Unknown;
       out.rule.tag = "frSpacingConstraint";
       out.produced_rule = true;
       return out;
@@ -82,6 +84,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = std::max(cfg.eol_spacing, cfg.eol_within);
+      out.rule.layer_knownness = LayerKnownness::Unknown;
       out.rule.tag = "frSpacingEndOfLineConstraint";
       out.produced_rule = true;
       return out;
@@ -106,6 +109,7 @@ OneResult TranslateOne(const drt::frConstraint* c)
       out.rule.coverage = RuleCoverage::Supported;
       out.rule.params = cfg;
       out.rule.halo = cfg.min_spacing;
+      out.rule.layer_knownness = LayerKnownness::Unknown;
       out.rule.tag = "frCutSpacingConstraint";
       out.produced_rule = true;
       return out;

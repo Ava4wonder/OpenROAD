@@ -19,18 +19,32 @@ class RuleDeck
 {
  public:
   // Honest coverage accounting from translation. Reportable in P2.2.e.
+  // Per amendment 4, the four-category split distinguishes Supported
+  // rules with explicit-layer info from Supported rules with unknown
+  // layer info. Both still evaluate identically in the oracle (predicates
+  // self-filter by Shape::layer), but reporting can show how much
+  // per-layer attribution we lose to the upstream getLayer() limitation.
+  //   supported = supported_explicit + supported_unknown
   struct Coverage
   {
-    std::size_t total_input = 0;  // upstream constraints inspected
-    std::size_t supported = 0;    // oracle evaluates these
-    std::size_t fallback = 0;     // oracle declines; exact-check fallback
-    std::size_t unsupported = 0;  // unrecognized; same fall-through behavior
+    std::size_t total_input = 0;        // upstream constraints inspected
+    std::size_t supported = 0;          // oracle evaluates these
+    std::size_t supported_explicit = 0; // ... with extractable layer info
+    std::size_t supported_unknown = 0;  // ... with layer info missing
+    std::size_t fallback = 0;           // oracle declines; exact-check fallback
+    std::size_t unsupported = 0;        // unrecognized
 
     double supported_fraction() const
     {
       return total_input == 0 ? 0.0
                               : static_cast<double>(supported)
                                     / static_cast<double>(total_input);
+    }
+    double explicit_layer_fraction() const
+    {
+      return supported == 0 ? 0.0
+                            : static_cast<double>(supported_explicit)
+                                  / static_cast<double>(supported);
     }
   };
 

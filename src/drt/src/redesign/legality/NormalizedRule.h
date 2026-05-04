@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -55,12 +56,36 @@ using RuleParams = std::variant<MetalShortConfig,
                                 EolSpacingConfig,
                                 CutSpacingConfig>;
 
+// Per amendment 4 of the P2.2.e structural review. Disambiguates "no
+// layer filter set" between "explicitly all layers" and "couldn't
+// determine the layer at translation time" — both behave identically in
+// the oracle (predicates do their own per-pair layer check via Shape),
+// but the reporting layer needs to distinguish them. Avoids the prior
+// `layer == -1` sentinel that conflated the two.
+enum class LayerKnownness : std::uint8_t {
+  // Layer info was extractable from upstream and is reflected in
+  // layer_filter (set or explicitly empty for "all layers").
+  Explicit,
+  // Layer info couldn't be extracted at translation time. The rule still
+  // evaluates correctly because the oracle's per-pair predicate filters
+  // by Shape::layer; only per-layer reporting granularity is reduced.
+  Unknown,
+};
+
 struct NormalizedRule
 {
   RuleFamily family;
   RuleCoverage coverage = RuleCoverage::Unsupported;
   RuleParams params;          // valid iff coverage == Supported
-  std::int16_t layer = -1;    // -1 means "applies to all layers"
+
+  // Optional layer constraint. Combined with layer_knownness:
+  //   (set,        Explicit) — applies to that specific layer
+  //   (std::nullopt, Explicit) — explicitly applies to all layers
+  //   (std::nullopt, Unknown)  — translation-time layer unknown
+  //   (set,        Unknown)    — invalid combination, do not construct
+  std::optional<std::int16_t> layer_filter;
+  LayerKnownness layer_knownness = LayerKnownness::Unknown;
+
   std::string tag;            // human-readable for trace output
 
   // x-axis halo upper bound for the oracle's per-rule pre-filter.

@@ -19,6 +19,11 @@ void RuleDeck::Add(const NormalizedRule& rule)
   switch (rule.coverage) {
     case RuleCoverage::Supported:
       ++coverage_.supported;
+      if (rule.layer_knownness == LayerKnownness::Explicit) {
+        ++coverage_.supported_explicit;
+      } else {
+        ++coverage_.supported_unknown;
+      }
       break;
     case RuleCoverage::Fallback:
       ++coverage_.fallback;

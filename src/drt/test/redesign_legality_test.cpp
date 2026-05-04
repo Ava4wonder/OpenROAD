@@ -527,19 +527,32 @@ bool TestRuleDeckCoverageAccounting()
     return false;
   }
 
-  lg::NormalizedRule supported{};
-  supported.family = lg::RuleFamily::PrlSpacing;
-  supported.coverage = lg::RuleCoverage::Supported;
-  supported.params = lg::PrlSpacingConfig{15, 30};
-  supported.layer = 1;
-  supported.tag = "M2:test";
-  supported.halo = 15;
-  deck.Add(supported);
+  // One Supported with explicit layer info.
+  lg::NormalizedRule supported_explicit{};
+  supported_explicit.family = lg::RuleFamily::PrlSpacing;
+  supported_explicit.coverage = lg::RuleCoverage::Supported;
+  supported_explicit.params = lg::PrlSpacingConfig{15, 30};
+  supported_explicit.layer_filter = std::int16_t{1};
+  supported_explicit.layer_knownness = lg::LayerKnownness::Explicit;
+  supported_explicit.tag = "M2:test";
+  supported_explicit.halo = 15;
+  deck.Add(supported_explicit);
+
+  // One Supported with unknown layer info (the current translator default).
+  lg::NormalizedRule supported_unknown{};
+  supported_unknown.family = lg::RuleFamily::MetalShort;
+  supported_unknown.coverage = lg::RuleCoverage::Supported;
+  supported_unknown.params = lg::MetalShortConfig{};
+  supported_unknown.layer_knownness = lg::LayerKnownness::Unknown;
+  supported_unknown.tag = "Mx:short";
+  supported_unknown.halo = 0;
+  deck.Add(supported_unknown);
 
   lg::NormalizedRule fallback{};
   fallback.family = lg::RuleFamily::PrlSpacing;
   fallback.coverage = lg::RuleCoverage::Fallback;
-  fallback.layer = 2;
+  fallback.layer_filter = std::int16_t{2};
+  fallback.layer_knownness = lg::LayerKnownness::Explicit;
   fallback.tag = "M2:spacing_table";
   deck.Add(fallback);
 
@@ -547,7 +560,7 @@ bool TestRuleDeckCoverageAccounting()
   deck.AddUnsupported();
 
   const auto cov = deck.GetCoverage();
-  if (cov.total_input != 4 || cov.supported != 1 || cov.fallback != 1
+  if (cov.total_input != 5 || cov.supported != 2 || cov.fallback != 1
       || cov.unsupported != 2) {
     std::fprintf(stderr,
                  "FAIL TestRuleDeckCoverageAccounting: got "
@@ -558,11 +571,19 @@ bool TestRuleDeckCoverageAccounting()
                  cov.unsupported);
     return false;
   }
-  if (deck.Size() != 2) {
+  if (cov.supported_explicit != 1 || cov.supported_unknown != 1) {
+    std::fprintf(stderr,
+                 "FAIL TestRuleDeckCoverageAccounting layer-knownness split: "
+                 "(sup_explicit=%zu, sup_unknown=%zu)\n",
+                 cov.supported_explicit,
+                 cov.supported_unknown);
+    return false;
+  }
+  if (deck.Size() != 3) {
     // Note: AddUnsupported() does NOT add a NormalizedRule, only
     // increments counters; deck size reflects only Add() calls.
     std::fprintf(stderr,
-                 "FAIL TestRuleDeckCoverageAccounting Size=%zu (expected 2)\n",
+                 "FAIL TestRuleDeckCoverageAccounting Size=%zu (expected 3)\n",
                  deck.Size());
     return false;
   }
@@ -667,6 +688,25 @@ bool TestTranslateShort()
   if (r.family != lg::RuleFamily::MetalShort
       || r.coverage != lg::RuleCoverage::Supported || r.halo != 0) {
     std::fprintf(stderr, "FAIL TestTranslateShort: unexpected rule shape\n");
+    return false;
+  }
+  // Amendment 4: translator currently can't extract upstream layer info,
+  // so all Supported rules should be marked Unknown rather than carrying
+  // a stale -1 sentinel.
+  if (r.layer_knownness != lg::LayerKnownness::Unknown
+      || r.layer_filter.has_value()) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateShort: layer model expected "
+                 "(no_value, Unknown)\n");
+    return false;
+  }
+  if (deck.GetCoverage().supported_unknown != 1
+      || deck.GetCoverage().supported_explicit != 0) {
+    std::fprintf(stderr,
+                 "FAIL TestTranslateShort: coverage layer-split expected "
+                 "(explicit=0, unknown=1) got (explicit=%zu, unknown=%zu)\n",
+                 deck.GetCoverage().supported_explicit,
+                 deck.GetCoverage().supported_unknown);
     return false;
   }
   return true;
