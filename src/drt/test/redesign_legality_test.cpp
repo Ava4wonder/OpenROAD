@@ -837,7 +837,7 @@ bool TestTranslateCutSpacingExtendedIsFallback()
 bool TestTranslateUnknownIsUnsupported()
 {
   // frMinWidthConstraint isn't in any of our families.
-  drt::frMinWidthConstraint mw;
+  drt::frMinWidthConstraint mw(20);
   const drt::frConstraint* in[1] = {&mw};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
@@ -857,7 +857,7 @@ bool TestTranslateBatchCoverageMix()
   drt::frShortConstraint sc;
   drt::frSpacingConstraint sp(40);
   drt::frSpacingSamenetConstraint sn(50, false);  // Fallback
-  drt::frMinWidthConstraint mw;                   // Unsupported
+  drt::frMinWidthConstraint mw(20);                   // Unsupported
   const drt::frConstraint* in[4] = {&sc, &sp, &sn, &mw};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 4);
