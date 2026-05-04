@@ -27,6 +27,11 @@
 #include "gc/FlexGC_impl.h"
 #include "odb/dbTypes.h"
 #include "odb/geom.h"
+
+#ifdef ENABLE_DRT_REDESIGN
+#include "redesign/legality/ClipDumpHook.h"
+#include "redesign/legality/GcWorkerClipBuilder.h"
+#endif
 #include "odb/isotropy.h"
 
 using odb::dbTechLayerType;
@@ -4168,11 +4173,6 @@ void FlexGCWorker::Impl::modifyMarkers()
     }
   }
 }
-
-#ifdef ENABLE_DRT_REDESIGN
-#include "redesign/legality/ClipDumpHook.h"
-#include "redesign/legality/GcWorkerClipBuilder.h"
-#endif
 
 int FlexGCWorker::Impl::main()
 {
