@@ -18,6 +18,7 @@
 
 #include "db/tech/frConstraint.h"
 #include "db/tech/frLayer.h"
+#include "db/tech/frLookupTbl.h"
 #include "frBaseTypes.h"
 
 namespace drt::redesign::legality {
@@ -25,6 +26,68 @@ namespace drt::redesign::legality {
 namespace {
 
 std::atomic<std::uint64_t> g_layer_conflicts{0};
+
+// P2.2.e.2.c.2 (Step C1): classify a frSpacingTablePrlConstraint's
+// 2D (width, PRL) -> spacing table by SHAPE only. Coverage stays
+// Fallback regardless; this just labels which table shapes drive each
+// session's PrlSpacing fallback so reporting can show whether C2
+// (semantic widening for the easy classes) would unlock material
+// coverage on real PDKs.
+//
+// Classes:
+//   single_row             — exactly one width row; reduces to
+//                            (min_spacing, prl_threshold) via the row's
+//                            constant or monotone PRL row. C2 target.
+//   constant_spacing       — all table cells equal; reduces to
+//                            min_spacing alone. C2 target.
+//   monotonic_multi_width  — multi-row, multi-col, values non-decreasing
+//                            in BOTH axes. Conservative collapse with
+//                            findMax() is no-false-negative-safe but
+//                            over-flags. C3 candidate (deferred).
+//   exotic                 — anything else. Stays Fallback.
+const char* ClassifyPrlTable(const ::drt::frSpacingTablePrlConstraint* c)
+{
+  if (c == nullptr) {
+    return "null";
+  }
+  const auto& tbl = c->getLookupTbl();
+  // findMin / findMax are const accessors. Short-circuit on
+  // constant-spacing without touching the rows/cols arrays.
+  if (tbl.findMin() == tbl.findMax()) {
+    return "constant_spacing";
+  }
+  // Upstream API quirk: getRows/getCols/getValues are not const member
+  // functions despite returning by value. const_cast to call them is
+  // safe; we do not mutate state. Documented in upstream as a known
+  // const-correctness gap.
+  using TblT = std::decay_t<decltype(tbl)>;
+  TblT& mut_tbl = const_cast<TblT&>(tbl);
+  const auto rows = mut_tbl.getRows();
+  const auto vals = mut_tbl.getValues();
+  if (rows.size() <= 1) {
+    return "single_row";
+  }
+  bool monotonic = true;
+  for (std::size_t r = 0; r + 1 < vals.size() && monotonic; ++r) {
+    for (std::size_t cc = 0;
+         cc < vals[r].size() && cc < vals[r + 1].size();
+         ++cc) {
+      if (vals[r + 1][cc] < vals[r][cc]) {
+        monotonic = false;
+        break;
+      }
+    }
+  }
+  for (std::size_t r = 0; r < vals.size() && monotonic; ++r) {
+    for (std::size_t cc = 0; cc + 1 < vals[r].size(); ++cc) {
+      if (vals[r][cc + 1] < vals[r][cc]) {
+        monotonic = false;
+        break;
+      }
+    }
+  }
+  return monotonic ? "monotonic_multi_width" : "exotic";
+}
 
 // Outcome of deriving family + params + halo from one constraint's
 // SUBCLASS only. Layer attribution is filled in by the caller per the
@@ -115,10 +178,14 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
       out.rule.family = RuleFamily::PrlSpacing;
       out.rule.tag = "frSpacingSamenetConstraint";
       goto fallback;
-    case Type::frcSpacingTablePrlConstraint:
+    case Type::frcSpacingTablePrlConstraint: {
+      const auto* sc
+          = static_cast<const ::drt::frSpacingTablePrlConstraint*>(c);
       out.rule.family = RuleFamily::PrlSpacing;
-      out.rule.tag = "frSpacingTablePrlConstraint";
+      out.rule.tag = std::string("frSpacingTablePrlConstraint(")
+                     + ClassifyPrlTable(sc) + ")";
       goto fallback;
+    }
     case Type::frcSpacingTableTwConstraint:
       out.rule.family = RuleFamily::PrlSpacing;
       out.rule.tag = "frSpacingTableTwConstraint";
