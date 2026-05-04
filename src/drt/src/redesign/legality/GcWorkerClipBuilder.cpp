@@ -29,8 +29,8 @@ bool BBoxIntersect(std::int32_t ax1,
 }  // namespace
 
 ClipRecord BuildClipRecord(
-    const std::vector<std::unique_ptr<::drt::gcNet>>& nets,
-    const std::vector<std::unique_ptr<::drt::frMarker>>& markers,
+    const std::vector<std::unique_ptr< ::drt::gcNet >>& nets,
+    const std::vector<std::unique_ptr< ::drt::frMarker >>& markers,
     const odb::Rect& drc_box,
     const odb::Rect& ext_box,
     ::drt::frLayerNum min_layer_num,
