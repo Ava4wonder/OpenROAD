@@ -8,6 +8,15 @@ option(ENABLE_DRT_REDESIGN
   "Build the redesigned DRT transactional state engine (Phase 1 scaffolding only). \
 See topics/.../drt_redesign_plan.md."
   OFF)
+option(ENABLE_DRT_REDESIGN_OVERLAY
+  "Build the V2 transactional read/write overlay around drt. Requires \
+ENABLE_DRT_REDESIGN. See topics/.../v2_drt_redesign_plan.md."
+  OFF)
+
+if(ENABLE_DRT_REDESIGN_OVERLAY AND NOT ENABLE_DRT_REDESIGN)
+  message(FATAL_ERROR
+    "ENABLE_DRT_REDESIGN_OVERLAY requires ENABLE_DRT_REDESIGN=ON.")
+endif()
 
 project(drt
   LANGUAGES CXX
@@ -130,6 +139,13 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/legality/AuditReport.cpp
   )
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
+
+  if(ENABLE_DRT_REDESIGN_OVERLAY)
+    # V2 overlay sources land in subsequent V2.1.* commits. The flag is
+    # introduced now (V2.1.a) so all later sub-phases can gate on it
+    # without further CMake churn.
+    target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_OVERLAY=1)
+  endif()
 
   add_executable(redesign_simd_test test/redesign_simd_test.cpp)
   target_link_libraries(redesign_simd_test PRIVATE drt_lib)
