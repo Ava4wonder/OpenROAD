@@ -74,6 +74,9 @@ bool TestWriteFootprintOfAddWire()
   add.layer = 5;
   r::Delta d = add;
   r::WriteFootprint wf = r::WriteFootprint::Of(d);
+  if (wf.unknown) {
+    return false;  // AddWire footprint is sound — must not be unknown.
+  }
   if (wf.shapes.size() != 1u || wf.layers.size() != 1u) {
     return false;
   }
@@ -91,6 +94,9 @@ bool TestWriteFootprintOfInsertShield()
   s.layer = 7;
   r::Delta d = s;
   r::WriteFootprint wf = r::WriteFootprint::Of(d);
+  if (wf.unknown) {
+    return false;
+  }
   if (wf.shapes.size() != 1u || wf.layers.size() != 1u) {
     return false;
   }
@@ -103,6 +109,9 @@ bool TestWriteFootprintOfAddViaExpands()
   v.location = r::Point{500, 500};
   r::Delta d = v;
   r::WriteFootprint wf = r::WriteFootprint::Of(d);
+  if (wf.unknown) {
+    return false;
+  }
   if (wf.shapes.size() != 1u) {
     return false;
   }
@@ -113,17 +122,47 @@ bool TestWriteFootprintOfAddViaExpands()
          && wf.shapes[0].ur.y > wf.shapes[0].ll.y;
 }
 
-bool TestWriteFootprintOfDeleteWireIsStubEmpty()
+bool TestWriteFootprintOfDeleteWireIsUnknown()
 {
-  // V2.1 returns empty for kinds that need design-side lookup. The
-  // V2.2.a step fills these in. The point of the test is to confirm
-  // the V2.1 contract — the API doesn't crash and returns an empty
-  // (not a wrong) footprint.
+  // SAFETY INVARIANT: V2.1 cannot produce a sound footprint for
+  // DeleteWire without a design-side lookup. The empty (shapes,
+  // layers) MUST be paired with unknown=true so V2.4's commit path
+  // rejects this Delta from any parallel batch and forces a serial
+  // fallback. An empty-with-unknown=false would be a real "writes
+  // nothing" claim, which would be a safety bug for DeleteWire.
   r::DeleteWire del;
   del.segment_id = 42;
   r::Delta d = del;
   r::WriteFootprint wf = r::WriteFootprint::Of(d);
-  return wf.shapes.empty() && wf.layers.empty();
+  return wf.unknown && wf.shapes.empty() && wf.layers.empty();
+}
+
+bool TestWriteFootprintOfAllUnimplementedKindsAreUnknown()
+{
+  // Same invariant for every design-lookup-dependent kind: V2.1 must
+  // mark them unknown so the parallel-commit gate rejects them. This
+  // test shrinks the surface area for the V2.4 pre-gate review:
+  // before V2.4 lands, every false here is a kind that needs a sound
+  // footprint or an explicit serial-fallback classification.
+  r::DeleteVia dv;
+  dv.via_id = 1;
+  r::MoveCell mc;
+  mc.inst = nullptr;
+  r::ChangePinAccess cpa;
+  cpa.iterm = nullptr;
+  r::ChangeLayerAssignment cla;
+  cla.segment_id = 7;
+  cla.new_layer = 3;
+  r::ResizeCell rc;
+  rc.inst = nullptr;
+  r::Delta deltas[] = {dv, mc, cpa, cla, rc};
+  for (const auto& d : deltas) {
+    r::WriteFootprint wf = r::WriteFootprint::Of(d);
+    if (!wf.unknown) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool TestReadFootprintAllDomainsExist()
@@ -216,8 +255,10 @@ int main()
        TestWriteFootprintOfInsertShield},
       {"WriteFootprint::Of(AddVia) expands",
        TestWriteFootprintOfAddViaExpands},
-      {"WriteFootprint::Of(DeleteWire) is V2.1-stub-empty",
-       TestWriteFootprintOfDeleteWireIsStubEmpty},
+      {"WriteFootprint::Of(DeleteWire) sets unknown=true",
+       TestWriteFootprintOfDeleteWireIsUnknown},
+      {"All unimplemented DeltaKinds are unknown",
+       TestWriteFootprintOfAllUnimplementedKindsAreUnknown},
       {"ReadFootprint all domains exist",
        TestReadFootprintAllDomainsExist},
       {"Eligibility positive same-layer overlap",

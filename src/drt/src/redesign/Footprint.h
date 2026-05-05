@@ -62,13 +62,35 @@ struct DeltaId
 };
 
 // Bbox per layer that the Delta would write to.
+//
+// SAFETY INVARIANT (load-bearing for V2.4 parallel commit):
+//   `unknown == false` (the default) means the (shapes, layers) pair
+//   is the COMPLETE set of writes this Delta would perform. Conflict
+//   checkers may rely on it being exhaustive.
+//
+//   `unknown == true` means the footprint is incomplete — for
+//   instance, V2.1 returns this for DeltaKinds whose footprint needs
+//   a design-side lookup not yet wired (DeleteWire, DeleteVia,
+//   MoveCell, ChangePinAccess, ChangeLayerAssignment, ResizeCell).
+//   Consumers MUST treat such Deltas as non-cross-committable and
+//   force a serial fallback until V2.2.a fills the implementation in.
+//
+// An empty footprint with `unknown == false` is a real "writes
+// nothing" claim (no current Delta variant produces this; documented
+// for future extension). An empty footprint with `unknown == true`
+// is a placeholder admitting "we don't know what this writes."
+// V2.4's commit path must reject `unknown == true` proposals from
+// the parallel batch — this is the pre-V2.4 gate the plan calls out.
 struct WriteFootprint
 {
   std::vector<Rect> shapes;
   std::vector<LayerNum> layers;
+  bool unknown = false;
 
   // Extract the write footprint of a Delta variant. Each kind expands
-  // its bbox by the appropriate halo (e.g. via enclosure for AddVia).
+  // its bbox by the appropriate halo (e.g., via enclosure for AddVia).
+  // Sets `unknown=true` when V2.1 cannot produce a sound footprint
+  // for the variant (the design-lookup-dependent kinds above).
   static WriteFootprint Of(const Delta& d);
 };
 

@@ -37,7 +37,9 @@ WriteFootprint WriteFootprint::Of(const Delta& d)
         } else if constexpr (std::is_same_v<T, AddVia>) {
           // Bbox: the via location expanded by a default enclosure halo.
           // Layer: V2.1 records placeholder 0 — V2.2.a resolves the
-          // via_def's cut and metal layers.
+          // via_def's cut and metal layers. The location-derived bbox
+          // and placeholder layer are sound (over-conservative on
+          // layer); `unknown` stays false.
           Rect r;
           r.ll.x = kind.location.x - kDefaultViaEnclosureDbu;
           r.ll.y = kind.location.y - kDefaultViaEnclosureDbu;
@@ -48,10 +50,14 @@ WriteFootprint WriteFootprint::Of(const Delta& d)
         } else if constexpr (std::is_same_v<T, InsertShield>) {
           out.shapes.push_back(kind.coverage);
           out.layers.push_back(kind.layer);
+        } else {
+          // DeleteWire, DeleteVia, MoveCell, ChangePinAccess,
+          // ChangeLayerAssignment, ResizeCell: V2.1 cannot produce a
+          // sound footprint without a design-side lookup. Set the
+          // unknown flag so V2.4's commit path rejects these from the
+          // parallel batch — see Footprint.h SAFETY INVARIANT.
+          out.unknown = true;
         }
-        // DeleteWire, DeleteVia, MoveCell, ChangePinAccess,
-        // ChangeLayerAssignment, ResizeCell: V2.1 returns empty
-        // footprint — see file docstring.
       },
       d);
   return out;
