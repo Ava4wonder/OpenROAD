@@ -29,14 +29,15 @@ class MemoryBackedGeometryView : public GeometryView
   {
   }
 
-  std::vector<MarkerRef> QueryMarkers(const Rect& box) const override;
+  MarkerQueryResult QueryMarkers(const Rect& box) const override;
 
   // V2.2+ methods — throw per GeometryView contract.
-  std::vector<ShapeRef> QueryRouteShapes(const Rect& box,
-                                         LayerNum layer) const override;
-  std::vector<ShapeRef> QueryGuides(const Rect& box) const override;
-  std::vector<ShapeRef> QueryBlockages(const Rect& box,
-                                       LayerNum layer) const override;
+  ShapeQueryResult QueryRouteShapes(const Rect& box,
+                                    LayerNum layer) const override;
+  GuideQueryResult QueryGuides(const Rect& box) const override;
+  BlockageQueryResult QueryBlockages(const Rect& box,
+                                     LayerNum layer) const override;
+  PinAccessQueryResult QueryPinAccess(const Rect& box) const override;
 
  private:
   std::vector<MarkerRef> markers_;

@@ -20,10 +20,10 @@ bool BboxOverlap(const Rect& a, const Rect& b) noexcept
 
 }  // namespace
 
-std::vector<MarkerRef> MemoryBackedGeometryView::QueryMarkers(
+MarkerQueryResult MemoryBackedGeometryView::QueryMarkers(
     const Rect& box) const
 {
-  std::vector<MarkerRef> out;
+  MarkerQueryResult out;
   for (const MarkerRef& m : markers_) {
     if (BboxOverlap(box, m.bbox)) {
       out.push_back(m);
@@ -32,7 +32,7 @@ std::vector<MarkerRef> MemoryBackedGeometryView::QueryMarkers(
   return out;
 }
 
-std::vector<ShapeRef> MemoryBackedGeometryView::QueryRouteShapes(
+ShapeQueryResult MemoryBackedGeometryView::QueryRouteShapes(
     const Rect& box,
     LayerNum layer) const
 {
@@ -42,7 +42,7 @@ std::vector<ShapeRef> MemoryBackedGeometryView::QueryRouteShapes(
       "GeometryView: QueryRouteShapes not supported in V2.1");
 }
 
-std::vector<ShapeRef> MemoryBackedGeometryView::QueryGuides(
+GuideQueryResult MemoryBackedGeometryView::QueryGuides(
     const Rect& box) const
 {
   (void) box;
@@ -50,7 +50,7 @@ std::vector<ShapeRef> MemoryBackedGeometryView::QueryGuides(
       "GeometryView: QueryGuides not supported in V2.1");
 }
 
-std::vector<ShapeRef> MemoryBackedGeometryView::QueryBlockages(
+BlockageQueryResult MemoryBackedGeometryView::QueryBlockages(
     const Rect& box,
     LayerNum layer) const
 {
@@ -58,6 +58,14 @@ std::vector<ShapeRef> MemoryBackedGeometryView::QueryBlockages(
   (void) layer;
   throw std::logic_error(
       "GeometryView: QueryBlockages not supported in V2.1");
+}
+
+PinAccessQueryResult MemoryBackedGeometryView::QueryPinAccess(
+    const Rect& box) const
+{
+  (void) box;
+  throw std::logic_error(
+      "GeometryView: QueryPinAccess not supported in V2.1");
 }
 
 }  // namespace drt::redesign::overlay

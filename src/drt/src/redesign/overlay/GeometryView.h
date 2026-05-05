@@ -25,6 +25,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -58,6 +59,50 @@ struct ShapeRef
   std::optional<NetId> net_id;
 };
 
+// V2.1: declared so the abstract interface can name them in
+// signatures. **Their semantics are not implemented in V2.1** — V2.2.a
+// fills in the projection logic and the matching CanonicalTuple
+// overload per entity, in its own per-entity commit.
+struct GuideRef
+{
+  Rect bbox{};
+  std::optional<LayerNum> layer;
+  std::optional<NetId> net_id;
+};
+
+struct BlockageRef
+{
+  Rect bbox{};
+  std::optional<LayerNum> layer;
+};
+
+struct PinAccessRef
+{
+  Rect bbox{};
+  std::optional<LayerNum> layer;
+  std::optional<uint64_t> iterm_id;
+  std::optional<int32_t> access_pattern_index;
+};
+
+// QueryCost / CostFieldView intentionally NOT on the V2.1.e abstract
+// interface. Adding `unique_ptr<CostFieldView>` as a return type
+// requires CostFieldView to be complete at every call site of the
+// virtual destructor (libstdc++ instantiates sizeof(T) inside
+// unique_ptr's deleter). Forward-declaration alone is not enough,
+// and a fake empty struct would create false confidence ahead of
+// the V2.2.a.5 cost-field design. Per v2 §2.5, the QueryCost slot
+// will be added to GeometryView in V2.2.a.5 alongside the real
+// CostFieldView definition. Until then, no V2.1 path needs it.
+
+// Lightweight aliases. Documents intent ("this is a query result")
+// without committing to a QueryResult<T> wrapper. V2.2 may revisit
+// when there are multiple real query families with status semantics.
+using MarkerQueryResult = std::vector<MarkerRef>;
+using ShapeQueryResult = std::vector<ShapeRef>;
+using GuideQueryResult = std::vector<GuideRef>;
+using BlockageQueryResult = std::vector<BlockageRef>;
+using PinAccessQueryResult = std::vector<PinAccessRef>;
+
 class GeometryView
 {
  public:
@@ -68,17 +113,18 @@ class GeometryView
   // a freshly-constructed result. If the V2.4 hot path needs an
   // out-parameter overload to avoid allocations, it will be
   // introduced as a sibling method then.
-  virtual std::vector<MarkerRef> QueryMarkers(const Rect& box) const = 0;
+  virtual MarkerQueryResult QueryMarkers(const Rect& box) const = 0;
 
   // V2.2+ supported. V2.1 implementations throw
   // std::logic_error("GeometryView: <method> not supported in V2.1").
   // Callers MUST NOT touch these methods in V2.1 — exercised by
   // negative tests in redesign_overlay_test.cpp.
-  virtual std::vector<ShapeRef> QueryRouteShapes(const Rect& box,
-                                                 LayerNum layer) const = 0;
-  virtual std::vector<ShapeRef> QueryGuides(const Rect& box) const = 0;
-  virtual std::vector<ShapeRef> QueryBlockages(const Rect& box,
-                                               LayerNum layer) const = 0;
+  virtual ShapeQueryResult QueryRouteShapes(const Rect& box,
+                                            LayerNum layer) const = 0;
+  virtual GuideQueryResult QueryGuides(const Rect& box) const = 0;
+  virtual BlockageQueryResult QueryBlockages(const Rect& box,
+                                             LayerNum layer) const = 0;
+  virtual PinAccessQueryResult QueryPinAccess(const Rect& box) const = 0;
 };
 
 }  // namespace drt::redesign::overlay

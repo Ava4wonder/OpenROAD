@@ -12,6 +12,7 @@
 
 #include "redesign/Footprint.h"
 #include "redesign/overlay/GeometryView.h"
+#include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
 #include "redesign/overlay/SnapshotHandle.h"
 
@@ -324,6 +325,97 @@ bool TestQueryBlockagesThrowsInV21()
   return false;
 }
 
+bool TestQueryPinAccessThrowsInV21()
+{
+  ro::MemoryBackedGeometryView view({});
+  try {
+    (void) view.QueryPinAccess(r::Rect{});
+  } catch (const std::logic_error&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+// ===== V2.1.e.2 — Canonical hashing framework =====
+
+bool TestHashCanonicalRangeOrderInsensitive()
+{
+  // Same multiset, different insertion order → identical hash.
+  std::vector<ro::MarkerRef> a;
+  a.push_back(MakeMarker(0, 0, 10, 10, 2, 5));
+  a.push_back(MakeMarker(50, 50, 60, 60, 3, 7));
+  std::vector<ro::MarkerRef> b;
+  b.push_back(MakeMarker(50, 50, 60, 60, 3, 7));
+  b.push_back(MakeMarker(0, 0, 10, 10, 2, 5));
+  return ro::HashCanonicalRange(a) == ro::HashCanonicalRange(b);
+}
+
+bool TestHashCanonicalRangeDistinguishesContent()
+{
+  std::vector<ro::MarkerRef> a;
+  a.push_back(MakeMarker(0, 0, 10, 10, 2, 5));
+  std::vector<ro::MarkerRef> b;
+  b.push_back(MakeMarker(0, 0, 10, 10, 2, 6));  // different ctype
+  return ro::HashCanonicalRange(a) != ro::HashCanonicalRange(b);
+}
+
+bool TestHashCanonicalRangeDistinguishesAbsentFromZero()
+{
+  // CRITICAL invariant per V2.1.e: a field that is absent must hash
+  // differently from a field that is present-with-value-0. If these
+  // collide, the hash discipline is broken and ShapeSetHash
+  // verification is silently wrong.
+  ro::MarkerRef absent = MakeMarker(0, 0, 10, 10);  // layer absent
+  ro::MarkerRef zero
+      = MakeMarker(0, 0, 10, 10, /*layer=*/r::LayerNum{0});
+  std::vector<ro::MarkerRef> va = {absent};
+  std::vector<ro::MarkerRef> vz = {zero};
+  return ro::HashCanonicalRange(va) != ro::HashCanonicalRange(vz);
+}
+
+bool TestHashCanonicalRangeStableAcrossRuns()
+{
+  // FNV-1a is deterministic; two evaluations within one process must
+  // be identical.  Cross-run stability is taken on faith from FNV's
+  // algorithm; this test confirms determinism within one run.
+  std::vector<ro::MarkerRef> a;
+  a.push_back(MakeMarker(0, 0, 10, 10, 2, 5));
+  a.push_back(MakeMarker(50, 50, 60, 60, 3, 7));
+  uint64_t h1 = ro::HashCanonicalRange(a);
+  uint64_t h2 = ro::HashCanonicalRange(a);
+  return h1 == h2;
+}
+
+bool TestHashCanonicalRangeEmptyRange()
+{
+  std::vector<ro::MarkerRef> empty;
+  // Empty range hashes to the FNV offset (an arbitrary but stable
+  // value). The exact value doesn't matter; the test confirms it
+  // doesn't crash.
+  uint64_t h = ro::HashCanonicalRange(empty);
+  (void) h;
+  return true;
+}
+
+// ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
+//
+// has_canonical_tuple<MarkerRef> must be true; has_canonical_tuple<
+// GuideRef/BlockageRef/PinAccessRef/ShapeRef> must be false in V2.1.e.
+// V2.2.a's per-entity sub-commits flip these on as the
+// implementations land.
+static_assert(ro::has_canonical_tuple<ro::MarkerRef>::value,
+              "MarkerRef must have CanonicalTuple in V2.1.e");
+static_assert(!ro::has_canonical_tuple<ro::ShapeRef>::value,
+              "ShapeRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+static_assert(!ro::has_canonical_tuple<ro::GuideRef>::value,
+              "GuideRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+static_assert(!ro::has_canonical_tuple<ro::BlockageRef>::value,
+              "BlockageRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+static_assert(!ro::has_canonical_tuple<ro::PinAccessRef>::value,
+              "PinAccessRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+
 bool TestSnapshotHandleHoldsViewByShared()
 {
   // Lifetime test: SnapshotHandle's shared_ptr keeps the GeometryView
@@ -398,8 +490,20 @@ int main()
        TestQueryGuidesThrowsInV21},
       {"GeometryView::QueryBlockages throws in V2.1",
        TestQueryBlockagesThrowsInV21},
+      {"GeometryView::QueryPinAccess throws in V2.1",
+       TestQueryPinAccessThrowsInV21},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
+      {"HashCanonicalRange order-insensitive",
+       TestHashCanonicalRangeOrderInsensitive},
+      {"HashCanonicalRange distinguishes content",
+       TestHashCanonicalRangeDistinguishesContent},
+      {"HashCanonicalRange distinguishes absent from zero",
+       TestHashCanonicalRangeDistinguishesAbsentFromZero},
+      {"HashCanonicalRange stable within a run",
+       TestHashCanonicalRangeStableAcrossRuns},
+      {"HashCanonicalRange empty range",
+       TestHashCanonicalRangeEmptyRange},
   };
   int passed = 0;
   int failed = 0;
