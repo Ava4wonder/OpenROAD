@@ -7,11 +7,16 @@
 // ENABLE_DRT_REDESIGN=ON and ENABLE_DRT_REDESIGN_OVERLAY=ON.
 
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 #include "redesign/Footprint.h"
+#include "redesign/overlay/GeometryView.h"
+#include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/SnapshotHandle.h"
 
 namespace r = drt::redesign;
+namespace ro = drt::redesign::overlay;
 
 namespace {
 
@@ -224,6 +229,118 @@ bool TestEligibilityIntersectionNegativeNoOverlap()
                                                  committed_layers);
 }
 
+// ===== V2.1.d — GeometryView / MemoryBackedGeometryView / SnapshotHandle =====
+
+ro::MarkerRef MakeMarker(int x1, int y1, int x2, int y2,
+                         std::optional<r::LayerNum> layer = std::nullopt,
+                         std::optional<uint32_t> ctype
+                         = std::nullopt)
+{
+  ro::MarkerRef m;
+  m.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  m.layer = layer;
+  m.constraint_type_id = ctype;
+  return m;
+}
+
+bool TestMemoryBackedQueryMarkersReturnsOverlapping()
+{
+  std::vector<ro::MarkerRef> backing;
+  backing.push_back(MakeMarker(0, 0, 10, 10, /*layer=*/2));
+  backing.push_back(MakeMarker(50, 50, 60, 60, /*layer=*/3));
+  backing.push_back(MakeMarker(8, 8, 20, 20, /*layer=*/2));
+  ro::MemoryBackedGeometryView view(std::move(backing));
+
+  auto out
+      = view.QueryMarkers(r::Rect{r::Point{5, 5}, r::Point{15, 15}});
+  // Two of the three markers overlap the query box.
+  return out.size() == 2u;
+}
+
+bool TestMemoryBackedQueryMarkersEmptyOnEmptyBacking()
+{
+  ro::MemoryBackedGeometryView view({});
+  auto out
+      = view.QueryMarkers(r::Rect{r::Point{0, 0}, r::Point{1000, 1000}});
+  return out.empty();
+}
+
+bool TestMemoryBackedQueryMarkersDistinguishesAbsentLayer()
+{
+  // Canonical hashing must distinguish "layer absent" from
+  // "layer == 0". The MemoryBackedGeometryView round-trips both
+  // verbatim.
+  std::vector<ro::MarkerRef> backing;
+  backing.push_back(MakeMarker(0, 0, 10, 10));  // layer absent
+  backing.push_back(
+      MakeMarker(0, 0, 10, 10, /*layer=*/r::LayerNum{0}));  // layer = 0
+  ro::MemoryBackedGeometryView view(std::move(backing));
+  auto out
+      = view.QueryMarkers(r::Rect{r::Point{0, 0}, r::Point{20, 20}});
+  if (out.size() != 2u) {
+    return false;
+  }
+  // First has no layer; second has layer=0.
+  return !out[0].layer.has_value() && out[1].layer.has_value()
+         && out[1].layer.value() == 0;
+}
+
+bool TestQueryRouteShapesThrowsInV21()
+{
+  ro::MemoryBackedGeometryView view({});
+  try {
+    (void) view.QueryRouteShapes(r::Rect{}, 0);
+  } catch (const std::logic_error&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+bool TestQueryGuidesThrowsInV21()
+{
+  ro::MemoryBackedGeometryView view({});
+  try {
+    (void) view.QueryGuides(r::Rect{});
+  } catch (const std::logic_error&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+bool TestQueryBlockagesThrowsInV21()
+{
+  ro::MemoryBackedGeometryView view({});
+  try {
+    (void) view.QueryBlockages(r::Rect{}, 0);
+  } catch (const std::logic_error&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+bool TestSnapshotHandleHoldsViewByShared()
+{
+  // Lifetime test: SnapshotHandle's shared_ptr keeps the GeometryView
+  // alive after the original creating shared_ptr is dropped.
+  std::vector<ro::MarkerRef> backing;
+  backing.push_back(MakeMarker(0, 0, 10, 10));
+  std::shared_ptr<const ro::GeometryView> view
+      = std::make_shared<ro::MemoryBackedGeometryView>(std::move(backing));
+
+  ro::SnapshotHandle h(r::Snapshot{}, view);
+  view.reset();  // drop the original
+  // h.geometry_ still owns the view; query must still work.
+  auto out
+      = h.geometry().QueryMarkers(r::Rect{r::Point{0, 0}, r::Point{20, 20}});
+  return out.size() == 1u;
+}
+
 bool TestProposedDeltaCarriesAll()
 {
   r::AddWire add;
@@ -269,6 +386,20 @@ int main()
        TestEligibilityIntersectionNegativeNoOverlap},
       {"ProposedDelta carries id+footprints",
        TestProposedDeltaCarriesAll},
+      {"MemoryBackedGeometryView::QueryMarkers overlap filter",
+       TestMemoryBackedQueryMarkersReturnsOverlapping},
+      {"MemoryBackedGeometryView::QueryMarkers empty backing",
+       TestMemoryBackedQueryMarkersEmptyOnEmptyBacking},
+      {"MarkerRef.layer distinguishes absent from value 0",
+       TestMemoryBackedQueryMarkersDistinguishesAbsentLayer},
+      {"GeometryView::QueryRouteShapes throws in V2.1",
+       TestQueryRouteShapesThrowsInV21},
+      {"GeometryView::QueryGuides throws in V2.1",
+       TestQueryGuidesThrowsInV21},
+      {"GeometryView::QueryBlockages throws in V2.1",
+       TestQueryBlockagesThrowsInV21},
+      {"SnapshotHandle holds GeometryView via shared_ptr",
+       TestSnapshotHandleHoldsViewByShared},
   };
   int passed = 0;
   int failed = 0;

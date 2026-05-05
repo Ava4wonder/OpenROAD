@@ -142,9 +142,10 @@ if(ENABLE_DRT_REDESIGN)
   target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN=1)
 
   if(ENABLE_DRT_REDESIGN_OVERLAY)
-    # V2 overlay sources land in subsequent V2.1.* commits. The flag is
-    # introduced now (V2.1.a) so all later sub-phases can gate on it
-    # without further CMake churn.
+    target_sources(drt_lib
+      PRIVATE
+        src/redesign/overlay/MemoryBackedGeometryView.cpp
+    )
     target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_OVERLAY=1)
   endif()
 
