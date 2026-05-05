@@ -16,19 +16,29 @@ void RuleDeck::Add(const NormalizedRule& rule)
 {
   rules_.push_back(rule);
   ++coverage_.total_input;
-  switch (rule.coverage) {
-    case RuleCoverage::Supported:
-      ++coverage_.supported;
-      if (rule.layer_knownness == LayerKnownness::Explicit) {
-        ++coverage_.supported_explicit;
+  const bool explicit_layer
+      = (rule.layer_knownness == LayerKnownness::Explicit);
+  switch (rule.tier) {
+    case SupportTier::Exact:
+      ++coverage_.supported_exact;
+      if (explicit_layer) {
+        ++coverage_.supported_exact_explicit;
       } else {
-        ++coverage_.supported_unknown;
+        ++coverage_.supported_exact_unknown;
       }
       break;
-    case RuleCoverage::Fallback:
+    case SupportTier::Conservative:
+      ++coverage_.supported_conservative;
+      if (explicit_layer) {
+        ++coverage_.supported_conservative_explicit;
+      } else {
+        ++coverage_.supported_conservative_unknown;
+      }
+      break;
+    case SupportTier::Fallback:
       ++coverage_.fallback;
       break;
-    case RuleCoverage::Unsupported:
+    case SupportTier::Unsupported:
       ++coverage_.unsupported;
       break;
   }
@@ -87,9 +97,12 @@ void* ParamPointer(const RuleParams& params)
 std::vector<RuleEntry> RuleDeck::ToRuleEntries()
 {
   std::vector<RuleEntry> out;
-  out.reserve(coverage_.supported);
+  out.reserve(coverage_.supported_total());
   for (auto& nr : rules_) {
-    if (nr.coverage != RuleCoverage::Supported) {
+    // Both Exact and Conservative tiers feed the oracle. Audit splits
+    // them in reporting; the oracle predicate sees them identically.
+    if (nr.tier != SupportTier::Exact
+        && nr.tier != SupportTier::Conservative) {
       continue;
     }
     out.push_back(RuleEntry{FamilyToType(nr.family),

@@ -31,23 +31,32 @@ enum class RuleFamily : std::uint8_t {
   CutSpacing = 3,
 };
 
-// Per-rule coverage. Honest reporting requires accounting for all three
-// outcomes; "unsupported" is not the same as "fallback."
-enum class RuleCoverage : std::uint8_t {
-  // Translated to a NormalizedRule with valid params; oracle predicate
-  // evaluates it.
-  Supported,
-  // Translation recognized the rule family/shape but the parameters fall
-  // outside the in-scope subset (see FlexConstraintTranslator.h). The
-  // oracle does NOT evaluate it; clips containing geometry potentially
-  // governed by this rule must fall through to the upstream exact
-  // checker. Coverage counter incremented.
-  Fallback,
-  // Translation did not recognize the upstream constraint. Same
-  // fall-through behavior as Fallback, but accounted separately so we
-  // can tell "we know what we don't know" from "we don't know what we
-  // don't know."
-  Unsupported,
+// Four-tier support classification. Per the P2.2.e.2.c.4 review
+// (architecture discipline): translator only normalizes semantics; tier
+// captures HOW the normalized rule should be used downstream. Audit
+// counts tiers separately so reporting never blurs faithful
+// representation with safe overapproximation.
+enum class SupportTier : std::uint8_t {
+  // Translated to a NormalizedRule whose params are SEMANTICALLY
+  // FAITHFUL to the upstream constraint. Oracle can evaluate directly;
+  // results are usable as-is for bypass decisions.
+  Exact = 0,
+  // Translated rule is a SAFE OVERAPPROXIMATION (no false negatives,
+  // possibly over-flags). Oracle evaluates the rule; a "violation"
+  // verdict still requires upstream exact validation before commit; a
+  // "legal" verdict is trusted (since conservative rules can't say
+  // "legal" when the exact rule would say "violation").
+  Conservative = 1,
+  // Translation recognized the rule family/shape but the parameters
+  // fall outside any in-scope subset. Oracle does NOT evaluate; clips
+  // containing geometry potentially governed by this rule must fall
+  // through to the upstream exact checker.
+  Fallback = 2,
+  // Translation did not recognize the upstream constraint at all. Same
+  // fall-through behavior as Fallback; accounted separately so audit
+  // can distinguish "we know what we don't know" from "we don't know
+  // what we don't know."
+  Unsupported = 3,
 };
 
 // Per-family parameter payload. Only populated when coverage == Supported.
@@ -75,7 +84,7 @@ enum class LayerKnownness : std::uint8_t {
 struct NormalizedRule
 {
   RuleFamily family;
-  RuleCoverage coverage = RuleCoverage::Unsupported;
+  SupportTier tier = SupportTier::Unsupported;
   RuleParams params;          // valid iff coverage == Supported
 
   // Optional layer constraint. Combined with layer_knownness:

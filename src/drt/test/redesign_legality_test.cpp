@@ -530,7 +530,7 @@ bool TestRuleDeckCoverageAccounting()
 {
   lg::RuleDeck deck;
   if (deck.GetCoverage().total_input != 0
-      || deck.GetCoverage().supported != 0) {
+      || deck.GetCoverage().supported_exact != 0) {
     std::fprintf(stderr, "FAIL TestRuleDeckCoverageAccounting empty deck\n");
     return false;
   }
@@ -538,7 +538,7 @@ bool TestRuleDeckCoverageAccounting()
   // One Supported with explicit layer info.
   lg::NormalizedRule supported_explicit{};
   supported_explicit.family = lg::RuleFamily::PrlSpacing;
-  supported_explicit.coverage = lg::RuleCoverage::Supported;
+  supported_explicit.tier = lg::SupportTier::Exact;
   supported_explicit.params = lg::PrlSpacingConfig{15, 30};
   supported_explicit.layer_filter = std::int16_t{1};
   supported_explicit.layer_knownness = lg::LayerKnownness::Explicit;
@@ -549,7 +549,7 @@ bool TestRuleDeckCoverageAccounting()
   // One Supported with unknown layer info (the current translator default).
   lg::NormalizedRule supported_unknown{};
   supported_unknown.family = lg::RuleFamily::MetalShort;
-  supported_unknown.coverage = lg::RuleCoverage::Supported;
+  supported_unknown.tier = lg::SupportTier::Exact;
   supported_unknown.params = lg::MetalShortConfig{};
   supported_unknown.layer_knownness = lg::LayerKnownness::Unknown;
   supported_unknown.tag = "Mx:short";
@@ -558,7 +558,7 @@ bool TestRuleDeckCoverageAccounting()
 
   lg::NormalizedRule fallback{};
   fallback.family = lg::RuleFamily::PrlSpacing;
-  fallback.coverage = lg::RuleCoverage::Fallback;
+  fallback.tier = lg::SupportTier::Fallback;
   fallback.layer_filter = std::int16_t{2};
   fallback.layer_knownness = lg::LayerKnownness::Explicit;
   fallback.tag = "M2:spacing_table";
@@ -568,23 +568,23 @@ bool TestRuleDeckCoverageAccounting()
   deck.AddUnsupported();
 
   const auto cov = deck.GetCoverage();
-  if (cov.total_input != 5 || cov.supported != 2 || cov.fallback != 1
+  if (cov.total_input != 5 || cov.supported_exact != 2 || cov.fallback != 1
       || cov.unsupported != 2) {
     std::fprintf(stderr,
                  "FAIL TestRuleDeckCoverageAccounting: got "
                  "(total=%zu, sup=%zu, fb=%zu, unsup=%zu)\n",
                  cov.total_input,
-                 cov.supported,
+                 cov.supported_exact,
                  cov.fallback,
                  cov.unsupported);
     return false;
   }
-  if (cov.supported_explicit != 1 || cov.supported_unknown != 1) {
+  if (cov.supported_exact_explicit != 1 || cov.supported_exact_unknown != 1) {
     std::fprintf(stderr,
                  "FAIL TestRuleDeckCoverageAccounting layer-knownness split: "
                  "(sup_explicit=%zu, sup_unknown=%zu)\n",
-                 cov.supported_explicit,
-                 cov.supported_unknown);
+                 cov.supported_exact_explicit,
+                 cov.supported_exact_unknown);
     return false;
   }
   if (deck.Size() != 3) {
@@ -604,21 +604,21 @@ bool TestRuleDeckToRuleEntriesRoundTrip()
 
   lg::NormalizedRule short_rule{};
   short_rule.family = lg::RuleFamily::MetalShort;
-  short_rule.coverage = lg::RuleCoverage::Supported;
+  short_rule.tier = lg::SupportTier::Exact;
   short_rule.params = lg::MetalShortConfig{};
   short_rule.halo = 0;
   deck.Add(short_rule);
 
   lg::NormalizedRule prl{};
   prl.family = lg::RuleFamily::PrlSpacing;
-  prl.coverage = lg::RuleCoverage::Supported;
+  prl.tier = lg::SupportTier::Exact;
   prl.params = lg::PrlSpacingConfig{20, 50};
   prl.halo = 20;
   deck.Add(prl);
 
   lg::NormalizedRule fallback{};
   fallback.family = lg::RuleFamily::EolSpacing;
-  fallback.coverage = lg::RuleCoverage::Fallback;
+  fallback.tier = lg::SupportTier::Fallback;
   deck.Add(fallback);
 
   auto entries = deck.ToRuleEntries();
@@ -665,13 +665,13 @@ bool TestFlexConstraintTranslatorNullsAreUnsupported()
   const drt::frConstraint* fake_inputs[3] = {nullptr, nullptr, nullptr};
   auto deck = t.Translate(fake_inputs, 3);
   const auto cov = deck.GetCoverage();
-  if (cov.total_input != 3 || cov.supported != 0 || cov.fallback != 0
+  if (cov.total_input != 3 || cov.supported_exact != 0 || cov.fallback != 0
       || cov.unsupported != 3) {
     std::fprintf(stderr,
                  "FAIL TestFlexConstraintTranslatorNullsAreUnsupported: "
                  "(total=%zu, sup=%zu, fb=%zu, unsup=%zu)\n",
                  cov.total_input,
-                 cov.supported,
+                 cov.supported_exact,
                  cov.fallback,
                  cov.unsupported);
     return false;
@@ -688,14 +688,14 @@ bool TestTranslateShort()
   const drt::frConstraint* in[1] = {&sc};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
-  if (deck.GetCoverage().supported != 1 || deck.Size() != 1) {
+  if (deck.GetCoverage().supported_exact != 1 || deck.Size() != 1) {
     std::fprintf(stderr,
                  "FAIL TestTranslateShort: expected 1 supported rule\n");
     return false;
   }
   const auto& r = deck.At(0);
   if (r.family != lg::RuleFamily::MetalShort
-      || r.coverage != lg::RuleCoverage::Supported || r.halo != 0) {
+      || r.tier != lg::SupportTier::Exact || r.halo != 0) {
     std::fprintf(stderr, "FAIL TestTranslateShort: unexpected rule shape\n");
     return false;
   }
@@ -706,13 +706,13 @@ bool TestTranslateShort()
                  "(no_value, Unknown) when no upstream layer attached\n");
     return false;
   }
-  if (deck.GetCoverage().supported_unknown != 1
-      || deck.GetCoverage().supported_explicit != 0) {
+  if (deck.GetCoverage().supported_exact_unknown != 1
+      || deck.GetCoverage().supported_exact_explicit != 0) {
     std::fprintf(stderr,
                  "FAIL TestTranslateShort: coverage layer-split expected "
                  "(explicit=0, unknown=1) got (explicit=%zu, unknown=%zu)\n",
-                 deck.GetCoverage().supported_explicit,
-                 deck.GetCoverage().supported_unknown);
+                 deck.GetCoverage().supported_exact_explicit,
+                 deck.GetCoverage().supported_exact_unknown);
     return false;
   }
   return true;
@@ -731,14 +731,14 @@ bool TestTranslateShortWithExplicitLayer()
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
 
-  if (deck.GetCoverage().supported_explicit != 1
-      || deck.GetCoverage().supported_unknown != 0) {
+  if (deck.GetCoverage().supported_exact_explicit != 1
+      || deck.GetCoverage().supported_exact_unknown != 0) {
     std::fprintf(stderr,
                  "FAIL TestTranslateShortWithExplicitLayer: coverage split "
                  "expected (explicit=1, unknown=0) got (explicit=%zu, "
                  "unknown=%zu)\n",
-                 deck.GetCoverage().supported_explicit,
-                 deck.GetCoverage().supported_unknown);
+                 deck.GetCoverage().supported_exact_explicit,
+                 deck.GetCoverage().supported_exact_unknown);
     return false;
   }
   const auto& r = deck.At(0);
@@ -874,15 +874,15 @@ bool TestTranslateSpacing()
   const drt::frConstraint* in[1] = {&sc};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
-  if (deck.GetCoverage().supported != 1) {
+  if (deck.GetCoverage().supported_exact != 1) {
     std::fprintf(stderr,
                  "FAIL TestTranslateSpacing: expected supported=1, got %zu\n",
-                 deck.GetCoverage().supported);
+                 deck.GetCoverage().supported_exact);
     return false;
   }
   const auto& r = deck.At(0);
   if (r.family != lg::RuleFamily::PrlSpacing
-      || r.coverage != lg::RuleCoverage::Supported || r.halo != 75) {
+      || r.tier != lg::SupportTier::Exact || r.halo != 75) {
     std::fprintf(stderr, "FAIL TestTranslateSpacing: shape\n");
     return false;
   }
@@ -910,7 +910,7 @@ bool TestTranslateSpacingSamenetIsFallback()
   }
   const auto& r = deck.At(0);
   if (r.family != lg::RuleFamily::PrlSpacing
-      || r.coverage != lg::RuleCoverage::Fallback) {
+      || r.tier != lg::SupportTier::Fallback) {
     std::fprintf(stderr, "FAIL TestTranslateSpacingSamenetIsFallback: shape\n");
     return false;
   }
@@ -927,14 +927,14 @@ bool TestTranslateEolSupported()
   const drt::frConstraint* in[1] = {&ec};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
-  if (deck.GetCoverage().supported != 1) {
+  if (deck.GetCoverage().supported_exact != 1) {
     std::fprintf(stderr,
                  "FAIL TestTranslateEolSupported: expected supported=1\n");
     return false;
   }
   const auto& r = deck.At(0);
   if (r.family != lg::RuleFamily::EolSpacing
-      || r.coverage != lg::RuleCoverage::Supported) {
+      || r.tier != lg::SupportTier::Exact) {
     std::fprintf(stderr, "FAIL TestTranslateEolSupported: shape\n");
     return false;
   }
@@ -990,7 +990,7 @@ bool TestTranslateCutSpacingMinimal()
   const drt::frConstraint* in[1] = {&cc};
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 1);
-  if (deck.GetCoverage().supported != 1) {
+  if (deck.GetCoverage().supported_exact != 1) {
     std::fprintf(stderr,
                  "FAIL TestTranslateCutSpacingMinimal: expected supported=1\n");
     return false;
@@ -1058,13 +1058,13 @@ bool TestTranslateBatchCoverageMix()
   lg::FlexConstraintTranslator t;
   auto deck = t.Translate(in, 4);
   const auto cov = deck.GetCoverage();
-  if (cov.total_input != 4 || cov.supported != 2 || cov.fallback != 1
+  if (cov.total_input != 4 || cov.supported_exact != 2 || cov.fallback != 1
       || cov.unsupported != 1) {
     std::fprintf(stderr,
                  "FAIL TestTranslateBatchCoverageMix: (total=%zu, sup=%zu, "
                  "fb=%zu, unsup=%zu)\n",
                  cov.total_input,
-                 cov.supported,
+                 cov.supported_exact,
                  cov.fallback,
                  cov.unsupported);
     return false;
@@ -1480,14 +1480,14 @@ bool TestLogBinAndBucketKey()
 
 bool RulesEqual(const lg::NormalizedRule& a, const lg::NormalizedRule& b)
 {
-  if (a.family != b.family || a.coverage != b.coverage
+  if (a.family != b.family || a.tier != b.tier
       || a.layer_knownness != b.layer_knownness
       || a.layer_filter != b.layer_filter || a.halo != b.halo
       || a.tag != b.tag) {
     return false;
   }
   // Params equality only matters for Supported.
-  if (a.coverage != lg::RuleCoverage::Supported) {
+  if (a.tier != lg::SupportTier::Exact) {
     return true;
   }
   if (a.params.index() != b.params.index()) {
@@ -1522,7 +1522,7 @@ bool TestRuleDeckDumpRoundTrip()
 
   lg::NormalizedRule r1{};
   r1.family = lg::RuleFamily::MetalShort;
-  r1.coverage = lg::RuleCoverage::Supported;
+  r1.tier = lg::SupportTier::Exact;
   r1.params = lg::MetalShortConfig{};
   r1.layer_filter = std::int16_t{4};
   r1.layer_knownness = lg::LayerKnownness::Explicit;
@@ -1532,7 +1532,7 @@ bool TestRuleDeckDumpRoundTrip()
 
   lg::NormalizedRule r2{};
   r2.family = lg::RuleFamily::PrlSpacing;
-  r2.coverage = lg::RuleCoverage::Supported;
+  r2.tier = lg::SupportTier::Exact;
   r2.params = lg::PrlSpacingConfig{50, 25};
   r2.layer_knownness = lg::LayerKnownness::Unknown;  // no layer info
   r2.tag = "frSpacingConstraint";
@@ -1541,7 +1541,7 @@ bool TestRuleDeckDumpRoundTrip()
 
   lg::NormalizedRule r3{};
   r3.family = lg::RuleFamily::EolSpacing;
-  r3.coverage = lg::RuleCoverage::Supported;
+  r3.tier = lg::SupportTier::Exact;
   r3.params = lg::EolSpacingConfig{40, 20, 8};
   r3.layer_filter = std::int16_t{2};
   r3.layer_knownness = lg::LayerKnownness::Explicit;
@@ -1551,7 +1551,7 @@ bool TestRuleDeckDumpRoundTrip()
 
   lg::NormalizedRule r4{};
   r4.family = lg::RuleFamily::CutSpacing;
-  r4.coverage = lg::RuleCoverage::Supported;
+  r4.tier = lg::SupportTier::Exact;
   r4.params = lg::CutSpacingConfig{30};
   r4.tag = "VIA1:cut";
   r4.halo = 30;
@@ -1559,7 +1559,7 @@ bool TestRuleDeckDumpRoundTrip()
 
   lg::NormalizedRule fb{};
   fb.family = lg::RuleFamily::PrlSpacing;
-  fb.coverage = lg::RuleCoverage::Fallback;
+  fb.tier = lg::SupportTier::Fallback;
   fb.tag = "frSpacingTablePrlConstraint";
   original.Add(fb);
 

@@ -139,7 +139,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
   switch (c->typeId()) {
     case Type::frcShortConstraint: {
       out.rule.family = RuleFamily::MetalShort;
-      out.rule.coverage = RuleCoverage::Supported;
+      out.rule.tier = SupportTier::Exact;
       out.rule.params = MetalShortConfig{};
       out.rule.halo = 0;
       out.rule.tag = "frShortConstraint";
@@ -150,7 +150,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
       const auto* sc = static_cast<const ::drt::frSpacingConstraint*>(c);
       const auto min_sp = static_cast<std::int32_t>(sc->getMinSpacing());
       out.rule.family = RuleFamily::PrlSpacing;
-      out.rule.coverage = RuleCoverage::Supported;
+      out.rule.tier = SupportTier::Exact;
       out.rule.params = PrlSpacingConfig{min_sp, 0};
       out.rule.halo = min_sp;
       out.rule.tag = "frSpacingConstraint";
@@ -162,7 +162,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
           = static_cast<const ::drt::frSpacingEndOfLineConstraint*>(c);
       out.rule.family = RuleFamily::EolSpacing;
       if (ec->hasParallelEdge() || ec->hasTwoEdges()) {
-        out.rule.coverage = RuleCoverage::Fallback;
+        out.rule.tier = SupportTier::Fallback;
         out.rule.tag = "frSpacingEndOfLineConstraint(parallel/twoEdges)";
         out.recognized = true;
         return out;
@@ -173,7 +173,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
       const auto eol_spacing
           = static_cast<std::int32_t>(ec->getMinSpacing());
       EolSpacingConfig cfg{eol_width, eol_spacing, eol_within};
-      out.rule.coverage = RuleCoverage::Supported;
+      out.rule.tier = SupportTier::Exact;
       out.rule.params = cfg;
       out.rule.halo = std::max(cfg.eol_spacing, cfg.eol_within);
       out.rule.tag = "frSpacingEndOfLineConstraint";
@@ -189,13 +189,13 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
             || cc->hasSameNet() || cc->hasExceptSamePGNet()
             || cc->hasCenterToCenter() || cc->getCutSpacing() < 0;
       if (extended) {
-        out.rule.coverage = RuleCoverage::Fallback;
+        out.rule.tier = SupportTier::Fallback;
         out.rule.tag = "frCutSpacingConstraint(extended)";
         out.recognized = true;
         return out;
       }
       CutSpacingConfig cfg{static_cast<std::int32_t>(cc->getCutSpacing())};
-      out.rule.coverage = RuleCoverage::Supported;
+      out.rule.tier = SupportTier::Exact;
       out.rule.params = cfg;
       out.rule.halo = cfg.min_spacing;
       out.rule.tag = "frCutSpacingConstraint";
@@ -227,7 +227,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
       if (PrlShapeIsExactish(shape)) {
         const auto& tbl = sc->getLookupTbl();
         const auto min_sp = static_cast<std::int32_t>(tbl.findMax());
-        out.rule.coverage = RuleCoverage::Supported;
+        out.rule.tier = SupportTier::Exact;
         out.rule.params = PrlSpacingConfig{min_sp, 0};
         out.rule.halo = min_sp;
         out.recognized = true;
@@ -274,7 +274,7 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
   }
 
 fallback:
-  out.rule.coverage = RuleCoverage::Fallback;
+  out.rule.tier = SupportTier::Fallback;
   out.recognized = true;
   return out;
 }

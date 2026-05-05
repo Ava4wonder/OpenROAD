@@ -70,7 +70,7 @@ bool ReadString(std::istream& is, std::string* s)
 
 void WriteParams(std::ostream& os, const NormalizedRule& r)
 {
-  if (r.coverage != RuleCoverage::Supported) {
+  if (r.tier != SupportTier::Exact) {
     return;
   }
   std::visit(
@@ -94,7 +94,7 @@ void WriteParams(std::ostream& os, const NormalizedRule& r)
 
 bool ReadParams(std::istream& is, NormalizedRule* r)
 {
-  if (r->coverage != RuleCoverage::Supported) {
+  if (r->tier != SupportTier::Exact) {
     return true;  // nothing to read
   }
   switch (r->family) {
@@ -169,7 +169,7 @@ void WriteRuleDeck(std::ostream& os,
   for (std::size_t i = 0; i < deck.Size(); ++i) {
     const auto& r = deck.At(i);
     WriteLE<std::uint8_t>(os, static_cast<std::uint8_t>(r.family));
-    WriteLE<std::uint8_t>(os, static_cast<std::uint8_t>(r.coverage));
+    WriteLE<std::uint8_t>(os, static_cast<std::uint8_t>(r.tier));
     WriteLE<std::uint8_t>(os,
                           static_cast<std::uint8_t>(r.layer_knownness));
     const std::uint8_t has = r.layer_filter.has_value() ? 1u : 0u;
@@ -249,14 +249,14 @@ bool ReadRuleDeck(std::istream& is,
     if (fam > static_cast<std::uint8_t>(RuleFamily::CutSpacing)) {
       return false;
     }
-    if (cvg > static_cast<std::uint8_t>(RuleCoverage::Unsupported)) {
+    if (cvg > static_cast<std::uint8_t>(SupportTier::Unsupported)) {
       return false;
     }
     if (lk > static_cast<std::uint8_t>(LayerKnownness::Unknown)) {
       return false;
     }
     r.family = static_cast<RuleFamily>(fam);
-    r.coverage = static_cast<RuleCoverage>(cvg);
+    r.tier = static_cast<SupportTier>(cvg);
     r.layer_knownness = static_cast<LayerKnownness>(lk);
     if (has != 0u) {
       std::int16_t lyr = 0;

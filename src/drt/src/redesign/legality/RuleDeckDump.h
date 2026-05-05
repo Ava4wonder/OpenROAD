@@ -53,11 +53,14 @@
 namespace drt::redesign::legality {
 
 inline constexpr std::uint32_t kRuleDeckDumpMagic = 0x50444452u;  // 'RDDP'
-// v1.1: adds provenance block between header and coverage.
-// v1.2 (0x00010002): adds session_id, design, pdk to provenance so the
-//   audit can join clip-dump and rule-deck artifacts on session_id and
-//   surface the design name uniformly across both sides.
-inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010002u;
+// v1.3 (0x00010003): SupportTier replaces RuleCoverage.
+//   - Per-rule tier byte takes 4 values (Exact=0, Conservative=1,
+//     Fallback=2, Unsupported=3) instead of 3 (Supported=0, Fallback=1,
+//     Unsupported=2). Old v1.2 readers reject v1.3 cleanly.
+//   - Coverage block expands from 6 u64 to 9 u64 to track
+//     supported_exact{,_explicit,_unknown} + supported_conservative
+//     {,_explicit,_unknown} separately.
+inline constexpr std::uint32_t kRuleDeckDumpVersion = 0x00010003u;
 
 // Per amendment-derived requirements from P2.2.e.2.b review:
 // provenance lives INSIDE the file (not just in the filename) so audit

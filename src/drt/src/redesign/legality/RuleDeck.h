@@ -18,33 +18,41 @@ namespace drt::redesign::legality {
 class RuleDeck
 {
  public:
-  // Honest coverage accounting from translation. Reportable in P2.2.e.
-  // Per amendment 4, the four-category split distinguishes Supported
-  // rules with explicit-layer info from Supported rules with unknown
-  // layer info. Both still evaluate identically in the oracle (predicates
-  // self-filter by Shape::layer), but reporting can show how much
-  // per-layer attribution we lose to the upstream getLayer() limitation.
-  //   supported = supported_explicit + supported_unknown
+  // Tier-aware coverage accounting. supported_exact + supported_conservative
+  // = total rules the oracle will evaluate. supported_exact alone is the
+  // bypass-eligible count. The (explicit, unknown) layer split applies
+  // to BOTH exact and conservative tiers per amendment 4; aggregated
+  // here for simplicity (per-tier explicit/unknown can be reconstructed
+  // from per-rule data when the audit needs it).
+  //   total_input = supported_exact + supported_conservative
+  //                 + fallback + unsupported
   struct Coverage
   {
-    std::size_t total_input = 0;        // upstream constraints inspected
-    std::size_t supported = 0;          // oracle evaluates these
-    std::size_t supported_explicit = 0; // ... with extractable layer info
-    std::size_t supported_unknown = 0;  // ... with layer info missing
-    std::size_t fallback = 0;           // oracle declines; exact-check fallback
-    std::size_t unsupported = 0;        // unrecognized
+    std::size_t total_input = 0;
+    std::size_t supported_exact = 0;
+    std::size_t supported_exact_explicit = 0;
+    std::size_t supported_exact_unknown = 0;
+    std::size_t supported_conservative = 0;
+    std::size_t supported_conservative_explicit = 0;
+    std::size_t supported_conservative_unknown = 0;
+    std::size_t fallback = 0;
+    std::size_t unsupported = 0;
 
-    double supported_fraction() const
+    std::size_t supported_total() const
+    {
+      return supported_exact + supported_conservative;
+    }
+    double supported_exact_fraction() const
     {
       return total_input == 0 ? 0.0
-                              : static_cast<double>(supported)
+                              : static_cast<double>(supported_exact)
                                     / static_cast<double>(total_input);
     }
-    double explicit_layer_fraction() const
+    double supported_total_fraction() const
     {
-      return supported == 0 ? 0.0
-                            : static_cast<double>(supported_explicit)
-                                  / static_cast<double>(supported);
+      return total_input == 0 ? 0.0
+                              : static_cast<double>(supported_total())
+                                    / static_cast<double>(total_input);
     }
   };
 

@@ -25,11 +25,17 @@
 namespace drt::redesign::legality {
 
 // Aggregate metrics for one (design, family) cell.
+// Tier-aware per P2.2.e.2.c.4: exact and conservative are tracked
+// separately so reporting never blurs faithful representation with
+// safe overapproximation.
 struct FamilyCellStats
 {
-  std::size_t supported = 0;
-  std::size_t supported_explicit = 0;
-  std::size_t supported_unknown = 0;
+  std::size_t supported_exact = 0;
+  std::size_t supported_exact_explicit = 0;
+  std::size_t supported_exact_unknown = 0;
+  std::size_t supported_conservative = 0;
+  std::size_t supported_conservative_explicit = 0;
+  std::size_t supported_conservative_unknown = 0;
   std::size_t fallback = 0;
 };
 
@@ -52,11 +58,14 @@ struct SessionStats
   std::string pdk;
   JoinStatus join_status = JoinStatus::ClipsOnly;
 
-  // Rule-deck side.
+  // Rule-deck side. Tier-aware per P2.2.e.2.c.4.
   std::size_t total_input = 0;
-  std::size_t supported = 0;
-  std::size_t supported_explicit = 0;
-  std::size_t supported_unknown = 0;
+  std::size_t supported_exact = 0;
+  std::size_t supported_exact_explicit = 0;
+  std::size_t supported_exact_unknown = 0;
+  std::size_t supported_conservative = 0;
+  std::size_t supported_conservative_explicit = 0;
+  std::size_t supported_conservative_unknown = 0;
   std::size_t fallback = 0;
   std::size_t unsupported = 0;
   std::uint64_t layer_conflicts_seen = 0;

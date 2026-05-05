@@ -75,9 +75,9 @@ void IngestRuleDeck(const RuleDeck& deck,
     const NormalizedRule& r = deck.At(i);
     FamilyCellStats& cell = s.by_family[r.family];
     FamilyCellStats& variant_cell = s.by_family_variant[r.family][r.tag];
-    auto bump = [](FamilyCellStats& c, RuleCoverage cov, LayerKnownness lk) {
+    auto bump = [](FamilyCellStats& c, SupportTier cov, LayerKnownness lk) {
       switch (cov) {
-        case RuleCoverage::Supported:
+        case SupportTier::Exact:
           ++c.supported;
           if (lk == LayerKnownness::Explicit) {
             ++c.supported_explicit;
@@ -85,15 +85,15 @@ void IngestRuleDeck(const RuleDeck& deck,
             ++c.supported_unknown;
           }
           break;
-        case RuleCoverage::Fallback:
+        case SupportTier::Fallback:
           ++c.fallback;
           break;
-        case RuleCoverage::Unsupported:
+        case SupportTier::Unsupported:
           break;
       }
     };
-    bump(cell, r.coverage, r.layer_knownness);
-    bump(variant_cell, r.coverage, r.layer_knownness);
+    bump(cell, r.tier, r.layer_knownness);
+    bump(variant_cell, r.tier, r.layer_knownness);
     if (r.layer_filter.has_value()) {
       ++s.rules_per_layer[r.layer_filter.value()];
     }
@@ -168,26 +168,43 @@ void RenderReport(const AuditReport& report, std::ostream& os)
     os << "## session " << sid << "  design=" << s.design
        << "  pdk=" << s.pdk << "  join_status=" << JoinStatusName(s.join_status)
        << "\n";
+    const std::size_t supported_total
+        = s.supported_exact + s.supported_conservative;
     os << "  rule-deck:\n";
-    os << "    total_input        = " << s.total_input << "\n";
-    os << "    supported          = " << s.supported << "\n";
-    os << "      supported_explicit = " << s.supported_explicit << "\n";
-    os << "      supported_unknown  = " << s.supported_unknown << "\n";
-    os << "    fallback           = " << s.fallback << "\n";
-    os << "    unsupported        = " << s.unsupported << "\n";
-    os << "    layer_conflicts    = " << s.layer_conflicts_seen << "\n";
+    os << "    total_input              = " << s.total_input << "\n";
+    os << "    supported_total          = " << supported_total << "\n";
+    os << "      supported_exact        = " << s.supported_exact << "\n";
+    os << "        explicit_layer       = " << s.supported_exact_explicit
+       << "\n";
+    os << "        unknown_layer        = " << s.supported_exact_unknown
+       << "\n";
+    os << "      supported_conservative = " << s.supported_conservative
+       << "\n";
+    os << "        explicit_layer       = "
+       << s.supported_conservative_explicit << "\n";
+    os << "        unknown_layer        = "
+       << s.supported_conservative_unknown << "\n";
+    os << "    fallback                 = " << s.fallback << "\n";
+    os << "    unsupported              = " << s.unsupported << "\n";
+    os << "    layer_conflicts          = " << s.layer_conflicts_seen
+       << "\n";
 
     os << "  per-family:\n";
     for (const auto& [family, cell] : s.by_family) {
-      os << "    " << FamilyName(family) << ": supported=" << cell.supported
-         << " (explicit=" << cell.supported_explicit
-         << ", unknown=" << cell.supported_unknown
+      const std::size_t cell_supported
+          = cell.supported_exact + cell.supported_conservative;
+      os << "    " << FamilyName(family)
+         << ": supported_total=" << cell_supported
+         << " (exact=" << cell.supported_exact
+         << ", conservative=" << cell.supported_conservative
          << ") fallback=" << cell.fallback << "\n";
       const auto& variants = s.by_family_variant.at(family);
       for (const auto& [tag, vcell] : variants) {
-        os << "      " << tag << ": supported=" << vcell.supported
-           << " (explicit=" << vcell.supported_explicit
-           << ", unknown=" << vcell.supported_unknown
+        const std::size_t vsup
+            = vcell.supported_exact + vcell.supported_conservative;
+        os << "      " << tag << ": supported_total=" << vsup
+           << " (exact=" << vcell.supported_exact
+           << ", conservative=" << vcell.supported_conservative
            << ") fallback=" << vcell.fallback << "\n";
       }
     }
