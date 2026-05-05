@@ -3,6 +3,14 @@
 //
 // V2.1.e.2 — canonical hashing framework.
 //
+// **Scope (load-bearing):** HashCanonicalRange is for deterministic
+// regression / debug equivalence only. It is NOT a proof of OCC
+// validity, NOT a proof of conflict freedom, and NOT a substitute
+// for the read/write footprint intersection check (Footprint.h §3
+// SAFETY INVARIANT). A non-cryptographic 64-bit checksum cannot
+// stand in for set-level reasoning. Future readers tempted to use
+// the hash as a cheap "read footprints are equal" proof: do not.
+//
 // Discipline (per v2 §2.5.1): each entity type — MarkerRef, ShapeRef,
 // GuideRef, BlockageRef, PinAccessRef, future ViaRef and CostFieldRef
 // — declares its OWN CanonicalTuple overload. The hash framework is
