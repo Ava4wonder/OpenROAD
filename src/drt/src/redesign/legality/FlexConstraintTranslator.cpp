@@ -27,34 +27,63 @@ namespace {
 
 std::atomic<std::uint64_t> g_layer_conflicts{0};
 
-// P2.2.e.2.c.2 (Step C1): classify a frSpacingTablePrlConstraint's
-// 2D (width, PRL) -> spacing table by SHAPE only. Coverage stays
-// Fallback regardless; this just labels which table shapes drive each
-// session's PrlSpacing fallback so reporting can show whether C2
-// (semantic widening for the easy classes) would unlock material
-// coverage on real PDKs.
+// P2.2.e.2.c.2 (Step C1) classifier + Step C2 widening.
 //
 // Classes:
-//   single_row             — exactly one width row; reduces to
-//                            (min_spacing, prl_threshold) via the row's
-//                            constant or monotone PRL row. C2 target.
-//   constant_spacing       — all table cells equal; reduces to
-//                            min_spacing alone. C2 target.
-//   monotonic_multi_width  — multi-row, multi-col, values non-decreasing
-//                            in BOTH axes. Conservative collapse with
-//                            findMax() is no-false-negative-safe but
-//                            over-flags. C3 candidate (deferred).
-//   exotic                 — anything else. Stays Fallback.
-const char* ClassifyPrlTable(const ::drt::frSpacingTablePrlConstraint* c)
+//   ConstantSpacing        — all cells equal. C2: Supported (exact).
+//                            params = (constant_value, prl_threshold=0).
+//   SingleRow              — exactly one width row. C2: Supported with
+//                            conservative collapse — params = (findMax,
+//                            prl_threshold=0). Over-flags PRL-varying
+//                            single-row tables but no false negatives.
+//                            Per the user's tiering this is treated as
+//                            exact-ish since one width-bin maps cleanly
+//                            to PrlSpacingConfig.
+//   MonotonicMultiWidth    — multi-row, multi-col, values non-decreasing
+//                            in BOTH axes. Stays Fallback. C3 candidate
+//                            (deferred): would land as a separate
+//                            supported_conservative tier if added.
+//   Exotic                 — anything else. Stays Fallback.
+//   Null                   — null pointer (defensive).
+enum class PrlTableShape : std::uint8_t {
+  ConstantSpacing,
+  SingleRow,
+  MonotonicMultiWidth,
+  Exotic,
+  Null,
+};
+
+const char* PrlTableShapeName(PrlTableShape s)
+{
+  switch (s) {
+    case PrlTableShape::ConstantSpacing:
+      return "constant_spacing";
+    case PrlTableShape::SingleRow:
+      return "single_row";
+    case PrlTableShape::MonotonicMultiWidth:
+      return "monotonic_multi_width";
+    case PrlTableShape::Exotic:
+      return "exotic";
+    case PrlTableShape::Null:
+      return "null";
+  }
+  return "?";
+}
+
+bool PrlShapeIsExactish(PrlTableShape s)
+{
+  return s == PrlTableShape::ConstantSpacing
+         || s == PrlTableShape::SingleRow;
+}
+
+PrlTableShape ClassifyPrlTable(const ::drt::frSpacingTablePrlConstraint* c)
 {
   if (c == nullptr) {
-    return "null";
+    return PrlTableShape::Null;
   }
   const auto& tbl = c->getLookupTbl();
-  // findMin / findMax are const accessors. Short-circuit on
-  // constant-spacing without touching the rows/cols arrays.
   if (tbl.findMin() == tbl.findMax()) {
-    return "constant_spacing";
+    return PrlTableShape::ConstantSpacing;
   }
   // Upstream API quirk: getRows/getCols/getValues are not const member
   // functions despite returning by value. const_cast to call them is
@@ -65,7 +94,7 @@ const char* ClassifyPrlTable(const ::drt::frSpacingTablePrlConstraint* c)
   const auto rows = mut_tbl.getRows();
   const auto vals = mut_tbl.getValues();
   if (rows.size() <= 1) {
-    return "single_row";
+    return PrlTableShape::SingleRow;
   }
   bool monotonic = true;
   for (std::size_t r = 0; r + 1 < vals.size() && monotonic; ++r) {
@@ -86,7 +115,8 @@ const char* ClassifyPrlTable(const ::drt::frSpacingTablePrlConstraint* c)
       }
     }
   }
-  return monotonic ? "monotonic_multi_width" : "exotic";
+  return monotonic ? PrlTableShape::MonotonicMultiWidth
+                   : PrlTableShape::Exotic;
 }
 
 // Outcome of deriving family + params + halo from one constraint's
@@ -182,8 +212,27 @@ SemanticResult DeriveSemantics(const ::drt::frConstraint* c)
       const auto* sc
           = static_cast<const ::drt::frSpacingTablePrlConstraint*>(c);
       out.rule.family = RuleFamily::PrlSpacing;
+      const PrlTableShape shape = ClassifyPrlTable(sc);
       out.rule.tag = std::string("frSpacingTablePrlConstraint(")
-                     + ClassifyPrlTable(sc) + ")";
+                     + PrlTableShapeName(shape) + ")";
+      // C2: widen exact-ish shapes (ConstantSpacing, SingleRow) to
+      // Supported. Conservative-collapse interpretation:
+      //   min_spacing = findMax (largest required spacing across the
+      //                          whole table — never under-flags)
+      //   prl_threshold = 0     (apply at any PRL >= 0)
+      // For ConstantSpacing this is exact (findMin == findMax).
+      // For SingleRow with PRL-varying values, this over-flags small-
+      // PRL pairs but stays inside the no-false-negative contract.
+      // MonotonicMultiWidth + Exotic stay Fallback (C3 candidate).
+      if (PrlShapeIsExactish(shape)) {
+        const auto& tbl = sc->getLookupTbl();
+        const auto min_sp = static_cast<std::int32_t>(tbl.findMax());
+        out.rule.coverage = RuleCoverage::Supported;
+        out.rule.params = PrlSpacingConfig{min_sp, 0};
+        out.rule.halo = min_sp;
+        out.recognized = true;
+        return out;
+      }
       goto fallback;
     }
     case Type::frcSpacingTableTwConstraint:
