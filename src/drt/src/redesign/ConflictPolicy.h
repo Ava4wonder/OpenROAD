@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "Delta.h"
+#include "Footprint.h"
 #include "LegalityVerdict.h"
 #include "Score.h"
 

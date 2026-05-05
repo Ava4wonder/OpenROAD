@@ -18,6 +18,7 @@
 #include "ConflictPolicy.h"
 #include "Delta.h"
 #include "EvalOutcome.h"
+#include "Footprint.h"
 #include "Snapshot.h"
 
 namespace drt::redesign {

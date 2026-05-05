@@ -114,11 +114,10 @@ enum class DeltaSource : uint8_t {
   UnknownTest,
 };
 
-struct ProposedDelta {
-  Delta delta;
-  DeltaSource source = DeltaSource::UnknownTest;
-  int worker_id = -1;
-  uint64_t snapshot_version = 0;
-};
+// ProposedDelta lives in Footprint.h so it can carry DeltaId,
+// ReadFootprint, and WriteFootprint by value without a circular
+// include. Forward-declared here for consumers that only see the type
+// through pointers/references.
+struct ProposedDelta;
 
 }  // namespace drt::redesign

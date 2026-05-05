@@ -125,6 +125,7 @@ target_link_libraries(drt_lib
 if(ENABLE_DRT_REDESIGN)
   target_sources(drt_lib
     PRIVATE
+      src/redesign/Footprint.cpp
       src/redesign/PhysicalState.cpp
       src/redesign/simd/Geom.cpp
       src/redesign/legality/CpuDrcOracle.cpp
@@ -158,6 +159,12 @@ if(ENABLE_DRT_REDESIGN)
   add_executable(redesign_e2_audit test/redesign_e2_audit.cpp)
   target_link_libraries(redesign_e2_audit PRIVATE drt_lib)
   target_include_directories(redesign_e2_audit PRIVATE src)
+
+  if(ENABLE_DRT_REDESIGN_OVERLAY)
+    add_executable(redesign_overlay_test test/redesign_overlay_test.cpp)
+    target_link_libraries(redesign_overlay_test PRIVATE drt_lib)
+    target_include_directories(redesign_overlay_test PRIVATE src)
+  endif()
 endif()
 
 target_sources(drt
