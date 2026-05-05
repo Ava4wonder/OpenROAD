@@ -19,7 +19,8 @@
 #include <vector>
 
 #include "Delta.h"
-#include "EvaluationResult.h"
+#include "LegalityVerdict.h"
+#include "Score.h"
 
 namespace drt::redesign {
 
@@ -32,10 +33,16 @@ enum class PolicyKind : uint8_t {
   MaximalIndependentSet,
 };
 
+// Inputs to ConflictPolicy::select. Per v2 plan §4.3, all inputs MUST
+// have already passed legality (legality.legal == true) before the
+// policy sees them; the policy is not a legality filter and never
+// commits something illegal. The legality field is retained on the
+// struct only so consumers can audit / log the verdict trail.
 struct ScoredProposal
 {
   ProposedDelta proposal;
-  EvaluationResult evaluation;
+  LegalityVerdict legality;
+  Score score;
 };
 
 class ConflictPolicy

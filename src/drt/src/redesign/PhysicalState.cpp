@@ -65,14 +65,16 @@ Snapshot PhysicalState::snapshot() const
   return Snapshot(impl_->state, current_version());
 }
 
-EvaluationResult PhysicalState::eval(const Snapshot& base,
-                                     const ProposedDelta& delta) const
+EvalOutcome PhysicalState::eval(const Snapshot& base,
+                                const ProposedDelta& delta,
+                                EvalOptions opts) const
 {
   (void) base;
   (void) delta;
+  (void) opts;
   throw std::logic_error(
-      "drt::redesign::PhysicalState::eval is a Phase 1 stub; "
-      "implementation lands in Phase 3 per drt_redesign_plan.md §16.");
+      "drt::redesign::PhysicalState::eval is a stub through V2.1; "
+      "implementation lands in V2.2 per v2_drt_redesign_plan.md §6.");
 }
 
 CommitResult PhysicalState::try_commit(const Snapshot& base,

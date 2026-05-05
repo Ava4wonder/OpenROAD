@@ -17,7 +17,7 @@
 #include "CommitResult.h"
 #include "ConflictPolicy.h"
 #include "Delta.h"
-#include "EvaluationResult.h"
+#include "EvalOutcome.h"
 #include "Snapshot.h"
 
 namespace drt::redesign {
@@ -38,7 +38,11 @@ class PhysicalState
 
   // Cost of applying `delta` against `base` without mutating state.
   // Workers use this for proposal ranking before submitting to try_commit.
-  EvaluationResult eval(const Snapshot& base, const ProposedDelta& delta) const;
+  // Returns hard LegalityVerdict and (optional) soft Score — the hard/
+  // soft split is enforced by the type system; see v2 plan §4.3.
+  EvalOutcome eval(const Snapshot& base,
+                   const ProposedDelta& delta,
+                   EvalOptions opts = {}) const;
 
   // Two-phase commit (plan §7). Resolves conflicts via `policy`; commits the
   // selected non-conflicting subset; rejects proposals built against a stale
