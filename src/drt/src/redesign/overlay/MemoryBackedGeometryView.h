@@ -29,11 +29,24 @@ class MemoryBackedGeometryView : public GeometryView
   {
   }
 
+  // V2.2.a.1.mem — overload accepting both backing entity vectors.
+  MemoryBackedGeometryView(std::vector<MarkerRef> markers,
+                           std::vector<ShapeRef> route_shapes)
+      : markers_(std::move(markers)),
+        route_shapes_(std::move(route_shapes))
+  {
+  }
+
   MarkerQueryResult QueryMarkers(const Rect& box) const override;
 
-  // V2.2+ methods — throw per GeometryView contract.
+  // V2.2.a.1.mem — real implementation. Filters route_shapes_ by
+  // bbox overlap AND layer match (treating absent ShapeRef.layer as
+  // "matches any" for synthetic-data convenience).
   ShapeQueryResult QueryRouteShapes(const Rect& box,
                                     LayerNum layer) const override;
+
+  // V2.2+ methods — still throw per GeometryView contract until
+  // their per-entity sub-commit (V2.2.a.{2,3,4}) lands.
   GuideQueryResult QueryGuides(const Rect& box) const override;
   BlockageQueryResult QueryBlockages(const Rect& box,
                                      LayerNum layer) const override;
@@ -41,6 +54,7 @@ class MemoryBackedGeometryView : public GeometryView
 
  private:
   std::vector<MarkerRef> markers_;
+  std::vector<ShapeRef> route_shapes_;
 };
 
 }  // namespace drt::redesign::overlay

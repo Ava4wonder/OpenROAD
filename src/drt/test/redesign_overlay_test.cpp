@@ -251,6 +251,17 @@ ro::MarkerRef MakeMarker(int x1, int y1, int x2, int y2,
   return m;
 }
 
+ro::ShapeRef MakeShape(int x1, int y1, int x2, int y2,
+                       std::optional<r::LayerNum> layer = std::nullopt,
+                       std::optional<r::NetId> net_id = std::nullopt)
+{
+  ro::ShapeRef s;
+  s.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  s.layer = layer;
+  s.net_id = net_id;
+  return s;
+}
+
 bool TestMemoryBackedQueryMarkersReturnsOverlapping()
 {
   std::vector<ro::MarkerRef> backing;
@@ -293,17 +304,38 @@ bool TestMemoryBackedQueryMarkersDistinguishesAbsentLayer()
          && out[1].layer.value() == 0;
 }
 
-bool TestQueryRouteShapesThrowsInV21()
+bool TestMemoryBackedQueryRouteShapesFilters()
 {
-  ro::MemoryBackedGeometryView view({});
-  try {
-    (void) view.QueryRouteShapes(r::Rect{}, 0);
-  } catch (const std::logic_error&) {
-    return true;
-  } catch (...) {
+  // V2.2.a.1.mem — MemoryBackedGeometryView::QueryRouteShapes is now
+  // a real impl backed by an in-memory vector. This is the
+  // V2.2.b prerequisite: OverlayGeometryView's unit tests need
+  // route-shape support on the base view.
+  std::vector<ro::MarkerRef> empty_markers;
+  std::vector<ro::ShapeRef> shapes;
+  shapes.push_back(MakeShape(0, 0, 10, 10, /*layer=*/2, /*net=*/100));
+  shapes.push_back(
+      MakeShape(50, 50, 60, 60, /*layer=*/3, /*net=*/200));
+  shapes.push_back(MakeShape(8, 8, 20, 20, /*layer=*/2, /*net=*/100));
+  ro::MemoryBackedGeometryView view(empty_markers, std::move(shapes));
+
+  // Overlap query on layer 2: two shapes match.
+  auto on_layer2
+      = view.QueryRouteShapes(r::Rect{r::Point{5, 5}, r::Point{15, 15}},
+                              /*layer=*/2);
+  if (on_layer2.size() != 2u) {
     return false;
   }
-  return false;
+  // Same bbox, different layer: no shapes match.
+  auto on_layer4
+      = view.QueryRouteShapes(r::Rect{r::Point{5, 5}, r::Point{15, 15}},
+                              /*layer=*/4);
+  if (!on_layer4.empty()) {
+    return false;
+  }
+  // Layer 3 covers the second shape.
+  auto on_layer3 = view.QueryRouteShapes(
+      r::Rect{r::Point{40, 40}, r::Point{70, 70}}, /*layer=*/3);
+  return on_layer3.size() == 1u;
 }
 
 bool TestQueryGuidesThrowsInV21()
@@ -407,17 +439,6 @@ bool TestHashCanonicalRangeEmptyRange()
 }
 
 // ===== V2.2.a.1 — ShapeRef CanonicalTuple + Hash =====
-
-ro::ShapeRef MakeShape(int x1, int y1, int x2, int y2,
-                       std::optional<r::LayerNum> layer = std::nullopt,
-                       std::optional<r::NetId> net_id = std::nullopt)
-{
-  ro::ShapeRef s;
-  s.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
-  s.layer = layer;
-  s.net_id = net_id;
-  return s;
-}
 
 bool TestShapeRefHashOrderInsensitive()
 {
@@ -712,8 +733,8 @@ int main()
        TestMemoryBackedQueryMarkersEmptyOnEmptyBacking},
       {"MarkerRef.layer distinguishes absent from value 0",
        TestMemoryBackedQueryMarkersDistinguishesAbsentLayer},
-      {"GeometryView::QueryRouteShapes throws in V2.1",
-       TestQueryRouteShapesThrowsInV21},
+      {"MemoryBackedGeometryView::QueryRouteShapes filters",
+       TestMemoryBackedQueryRouteShapesFilters},
       {"GeometryView::QueryGuides throws in V2.1",
        TestQueryGuidesThrowsInV21},
       {"GeometryView::QueryBlockages throws in V2.1",

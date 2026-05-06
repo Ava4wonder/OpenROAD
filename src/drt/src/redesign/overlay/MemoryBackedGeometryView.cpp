@@ -36,10 +36,19 @@ ShapeQueryResult MemoryBackedGeometryView::QueryRouteShapes(
     const Rect& box,
     LayerNum layer) const
 {
-  (void) box;
-  (void) layer;
-  throw std::logic_error(
-      "GeometryView: QueryRouteShapes not supported in V2.1");
+  ShapeQueryResult out;
+  for (const ShapeRef& s : route_shapes_) {
+    if (!BboxOverlap(box, s.bbox)) {
+      continue;
+    }
+    // Absent layer in synthetic data means "matches any layer";
+    // present layer must match the query.
+    if (s.layer.has_value() && s.layer.value() != layer) {
+      continue;
+    }
+    out.push_back(s);
+  }
+  return out;
 }
 
 GuideQueryResult MemoryBackedGeometryView::QueryGuides(
