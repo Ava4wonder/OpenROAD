@@ -243,6 +243,16 @@ void ShadowCompareRouteShapes(
   const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
   const uint64_t overlay_hash = HashCanonicalRange(overlay);
 
+  // Record into the unified V2.2.a.0 ShadowDump pipeline. Counters
+  // update regardless of dump-enable; CSV row emitted iff env var
+  // active.
+  ShadowDump::RecordRouteShapeComparison(legacy_hash,
+                                         overlay_hash,
+                                         legacy_proj.size(),
+                                         overlay.size(),
+                                         overlay_box,
+                                         layer);
+
   if (legacy_hash != overlay_hash) {
     // Diagnostic only — `legacy_result` is unmodified, the legacy
     // FlexDR path still drives behaviour. Mismatch indicates a

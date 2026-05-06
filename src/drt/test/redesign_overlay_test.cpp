@@ -524,16 +524,82 @@ bool TestShadowDumpEnabledWritesHeaderAndRow()
   ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
   ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
 
-  // Header should mention the column names; row should contain the
-  // bbox coordinates and hashes we passed in.
+  // Header should mention all V2.2.a.0 column names.
   const bool header_ok
       = header.find("seqno") != std::string::npos
+        && header.find("entity") != std::string::npos
+        && header.find("query_kind") != std::string::npos
+        && header.find("layer") != std::string::npos
         && header.find("legacy_hash") != std::string::npos
         && header.find("overlay_hash") != std::string::npos;
-  const bool row_ok = row.find(",1,2,3,4,") != std::string::npos
+  // Row should contain the marker entity tag, queryMarker query kind,
+  // bbox coordinates, and hashes we passed in.
+  const bool row_ok = row.find(",marker,") != std::string::npos
+                      && row.find(",queryMarker,") != std::string::npos
+                      && row.find(",1,2,3,4,") != std::string::npos
                       && row.find(",17,") != std::string::npos
                       && row.find(",34,") != std::string::npos;
   return header_ok && row_ok;
+}
+
+bool TestShadowDumpRouteShapeRowHasEntityAndLayer()
+{
+  // V2.2.a.0 — verify per-entity recording for route shapes. CSV row
+  // must carry entity=route_shape, query_kind=query, and a non-empty
+  // layer cell.
+  ro::ShadowDump::ResetForTest();
+  std::ostringstream os;
+  os << "/tmp/openroad-overlay-hashes-test-rs-"
+     << static_cast<unsigned>(::getpid()) << ".csv";
+  const std::string path = os.str();
+  std::remove(path.c_str());
+
+  ::setenv("OPENROAD_OVERLAY_DUMP_HASHES", "1", 1);
+  ::setenv("OPENROAD_OVERLAY_DUMP_PATH", path.c_str(), 1);
+
+  r::Rect box{r::Point{5, 6}, r::Point{7, 8}};
+  ro::ShadowDump::RecordRouteShapeComparison(0xAA, 0xAA, 3, 3, box, 12);
+
+  std::ifstream f(path);
+  std::string header, row;
+  std::getline(f, header);
+  std::getline(f, row);
+  f.close();
+  std::remove(path.c_str());
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+
+  const bool entity_ok
+      = row.find(",route_shape,") != std::string::npos;
+  const bool query_kind_ok = row.find(",query,") != std::string::npos;
+  const bool bbox_ok = row.find(",5,6,7,8,") != std::string::npos;
+  const bool layer_ok = row.find(",12,") != std::string::npos;
+  return entity_ok && query_kind_ok && bbox_ok && layer_ok;
+}
+
+bool TestShadowDumpPerEntityCounters()
+{
+  // V2.2.a.0 — per-entity comparison counts diverge correctly when
+  // records of different entities arrive.
+  ro::ShadowDump::ResetForTest();
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+
+  r::Rect box{r::Point{0, 0}, r::Point{1, 1}};
+  ro::ShadowDump::RecordMarkerComparison(0xAA, 0xAA, 1, 1, box);
+  ro::ShadowDump::RecordMarkerComparison(0xAA, 0xBB, 1, 1, box);
+  ro::ShadowDump::RecordRouteShapeComparison(0xCC, 0xCC, 5, 5, box, 2);
+  ro::ShadowDump::RecordRouteShapeComparison(0xCC, 0xDD, 5, 5, box, 2);
+  ro::ShadowDump::RecordRouteShapeComparison(0xCC, 0xCC, 5, 5, box, 3);
+
+  using E = ro::ShadowDump::Entity;
+  return ro::ShadowDump::comparison_count() == 5
+         && ro::ShadowDump::mismatch_count() == 2
+         && ro::ShadowDump::comparison_count_for(E::Marker) == 2
+         && ro::ShadowDump::mismatch_count_for(E::Marker) == 1
+         && ro::ShadowDump::comparison_count_for(E::RouteShape) == 3
+         && ro::ShadowDump::mismatch_count_for(E::RouteShape) == 1
+         && ro::ShadowDump::comparison_count_for(E::Guide) == 0;
 }
 
 bool TestShadowDumpBadPathDoesNotThrow()
@@ -682,6 +748,10 @@ int main()
        TestShadowDumpEnabledWritesHeaderAndRow},
       {"ShadowDump bad path is best-effort, never throws",
        TestShadowDumpBadPathDoesNotThrow},
+      {"ShadowDump route-shape row has entity + layer columns",
+       TestShadowDumpRouteShapeRowHasEntityAndLayer},
+      {"ShadowDump per-entity counters diverge correctly",
+       TestShadowDumpPerEntityCounters},
   };
   int passed = 0;
   int failed = 0;
