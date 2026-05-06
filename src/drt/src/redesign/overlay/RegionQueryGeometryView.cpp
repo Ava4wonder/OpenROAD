@@ -8,9 +8,11 @@
 
 #include "RegionQueryGeometryView.h"
 
+#include <iostream>
 #include <stdexcept>
 #include <vector>
 
+#include "Hashing.h"
 #include "db/obj/frMarker.h"
 #include "db/tech/frConstraint.h"
 #include "frDesign.h"
@@ -35,6 +37,8 @@ inline odb::Rect FromOverlayRect(const Rect& in) noexcept
 {
   return odb::Rect(in.ll.x, in.ll.y, in.ur.x, in.ur.y);
 }
+
+}  // namespace
 
 // V2.1 MarkerRef identity is sufficient for query-path equivalence,
 // not for unique signoff marker identity. Two distinct constraints
@@ -65,8 +69,6 @@ MarkerRef ProjectMarker(const ::drt::frMarker& m)
   // when a real consumer needs it.
   return out;
 }
-
-}  // namespace
 
 MarkerQueryResult RegionQueryGeometryView::QueryMarkers(
     const Rect& box) const
@@ -126,6 +128,52 @@ PinAccessQueryResult RegionQueryGeometryView::QueryPinAccess(
   (void) box;
   throw std::logic_error(
       "GeometryView: QueryPinAccess not supported in V2.1");
+}
+
+void ShadowCompareMarkers(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    const std::vector<::drt::frMarker*>& legacy_result)
+{
+  if (design == nullptr) {
+    return;
+  }
+
+  // Project the legacy raw pointer set into MarkerRefs using the same
+  // ProjectMarker function that QueryMarkers calls. Single source of
+  // truth for the projection.
+  MarkerQueryResult legacy_proj;
+  legacy_proj.reserve(legacy_result.size());
+  for (const ::drt::frMarker* m : legacy_result) {
+    if (m != nullptr) {
+      legacy_proj.push_back(ProjectMarker(*m));
+    }
+  }
+
+  // Run the GeometryView path on the same (design, box).
+  RegionQueryGeometryView view(design);
+  const Rect overlay_box = ToOverlayRect(box);
+  const MarkerQueryResult overlay = view.QueryMarkers(overlay_box);
+
+  const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
+  const uint64_t overlay_hash = HashCanonicalRange(overlay);
+
+  // V2.1.e.5 (separate commit) will branch on
+  // OPENROAD_OVERLAY_DUMP_HASHES env var here and append both hashes
+  // to a per-process dump file for cross-run diff.
+
+  if (legacy_hash != overlay_hash) {
+    // Diagnostic only — the legacy frMarker* path remains
+    // authoritative and `legacy_result` is unmodified by this
+    // function. A mismatch indicates a projection or query-path
+    // drift bug in RegionQueryGeometryView; investigate, do not
+    // route on it.
+    std::cerr << "[drt-redesign-overlay] V2.1.e shadow marker-hash "
+              << "mismatch: legacy=" << std::hex << legacy_hash
+              << " overlay=" << overlay_hash << std::dec
+              << " legacy_count=" << legacy_proj.size()
+              << " overlay_count=" << overlay.size() << "\n";
+  }
 }
 
 }  // namespace drt::redesign::overlay

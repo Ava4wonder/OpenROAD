@@ -19,6 +19,9 @@
 
 #include "boost/geometry/geometry.hpp"
 #include "boost/polygon/polygon.hpp"
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+#include "redesign/overlay/RegionQueryGeometryView.h"
+#endif
 #include "db/drObj/drAccessPattern.h"
 #include "db/drObj/drFig.h"
 #include "db/infra/frSegStyle.h"
@@ -3225,6 +3228,16 @@ void FlexDRWorker::initMarkers(const frDesign* design)
   std::vector<frMarker*> result;
   // get all markers within drc box
   design->getRegionQuery()->queryMarker(getDrcBox(), result);
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+  // V2.1.e.4 shadow validation. The legacy regionQuery path above
+  // remains authoritative for behaviour; this call only verifies that
+  // RegionQueryGeometryView::QueryMarkers projects to the same
+  // canonical MarkerRef set on the same (design, box). On hash
+  // mismatch a stderr diagnostic fires; `result` is never modified.
+  // V2.1.e.5 will add OPENROAD_OVERLAY_DUMP_HASHES file dump here.
+  drt::redesign::overlay::ShadowCompareMarkers(
+      design, getDrcBox(), result);
+#endif
   for (auto mptr : result) {
     // check recheck  if true  then markers.clear(), set drWorker bit to check
     // drc at start

@@ -27,11 +27,17 @@
 
 #pragma once
 
+#include <vector>
+
 #include "GeometryView.h"
 
 namespace drt {
 class frDesign;
+class frMarker;
 }  // namespace drt
+namespace odb {
+class Rect;
+}  // namespace odb
 
 namespace drt::redesign::overlay {
 
@@ -63,5 +69,29 @@ class RegionQueryGeometryView final : public GeometryView
   // V2.1; never delete through this pointer.
   const ::drt::frDesign* design_;
 };
+
+// Single source of truth for frMarker -> MarkerRef projection. Used by
+// RegionQueryGeometryView::QueryMarkers and by the V2.1.e.4 shadow
+// comparator. Pointer-free identity per V2.1 contract.
+MarkerRef ProjectMarker(const ::drt::frMarker& m);
+
+// V2.1.e.4 shadow validation. Diagnostic-only, never alters behaviour.
+//
+// Compare a legacy regionQuery->queryMarker result against
+// RegionQueryGeometryView::QueryMarkers on the same (design, box).
+// Both sides project via ProjectMarker, then HashCanonicalRange. If
+// hashes differ, a single-line warning fires on stderr. Match: silent.
+//
+// V2.1.e.5 (separate commit) adds the OPENROAD_OVERLAY_DUMP_HASHES
+// env-var path that appends every comparison's hashes to a dump file
+// for cross-run A/B diff.
+//
+// IMPORTANT: this is NOT a substitution. The legacy frMarker* path
+// remains authoritative for routing behaviour; the shadow path proves
+// equivalence without owning state.
+void ShadowCompareMarkers(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    const std::vector<::drt::frMarker*>& legacy_result);
 
 }  // namespace drt::redesign::overlay
