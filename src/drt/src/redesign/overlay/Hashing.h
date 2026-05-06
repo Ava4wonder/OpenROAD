@@ -82,6 +82,27 @@ inline auto CanonicalTuple(const MarkerRef& m)
                          m.source_net_id);
 }
 
+// V2.2.a.1 — ShapeRef canonical identity:
+//   (layer?, bbox.ll.x, bbox.ll.y, bbox.ur.x, bbox.ur.y, net_id?)
+//
+// Used for route-shape (frPathSeg / frVia / frPatchWire) projection
+// from RegionQueryGeometryView::QueryRouteShapes. Pointer-free.
+//
+// Note on type collision: two distinct route-shape kinds at the same
+// (bbox, layer, net) would canonicalize identically. In practice this
+// is rare because path-seg and via bboxes have very different shapes
+// (long rectangle vs small square). If V2.2.a's integration shows
+// collisions, ShapeRef gains an optional shape_kind field then.
+inline auto CanonicalTuple(const ShapeRef& s)
+{
+  return std::make_tuple(s.layer,
+                         s.bbox.ll.x,
+                         s.bbox.ll.y,
+                         s.bbox.ur.x,
+                         s.bbox.ur.y,
+                         s.net_id);
+}
+
 // SFINAE detector — has_canonical_tuple<T>::value is true iff
 // CanonicalTuple(const T&) exists in scope.
 template <typename T, typename = void>

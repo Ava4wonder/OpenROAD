@@ -406,6 +406,56 @@ bool TestHashCanonicalRangeEmptyRange()
   return true;
 }
 
+// ===== V2.2.a.1 — ShapeRef CanonicalTuple + Hash =====
+
+ro::ShapeRef MakeShape(int x1, int y1, int x2, int y2,
+                       std::optional<r::LayerNum> layer = std::nullopt,
+                       std::optional<r::NetId> net_id = std::nullopt)
+{
+  ro::ShapeRef s;
+  s.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  s.layer = layer;
+  s.net_id = net_id;
+  return s;
+}
+
+bool TestShapeRefHashOrderInsensitive()
+{
+  std::vector<ro::ShapeRef> a = {MakeShape(0, 0, 10, 5, 2, 100),
+                                 MakeShape(20, 20, 25, 25, 3, 200)};
+  std::vector<ro::ShapeRef> b = {MakeShape(20, 20, 25, 25, 3, 200),
+                                 MakeShape(0, 0, 10, 5, 2, 100)};
+  return ro::HashCanonicalRange(a) == ro::HashCanonicalRange(b);
+}
+
+bool TestShapeRefHashDistinguishesNet()
+{
+  std::vector<ro::ShapeRef> a = {MakeShape(0, 0, 10, 5, 2, 100)};
+  std::vector<ro::ShapeRef> b = {MakeShape(0, 0, 10, 5, 2, 101)};
+  return ro::HashCanonicalRange(a) != ro::HashCanonicalRange(b);
+}
+
+bool TestShapeRefHashDistinguishesAbsentFromZero()
+{
+  std::vector<ro::ShapeRef> absent = {MakeShape(0, 0, 10, 5, 2)};
+  std::vector<ro::ShapeRef> zero
+      = {MakeShape(0, 0, 10, 5, 2, /*net_id=*/r::NetId{0})};
+  return ro::HashCanonicalRange(absent)
+         != ro::HashCanonicalRange(zero);
+}
+
+bool TestShapeRefHashDifferentEntityFromMarker()
+{
+  // ShapeRef and MarkerRef with the same bbox/layer should NOT hash
+  // identically — the per-entity CanonicalTuple is responsible for
+  // not conflating distinct entities (different field count + types).
+  // This tests that the canonical-tuple discipline holds.
+  std::vector<ro::ShapeRef> shapes = {MakeShape(0, 0, 10, 5, 2)};
+  std::vector<ro::MarkerRef> markers = {MakeMarker(0, 0, 10, 5, 2)};
+  return ro::HashCanonicalRange(shapes)
+         != ro::HashCanonicalRange(markers);
+}
+
 // ===== V2.1.e.5 — ShadowDump =====
 
 bool TestShadowDumpCountersIncrement()
@@ -514,20 +564,19 @@ bool TestShadowDumpBadPathDoesNotThrow()
 
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
-// has_canonical_tuple<MarkerRef> must be true; has_canonical_tuple<
-// GuideRef/BlockageRef/PinAccessRef/ShapeRef> must be false in V2.1.e.
-// V2.2.a's per-entity sub-commits flip these on as the
-// implementations land.
+// V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
+// GuideRef / BlockageRef / PinAccessRef CanonicalTuples land in
+// V2.2.a.{2,3,4} respectively.
 static_assert(ro::has_canonical_tuple<ro::MarkerRef>::value,
-              "MarkerRef must have CanonicalTuple in V2.1.e");
-static_assert(!ro::has_canonical_tuple<ro::ShapeRef>::value,
-              "ShapeRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+              "MarkerRef must have CanonicalTuple");
+static_assert(ro::has_canonical_tuple<ro::ShapeRef>::value,
+              "ShapeRef must have CanonicalTuple after V2.2.a.1");
 static_assert(!ro::has_canonical_tuple<ro::GuideRef>::value,
-              "GuideRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+              "GuideRef CanonicalTuple lands in V2.2.a.2");
 static_assert(!ro::has_canonical_tuple<ro::BlockageRef>::value,
-              "BlockageRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+              "BlockageRef CanonicalTuple lands in V2.2.a.3");
 static_assert(!ro::has_canonical_tuple<ro::PinAccessRef>::value,
-              "PinAccessRef CanonicalTuple lands in V2.2.a, not V2.1.e");
+              "PinAccessRef CanonicalTuple lands in V2.2.a.4");
 
 bool TestSnapshotHandleHoldsViewByShared()
 {
@@ -617,6 +666,14 @@ int main()
        TestHashCanonicalRangeStableAcrossRuns},
       {"HashCanonicalRange empty range",
        TestHashCanonicalRangeEmptyRange},
+      {"ShapeRef hash order-insensitive",
+       TestShapeRefHashOrderInsensitive},
+      {"ShapeRef hash distinguishes net_id",
+       TestShapeRefHashDistinguishesNet},
+      {"ShapeRef hash distinguishes absent from zero",
+       TestShapeRefHashDistinguishesAbsentFromZero},
+      {"ShapeRef hash distinct from MarkerRef hash for same bbox",
+       TestShapeRefHashDifferentEntityFromMarker},
       {"ShadowDump counters increment without env var",
        TestShadowDumpCountersIncrement},
       {"ShadowDump disabled by default writes no file",

@@ -14,8 +14,13 @@
 
 #include "Hashing.h"
 #include "ShadowDump.h"
+#include "db/obj/frBlockObject.h"
 #include "db/obj/frMarker.h"
+#include "db/obj/frNet.h"
+#include "db/obj/frShape.h"
+#include "db/obj/frVia.h"
 #include "db/tech/frConstraint.h"
+#include "db/tech/frViaDef.h"
 #include "frDesign.h"
 #include "frRegionQuery.h"
 #include "odb/geom.h"
@@ -49,6 +54,47 @@ inline odb::Rect FromOverlayRect(const Rect& in) noexcept
 // design at the same time), both sides project identically, so the
 // equivalence proof holds. Real per-marker identity (constraint_id
 // + source_net_id) is V2.2+ once we know how the consumer wants it.
+std::optional<ShapeRef> ProjectRouteShape(
+    const ::drt::frBlockObject& obj,
+    const ::odb::Rect& bbox)
+{
+  ShapeRef out;
+  out.bbox = ToOverlayRect(bbox);
+  switch (obj.typeId()) {
+    case ::drt::frcPathSeg: {
+      const auto& seg = static_cast<const ::drt::frPathSeg&>(obj);
+      out.layer = static_cast<LayerNum>(seg.getLayerNum());
+      if (const ::drt::frNet* net = seg.getNet()) {
+        out.net_id = static_cast<NetId>(net->getId());
+      }
+      return out;
+    }
+    case ::drt::frcPatchWire: {
+      const auto& pw = static_cast<const ::drt::frPatchWire&>(obj);
+      out.layer = static_cast<LayerNum>(pw.getLayerNum());
+      if (const ::drt::frNet* net = pw.getNet()) {
+        out.net_id = static_cast<NetId>(net->getId());
+      }
+      return out;
+    }
+    case ::drt::frcVia: {
+      const auto& v = static_cast<const ::drt::frVia&>(obj);
+      if (const ::drt::frViaDef* vd = v.getViaDef()) {
+        out.layer = static_cast<LayerNum>(vd->getCutLayerNum());
+      }
+      if (const ::drt::frNet* net = v.getNet()) {
+        out.net_id = static_cast<NetId>(net->getId());
+      }
+      return out;
+    }
+    default:
+      // Non-route-shape kinds (blockages, terms, etc.) are caller's
+      // problem. V2.2.a.3 (BlockageRef) handles blockages with its
+      // own projection.
+      return std::nullopt;
+  }
+}
+
 MarkerRef ProjectMarker(const ::drt::frMarker& m)
 {
   MarkerRef out;
@@ -99,10 +145,31 @@ ShapeQueryResult RegionQueryGeometryView::QueryRouteShapes(
     const Rect& box,
     LayerNum layer) const
 {
-  (void) box;
-  (void) layer;
-  throw std::logic_error(
-      "GeometryView: QueryRouteShapes not supported in V2.1");
+  if (design_ == nullptr) {
+    return {};
+  }
+  const ::drt::frRegionQuery* rq = design_->getRegionQuery();
+  if (rq == nullptr) {
+    return {};
+  }
+  ::drt::frRegionQuery::Objects<::drt::frBlockObject> raw;
+  rq->query(FromOverlayRect(box),
+            static_cast<::drt::frLayerNum>(layer),
+            raw);
+
+  ShapeQueryResult out;
+  out.reserve(raw.size());
+  for (const auto& entry : raw) {
+    const ::drt::frBlockObject* obj = entry.second;
+    if (obj == nullptr) {
+      continue;
+    }
+    auto projected = ProjectRouteShape(*obj, entry.first);
+    if (projected.has_value()) {
+      out.push_back(*projected);
+    }
+  }
+  return out;
 }
 
 GuideQueryResult RegionQueryGeometryView::QueryGuides(

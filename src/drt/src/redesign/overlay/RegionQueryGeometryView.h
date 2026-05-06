@@ -32,6 +32,7 @@
 #include "GeometryView.h"
 
 namespace drt {
+class frBlockObject;
 class frDesign;
 class frMarker;
 }  // namespace drt
@@ -74,6 +75,18 @@ class RegionQueryGeometryView final : public GeometryView
 // RegionQueryGeometryView::QueryMarkers and by the V2.1.e.4 shadow
 // comparator. Pointer-free identity per V2.1 contract.
 MarkerRef ProjectMarker(const ::drt::frMarker& m);
+
+// V2.2.a.1 — single source of truth for frBlockObject -> ShapeRef
+// projection of route shapes (frPathSeg / frVia / frPatchWire).
+//
+// `bbox` is taken from the rq_box_value_t pair (not getBBox()) since
+// the region-query index already produced a canonical box for the
+// indexed shape. Returns nullopt for non-route-shape block-object
+// kinds (blockages, terms, etc.) so callers can filter; those land
+// in V2.2.a.3 (BlockageRef) and elsewhere with their own projection.
+std::optional<ShapeRef> ProjectRouteShape(
+    const ::drt::frBlockObject& obj,
+    const ::odb::Rect& bbox);
 
 // V2.1.e.4 shadow validation. Diagnostic-only, never alters behaviour.
 //
