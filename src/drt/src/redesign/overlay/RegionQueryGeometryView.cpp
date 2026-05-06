@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Hashing.h"
+#include "ShadowDump.h"
 #include "db/obj/frMarker.h"
 #include "db/tech/frConstraint.h"
 #include "frDesign.h"
@@ -158,9 +159,14 @@ void ShadowCompareMarkers(
   const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
   const uint64_t overlay_hash = HashCanonicalRange(overlay);
 
-  // V2.1.e.5 (separate commit) will branch on
-  // OPENROAD_OVERLAY_DUMP_HASHES env var here and append both hashes
-  // to a per-process dump file for cross-run diff.
+  // V2.1.e.5: best-effort CSV dump under OPENROAD_OVERLAY_DUMP_HASHES.
+  // Maintains per-process counters even when dumping is disabled; the
+  // atexit summary reports calls + mismatches.
+  ShadowDump::RecordMarkerComparison(legacy_hash,
+                                     overlay_hash,
+                                     legacy_proj.size(),
+                                     overlay.size(),
+                                     overlay_box);
 
   if (legacy_hash != overlay_hash) {
     // Diagnostic only — the legacy frMarker* path remains

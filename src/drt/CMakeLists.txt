@@ -146,6 +146,7 @@ if(ENABLE_DRT_REDESIGN)
       PRIVATE
         src/redesign/overlay/MemoryBackedGeometryView.cpp
         src/redesign/overlay/RegionQueryGeometryView.cpp
+        src/redesign/overlay/ShadowDump.cpp
     )
     target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_OVERLAY=1)
   endif()

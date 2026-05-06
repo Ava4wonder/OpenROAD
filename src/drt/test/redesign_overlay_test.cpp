@@ -14,7 +14,14 @@
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/ShadowDump.h"
 #include "redesign/overlay/SnapshotHandle.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 namespace r = drt::redesign;
 namespace ro = drt::redesign::overlay;
@@ -399,6 +406,112 @@ bool TestHashCanonicalRangeEmptyRange()
   return true;
 }
 
+// ===== V2.1.e.5 — ShadowDump =====
+
+bool TestShadowDumpCountersIncrement()
+{
+  ro::ShadowDump::ResetForTest();
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+
+  r::Rect box{r::Point{0, 0}, r::Point{10, 10}};
+  ro::ShadowDump::RecordMarkerComparison(0xAA, 0xAA, 1, 1, box);
+  ro::ShadowDump::RecordMarkerComparison(0xAA, 0xBB, 1, 1, box);
+  ro::ShadowDump::RecordMarkerComparison(0xCC, 0xCC, 5, 5, box);
+
+  return ro::ShadowDump::comparison_count() == 3
+         && ro::ShadowDump::mismatch_count() == 1;
+}
+
+bool TestShadowDumpDisabledByDefaultWritesNoFile()
+{
+  ro::ShadowDump::ResetForTest();
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  // Set the path to a location that would fail if the dump tried to
+  // write — but with DUMP_HASHES unset, the path should be ignored
+  // and no file should be opened.
+  ::setenv("OPENROAD_OVERLAY_DUMP_PATH",
+           "/nonexistent_dir_12345/should_never_be_created.csv", 1);
+
+  r::Rect box{r::Point{0, 0}, r::Point{10, 10}};
+  ro::ShadowDump::RecordMarkerComparison(0xAA, 0xAA, 1, 1, box);
+
+  std::ifstream f(
+      "/nonexistent_dir_12345/should_never_be_created.csv");
+  const bool no_file = !f.is_open();
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+  return no_file;
+}
+
+bool TestShadowDumpEnabledWritesHeaderAndRow()
+{
+  ro::ShadowDump::ResetForTest();
+  // Use /tmp + a unique-ish name; cleanup at end.
+  std::ostringstream os;
+  os << "/tmp/openroad-overlay-hashes-test-"
+     << static_cast<unsigned>(::getpid()) << ".csv";
+  const std::string path = os.str();
+  std::remove(path.c_str());
+
+  ::setenv("OPENROAD_OVERLAY_DUMP_HASHES", "1", 1);
+  ::setenv("OPENROAD_OVERLAY_DUMP_PATH", path.c_str(), 1);
+
+  r::Rect box{r::Point{1, 2}, r::Point{3, 4}};
+  ro::ShadowDump::RecordMarkerComparison(0x11, 0x22, 7, 8, box);
+
+  std::ifstream f(path);
+  if (!f.is_open()) {
+    ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+    ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+    return false;
+  }
+  std::string header;
+  std::string row;
+  std::getline(f, header);
+  std::getline(f, row);
+  f.close();
+  std::remove(path.c_str());
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+
+  // Header should mention the column names; row should contain the
+  // bbox coordinates and hashes we passed in.
+  const bool header_ok
+      = header.find("seqno") != std::string::npos
+        && header.find("legacy_hash") != std::string::npos
+        && header.find("overlay_hash") != std::string::npos;
+  const bool row_ok = row.find(",1,2,3,4,") != std::string::npos
+                      && row.find(",17,") != std::string::npos
+                      && row.find(",34,") != std::string::npos;
+  return header_ok && row_ok;
+}
+
+bool TestShadowDumpBadPathDoesNotThrow()
+{
+  ro::ShadowDump::ResetForTest();
+  // Use a path inside a directory we can't create (a path under an
+  // existing file like /etc/hostname). The mkdir + open both fail;
+  // the discipline is "warn once, disable, never throw."
+  ::setenv("OPENROAD_OVERLAY_DUMP_HASHES", "1", 1);
+  ::setenv("OPENROAD_OVERLAY_DUMP_PATH",
+           "/etc/hostname/never_writable_subdir/dump.csv", 1);
+
+  r::Rect box{r::Point{0, 0}, r::Point{1, 1}};
+  bool threw = false;
+  try {
+    ro::ShadowDump::RecordMarkerComparison(0xDE, 0xAD, 0, 0, box);
+    ro::ShadowDump::RecordMarkerComparison(0xBE, 0xEF, 0, 0, box);
+  } catch (...) {
+    threw = true;
+  }
+
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_HASHES");
+  ::unsetenv("OPENROAD_OVERLAY_DUMP_PATH");
+
+  // Counters still incremented (diagnostic invariant); no throw.
+  return !threw && ro::ShadowDump::comparison_count() == 2;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // has_canonical_tuple<MarkerRef> must be true; has_canonical_tuple<
@@ -504,6 +617,14 @@ int main()
        TestHashCanonicalRangeStableAcrossRuns},
       {"HashCanonicalRange empty range",
        TestHashCanonicalRangeEmptyRange},
+      {"ShadowDump counters increment without env var",
+       TestShadowDumpCountersIncrement},
+      {"ShadowDump disabled by default writes no file",
+       TestShadowDumpDisabledByDefaultWritesNoFile},
+      {"ShadowDump enabled writes header + row",
+       TestShadowDumpEnabledWritesHeaderAndRow},
+      {"ShadowDump bad path is best-effort, never throws",
+       TestShadowDumpBadPathDoesNotThrow},
   };
   int passed = 0;
   int failed = 0;
