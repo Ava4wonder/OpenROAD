@@ -2745,6 +2745,15 @@ void FlexDRWorker::initMazeCost_fixedObj(const frDesign* design)
       continue;
     }
     design->getRegionQuery()->query(getExtBox(), layerNum, result);
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+    // V2.2.a.1.shadow validation. Legacy `result` above remains
+    // authoritative; this call only verifies that
+    // RegionQueryGeometryView::QueryRouteShapes projects to the same
+    // canonical ShapeRef set on the same (design, box, layer). On
+    // hash mismatch a stderr diagnostic fires; `result` unmodified.
+    drt::redesign::overlay::ShadowCompareRouteShapes(
+        design, getExtBox(), static_cast<int>(layerNum), result);
+#endif
     // process blockage first, then unblock based on pin shape
     for (auto& [box, obj] : result) {
       if ((obj->typeId() == frcBlockage)

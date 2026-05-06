@@ -78,6 +78,17 @@ std::optional<ShapeRef> ProjectRouteShape(
       return out;
     }
     case ::drt::frcVia: {
+      // V2.2.a.1 ShapeRef for vias is a query-equivalence projection,
+      // NOT a complete via legality representation. A via has a cut
+      // shape, top/bottom enclosure shapes, viaDef identity, origin,
+      // and possibly multiple rectangles per cut. We compress all of
+      // that to (rq_box, cut_layer, net) — sufficient for the V2.2.a.1
+      // hash-equivalence check on the same query, but insufficient
+      // for legality evaluation. Full via representation lands with
+      // OverlayGeometryView's Delta/legality path, likely as a
+      // separate ViaRef entity or a ShapeKind::Via{Cut,Enclosure}
+      // distinction. Do not infer via-level correctness from the
+      // ShapeRef alone.
       const auto& v = static_cast<const ::drt::frVia&>(obj);
       if (const ::drt::frViaDef* vd = v.getViaDef()) {
         out.layer = static_cast<LayerNum>(vd->getCutLayerNum());
@@ -196,6 +207,53 @@ PinAccessQueryResult RegionQueryGeometryView::QueryPinAccess(
   (void) box;
   throw std::logic_error(
       "GeometryView: QueryPinAccess not supported in V2.1");
+}
+
+void ShadowCompareRouteShapes(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    int layer,
+    const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
+        legacy_result)
+{
+  if (design == nullptr) {
+    return;
+  }
+
+  // Project the legacy raw vector with the same ProjectRouteShape
+  // function QueryRouteShapes uses. Single source of truth.
+  ShapeQueryResult legacy_proj;
+  legacy_proj.reserve(legacy_result.size());
+  for (const auto& entry : legacy_result) {
+    if (entry.second == nullptr) {
+      continue;
+    }
+    auto projected = ProjectRouteShape(*entry.second, entry.first);
+    if (projected.has_value()) {
+      legacy_proj.push_back(*projected);
+    }
+  }
+
+  // Run the GeometryView path on the same (design, box, layer).
+  RegionQueryGeometryView view(design);
+  const Rect overlay_box = ToOverlayRect(box);
+  const ShapeQueryResult overlay
+      = view.QueryRouteShapes(overlay_box, static_cast<LayerNum>(layer));
+
+  const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
+  const uint64_t overlay_hash = HashCanonicalRange(overlay);
+
+  if (legacy_hash != overlay_hash) {
+    // Diagnostic only — `legacy_result` is unmodified, the legacy
+    // FlexDR path still drives behaviour. Mismatch indicates a
+    // projection / filter / box-conversion drift in either side.
+    std::cerr << "[drt-redesign-overlay] V2.2.a.1 shadow route-shape "
+              << "hash mismatch: legacy=" << std::hex << legacy_hash
+              << " overlay=" << overlay_hash << std::dec
+              << " layer=" << layer
+              << " legacy_count=" << legacy_proj.size()
+              << " overlay_count=" << overlay.size() << "\n";
+  }
 }
 
 void ShadowCompareMarkers(

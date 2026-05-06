@@ -107,4 +107,24 @@ void ShadowCompareMarkers(
     const ::odb::Rect& box,
     const std::vector<::drt::frMarker*>& legacy_result);
 
+// V2.2.a.1.shadow — route-shape shadow validation. Same discipline as
+// ShadowCompareMarkers: NOT a substitution; legacy frBlockObject*
+// path remains authoritative; shadow path proves
+// projection-equivalence without owning state.
+//
+// Compares the legacy `regionQuery->query(box, layer, result)` output
+// against `RegionQueryGeometryView::QueryRouteShapes(box, layer)` on
+// the same (design, box, layer). Both sides project via the single
+// ProjectRouteShape source of truth, filtering to route-shape kinds
+// (frPathSeg / frVia / frPatchWire). On hash mismatch, a single
+// stderr line fires. Match: silent.
+//
+// CSV dump deferred (no V2.1.e.5-equivalent yet for route shapes).
+void ShadowCompareRouteShapes(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    int layer,
+    const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
+        legacy_result);
+
 }  // namespace drt::redesign::overlay
