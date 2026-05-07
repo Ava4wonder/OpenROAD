@@ -13,7 +13,9 @@
 #include <type_traits>
 #include <variant>
 
+#include "overlay/OracleCandidate.h"
 #include "overlay/OverlayGeometryView.h"
+#include "overlay/SyntheticOracle.h"
 
 namespace drt::redesign {
 
@@ -142,7 +144,6 @@ EvalOutcome PhysicalState::eval(
     const ProposedDelta& delta,
     EvalOptions opts) const
 {
-  (void) base_geometry;  // Used by V2.2.c.score for richer terms.
   EvalOutcome outcome;
 
   // Step 1: unresolved delete identity → loud non-committable.
@@ -160,13 +161,40 @@ EvalOutcome PhysicalState::eval(
     return outcome;
   }
 
-  // Step 2: stub legality. V2.2.c.legality replaces this with a real
-  // CpuDrcOracle call. Until then, the V2.1.b hard-gate discipline
-  // requires commit_eligible=false even when legal=true, because
-  // the verdict is unvalidated.
-  outcome.legality.legal = true;
-  outcome.legality.source = LegalitySource::StubAssumeLegal;
-  outcome.legality.commit_eligible = false;
+  // Step 2: legality dispatch on opts.legality_mode.
+  switch (opts.legality_mode) {
+    case LegalityMode::SyntheticOracle: {
+      // V2.2.c.legality.synthetic — bridge the delta into oracle
+      // input and run the synthetic oracle. commit_eligible follows
+      // the trusted-source rule (SyntheticOracle is trusted).
+      const auto batch
+          = overlay::DeltaToOracleInput(base_geometry, delta);
+      auto verdict = overlay::SyntheticOracle::Evaluate(batch,
+                                                        base_geometry);
+      verdict.commit_eligible
+          = verdict.legal && IsTrustedLegalitySource(verdict.source);
+      outcome.legality = verdict;
+      break;
+    }
+    case LegalityMode::CpuDrcOracleRealDeck:
+      // V2.2.c.legality.realpdk lands later. For V2.2.c.legality.
+      // synthetic, falling through to the stub path keeps the
+      // behaviour predictable: a caller that requested real-PDK
+      // before it's wired gets a clearly non-committable verdict.
+      outcome.legality.legal = true;
+      outcome.legality.source = LegalitySource::StubAssumeLegal;
+      outcome.legality.commit_eligible = false;
+      break;
+    case LegalityMode::StubAssumeLegal:
+    default:
+      // V2.2.c.proj behaviour preserved. The V2.1.b hard-gate
+      // discipline requires commit_eligible=false even when
+      // legal=true because the verdict is unvalidated.
+      outcome.legality.legal = true;
+      outcome.legality.source = LegalitySource::StubAssumeLegal;
+      outcome.legality.commit_eligible = false;
+      break;
+  }
 
   // Step 3: simple Score. V2.2.c.score adds congestion/timing/
   // history terms.

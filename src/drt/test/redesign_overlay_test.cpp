@@ -23,6 +23,7 @@
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/ShadowDump.h"
 #include "redesign/overlay/SnapshotHandle.h"
+#include "redesign/overlay/SyntheticOracle.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -1426,6 +1427,178 @@ bool TestEvalOptionsLegalityModeDefaultsToStub()
                 != r::LegalityMode::CpuDrcOracleRealDeck;
 }
 
+// ===== V2.2.c.legality.synthetic — SyntheticOracle =====
+
+bool TestSyntheticOracleAddWireFarFromBaseIsLegal()
+{
+  // Base shape on layer 2 at (0..10, 0..5). Add a wire on layer 2
+  // far away (200..300, 200..205). Expect: legal,
+  // source=SyntheticOracle, commit_eligible=true.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeFullShape(0, 0, 10, 5, 2, 100, 12));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{200, 200}, r::Point{300, 205}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto outcome = state.eval(*base, pd, opts);
+
+  return outcome.legality.legal
+         && outcome.legality.source
+                == r::LegalitySource::SyntheticOracle
+         && outcome.legality.commit_eligible
+         && outcome.legality.violations.empty();
+}
+
+bool TestSyntheticOracleAddWireOverlapBaseIsIllegal()
+{
+  // Base at (0..50, 0..5) on layer 2. Add wire overlapping it on
+  // layer 2. Expect: illegal (Short), commit_eligible=false even
+  // though source is SyntheticOracle.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeFullShape(0, 0, 50, 5, 2, 100, 12));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{20, 0}, r::Point{30, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto outcome = state.eval(*base, pd, opts);
+
+  return !outcome.legality.legal
+         && outcome.legality.source
+                == r::LegalitySource::SyntheticOracle
+         && !outcome.legality.commit_eligible
+         && !outcome.legality.violations.empty();
+}
+
+bool TestSyntheticOracleAddWireOnDifferentLayerIsLegal()
+{
+  // Base on layer 2; add wire on layer 3 at the same coords. Even
+  // bbox-overlap doesn't matter because different layers don't
+  // interact in the synthetic rules.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeFullShape(0, 0, 50, 5, 2, 100, 12));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  add.layer = 3;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto outcome = state.eval(*base, pd, opts);
+
+  return outcome.legality.legal
+         && outcome.legality.commit_eligible;
+}
+
+bool TestSyntheticOracleSpacingViolationDetected()
+{
+  // Base wire on layer 2 at (0..50, 0..5). Add wire on layer 2 at
+  // (60..100, 0..5). Edge distance = 60 - 50 = 10, well below
+  // threshold 50. Expect PrlSpacing violation.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeFullShape(0, 0, 50, 5, 2, 100, 12));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{60, 0}, r::Point{100, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto outcome = state.eval(*base, pd, opts);
+
+  return !outcome.legality.legal
+         && !outcome.legality.commit_eligible
+         && std::find(outcome.legality.violations.begin(),
+                      outcome.legality.violations.end(),
+                      r::MarkerKind::PrlSpacing)
+                != outcome.legality.violations.end();
+}
+
+bool TestSyntheticOracleDefaultModeRemainsStub()
+{
+  // Without explicit legality_mode, eval still uses StubAssumeLegal
+  // and refuses commit-eligibility. PoC must be opt-in.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeFullShape(0, 0, 50, 5, 2, 100, 12));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{200, 200}, r::Point{300, 205}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  // No opts — defaults
+  auto outcome = state.eval(*base, pd);
+
+  return outcome.legality.source == r::LegalitySource::StubAssumeLegal
+         && !outcome.legality.commit_eligible;
+}
+
+bool TestSyntheticOracleCpuDrcModeFallsBackToStub()
+{
+  // V2.2.c.legality.synthetic: requesting real-PDK mode before it's
+  // wired returns a non-committable stub. No silent fall-through to
+  // synthetic.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+  auto outcome = state.eval(*base, pd, opts);
+
+  // Source falls back to StubAssumeLegal (NOT CpuDrcOracle, because
+  // we didn't actually run that oracle), commit_eligible=false.
+  return outcome.legality.source == r::LegalitySource::StubAssumeLegal
+         && !outcome.legality.commit_eligible;
+}
+
+bool TestSyntheticOracleTrustedSourceRule()
+{
+  // Compile-time + runtime assertions about the trusted-source rule
+  // from LegalityVerdict.h.
+  return r::IsTrustedLegalitySource(r::LegalitySource::SyntheticOracle)
+         && r::IsTrustedLegalitySource(r::LegalitySource::CpuDrcOracle)
+         && r::IsTrustedLegalitySource(r::LegalitySource::UpstreamExact)
+         && !r::IsTrustedLegalitySource(
+             r::LegalitySource::StubAssumeLegal)
+         && !r::IsTrustedLegalitySource(
+             r::LegalitySource::UnresolvedFootprint);
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -1580,6 +1753,20 @@ int main()
        TestBridgeUnsupportedDeltaKindFlagsStatus},
       {"V2.2.c.bridge LegalityMode enum exists, default = StubAssumeLegal",
        TestEvalOptionsLegalityModeDefaultsToStub},
+      {"V2.2.c.legality.synthetic AddWire far-from-base is legal (commit-eligible)",
+       TestSyntheticOracleAddWireFarFromBaseIsLegal},
+      {"V2.2.c.legality.synthetic AddWire overlap base is illegal",
+       TestSyntheticOracleAddWireOverlapBaseIsIllegal},
+      {"V2.2.c.legality.synthetic different-layer always legal",
+       TestSyntheticOracleAddWireOnDifferentLayerIsLegal},
+      {"V2.2.c.legality.synthetic spacing violation detected",
+       TestSyntheticOracleSpacingViolationDetected},
+      {"V2.2.c.legality.synthetic default mode stays Stub (opt-in)",
+       TestSyntheticOracleDefaultModeRemainsStub},
+      {"V2.2.c.legality.synthetic CpuDrcRealDeck mode falls back to Stub",
+       TestSyntheticOracleCpuDrcModeFallsBackToStub},
+      {"V2.2.c.legality.synthetic IsTrustedLegalitySource rule",
+       TestSyntheticOracleTrustedSourceRule},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

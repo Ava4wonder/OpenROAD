@@ -42,14 +42,43 @@ enum class LegalitySource : uint8_t {
   // resolved_net_id, or unknown WriteFootprint). Eval cannot validate
   // it. legal=false; non-committable.
   UnresolvedFootprint,
-  // V2.2.c.legality — verdict came from running the L2 legality
-  // oracle (CpuDrcOracle / RuleDeck path). Commit-eligible iff
-  // legal=true.
+  // V2.2.c.legality.synthetic — verdict came from the small synthetic
+  // oracle (same-layer overlap / spacing-below-threshold). PoC-grade
+  // legality, NOT a physical DRC model. Commit-eligible iff legal,
+  // but consumers should not interpret these verdicts as real-PDK
+  // signoff signals. Provenance kept distinct from CpuDrcOracle so
+  // logs are honest about what ran.
+  SyntheticOracle,
+  // V2.2.c.legality.realpdk — verdict came from running the L2
+  // legality oracle (CpuDrcOracle / RuleDeck path) against a real
+  // PDK rule deck. Commit-eligible iff legal.
   CpuDrcOracle,
   // Future — verdict produced by the upstream FlexGCWorker exact
   // checker. The strictest source.
   UpstreamExact,
 };
+
+// V2.2.c.legality.synthetic — commit-eligibility rule.
+// commit_eligible = legal ONLY for trusted legality sources:
+//   SyntheticOracle (PoC)
+//   CpuDrcOracle (real)
+//   UpstreamExact (real)
+// Stub and unresolved sources can never be commit-eligible regardless
+// of `legal`. The eval impl applies this rule when constructing a
+// LegalityVerdict — it must not be re-derived at commit time.
+inline bool IsTrustedLegalitySource(LegalitySource s) noexcept
+{
+  switch (s) {
+    case LegalitySource::SyntheticOracle:
+    case LegalitySource::CpuDrcOracle:
+    case LegalitySource::UpstreamExact:
+      return true;
+    case LegalitySource::StubAssumeLegal:
+    case LegalitySource::UnresolvedFootprint:
+      return false;
+  }
+  return false;
+}
 
 struct LegalityVerdict
 {

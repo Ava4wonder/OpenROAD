@@ -149,6 +149,7 @@ if(ENABLE_DRT_REDESIGN)
         src/redesign/overlay/OverlayGeometryView.cpp
         src/redesign/overlay/RegionQueryGeometryView.cpp
         src/redesign/overlay/ShadowDump.cpp
+        src/redesign/overlay/SyntheticOracle.cpp
     )
     target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_OVERLAY=1)
   endif()
