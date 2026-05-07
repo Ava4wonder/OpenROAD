@@ -54,6 +54,17 @@ class ShadowDump
     Blockage = 3,
     PinAccess = 4,
     Cost = 5,
+    // V2.2.f — V2 loop shadow record (propose + eval per-net).
+    // Reuses the existing CSV columns with this mapping:
+    //   query_kind = "propose_eval"
+    //   bbox       = route_box
+    //   layer      = synthetic routing layer (V2.2.f hardcodes 2)
+    //   legacy_hash    = net_id (encoded)
+    //   overlay_hash   = LegalitySource enum value (encoded)
+    //   match          = commit_eligible (0/1)
+    //   legacy_count   = 1 if verdict.legal, else 0
+    //   overlay_count  = score.delta_via_count (signed → cast)
+    V2Loop = 6,
     // Keep last:
     kCount,
   };
@@ -105,6 +116,16 @@ class ShadowDump
                                        std::size_t overlay_count,
                                        const Rect& box,
                                        std::int32_t layer);
+
+  // V2.2.f — V2 propose-eval loop record. See V2Loop column-mapping
+  // comment in the Entity enum.
+  static void RecordV2LoopProposal(std::uint64_t net_id,
+                                   const Rect& route_box,
+                                   std::int32_t layer,
+                                   bool legal,
+                                   std::uint8_t legality_source,
+                                   bool commit_eligible,
+                                   std::int32_t delta_via_count);
 
   // Process-wide aggregates (across all entities).
   static std::uint64_t comparison_count() noexcept;

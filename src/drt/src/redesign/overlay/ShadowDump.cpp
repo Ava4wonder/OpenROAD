@@ -42,6 +42,8 @@ const char* EntityName(ShadowDump::Entity e) noexcept
       return "pin_access";
     case ShadowDump::Entity::Cost:
       return "cost";
+    case ShadowDump::Entity::V2Loop:
+      return "v2_loop";
     case ShadowDump::Entity::kCount:
       break;
   }
@@ -340,6 +342,46 @@ void ShadowDump::RecordBlockageComparison(std::uint64_t legacy_hash,
   rec.overlay_hash = overlay_hash;
   rec.legacy_count = legacy_count;
   rec.overlay_count = overlay_count;
+  Record(rec);
+}
+
+void ShadowDump::RecordV2LoopProposal(std::uint64_t net_id,
+                                      const Rect& route_box,
+                                      std::int32_t layer,
+                                      bool legal,
+                                      std::uint8_t legality_source,
+                                      bool commit_eligible,
+                                      std::int32_t delta_via_count)
+{
+  ComparisonRecord rec;
+  rec.entity = Entity::V2Loop;
+  rec.query_kind = "propose_eval";
+  rec.box = route_box;
+  rec.layer = layer;
+  rec.legacy_hash = net_id;
+  rec.overlay_hash = static_cast<std::uint64_t>(legality_source);
+  // Reusing `match` column as commit-eligible flag. The mismatch
+  // counter accumulates "non-committable" V2 loop proposals, which
+  // is the meaningful signal for V2.2.f integration health.
+  rec.legacy_count = legal ? 1u : 0u;
+  // Cast signed via_count to size_t for the column. Overflow is not
+  // a concern (via counts are small per-net).
+  rec.overlay_count
+      = delta_via_count < 0
+            ? 0u
+            : static_cast<std::size_t>(delta_via_count);
+  // Override the per-row write to set match=commit_eligible
+  // explicitly via legacy_hash != overlay_hash inversion. Simpler:
+  // pass legacy_hash and overlay_hash equal iff commit_eligible.
+  if (commit_eligible) {
+    // Force match=1 by making legacy_hash == overlay_hash.
+    rec.overlay_hash = rec.legacy_hash;
+  } else {
+    // Force match=0: ensure overlay_hash != legacy_hash.
+    if (rec.overlay_hash == rec.legacy_hash) {
+      rec.overlay_hash ^= 0x1ull;
+    }
+  }
   Record(rec);
 }
 

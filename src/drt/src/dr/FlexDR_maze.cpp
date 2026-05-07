@@ -20,6 +20,12 @@
 #include <vector>
 
 #include "boost/polygon/polygon.hpp"
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+#include "redesign/PhysicalState.h"
+#include "redesign/overlay/MazeSearchProposer.h"
+#include "redesign/overlay/RegionQueryGeometryView.h"
+#include "redesign/overlay/ShadowDump.h"
+#endif
 #include "db/drObj/drFig.h"
 #include "db/drObj/drShape.h"
 #include "db/gcObj/gcNet.h"
@@ -3221,6 +3227,54 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
   if (graphics_) {
     graphics_->show(true);
   }
+
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+  // V2.2.f shadow: exercise the V2 propose → eval seam in the
+  // production routing context. Production routing below proceeds
+  // unchanged; this block runs in parallel as observation only.
+  // No try_commit, no store mutation — V2.2.f.drive (later) flips
+  // the gate that lets the V2 path actually drive routing.
+  {
+    namespace dr_overlay = drt::redesign::overlay;
+    dr_overlay::RegionQueryGeometryView v2_view(getDesign());
+    dr_overlay::MazeSearchProposer::Input v2_in;
+    v2_in.net_id = net->getFrNet() != nullptr
+                       ? static_cast<drt::redesign::NetId>(
+                             net->getFrNet()->getId())
+                       : 0;
+    const odb::Rect rb = getRouteBox();
+    v2_in.route_box.ll.x = rb.xMin();
+    v2_in.route_box.ll.y = rb.yMin();
+    v2_in.route_box.ur.x = rb.xMax();
+    v2_in.route_box.ur.y = rb.yMax();
+    // V2.2.f synthetic: hardcoded layer 2. V2.2.e.real / V2.2.f.real
+    // resolve the per-net primary routing layer.
+    v2_in.layer = 2;
+    v2_in.delta_id.region_id = static_cast<std::uint32_t>(v2_in.net_id);
+    v2_in.delta_id.proposer_id = 0;
+    v2_in.delta_id.attempt_index = 0;
+    v2_in.snapshot_version = 0;
+
+    auto v2_pd = dr_overlay::MazeSearchProposer::Propose(v2_view, v2_in);
+
+    drt::redesign::PhysicalState v2_state;
+    drt::redesign::EvalOptions v2_opts;
+    v2_opts.legality_mode
+        = drt::redesign::LegalityMode::SyntheticOracle;
+    auto v2_outcome = v2_state.eval(v2_view, v2_pd, v2_opts);
+
+    dr_overlay::ShadowDump::RecordV2LoopProposal(
+        v2_in.net_id,
+        v2_in.route_box,
+        static_cast<std::int32_t>(v2_in.layer),
+        v2_outcome.legality.legal,
+        static_cast<std::uint8_t>(v2_outcome.legality.source),
+        v2_outcome.legality.commit_eligible,
+        v2_outcome.score.has_value()
+            ? v2_outcome.score->delta_via_count
+            : 0);
+  }
+#endif
   frOrderedIdSet<drPin*> unConnPins;
   std::map<FlexMazeIdx, frOrderedIdSet<drPin*>> mazeIdx2unConnPins;
   std::map<FlexMazeIdx, frBox3D*>
