@@ -84,12 +84,36 @@ struct BlockageRef
   std::optional<std::uint64_t> source_inst_id;
 };
 
+// V2.2.a.4 — pin access is structurally different from
+// markers/route_shapes/guides/blockages. It is not a region-query
+// entity in the same sense: pin-access candidates are owned by
+// frInstTerm/frPin/frAccessPoint chains, may be orientation-
+// dependent, may be generated rather than stored, and have no
+// semantically-equivalent layer-scoped legacy queryPinAccess() in
+// frRegionQuery. V2.2.a.4 ships PinAccessRef and CanonicalTuple as
+// an API/projection checkpoint only — RegionQueryGeometryView::
+// QueryPinAccess remains unimplemented (throws) until a concrete
+// consumer identifies the right semantic source.
+//
+// The bbox is a degenerate rect at the access-point location
+// (frAccessPoint::getPoint()). Identity fields are all optional so
+// synthetic data can populate the subset the consumer needs;
+// absent-vs-present is canonically distinguishable via the
+// per-entity CanonicalTuple.
 struct PinAccessRef
 {
   Rect bbox{};
   std::optional<LayerNum> layer;
-  std::optional<uint64_t> iterm_id;
+  std::optional<uint64_t> iterm_id;          // stable iterm getId()
+  std::optional<uint64_t> access_point_id;   // stable AP getId()
+  std::optional<NetId> net_id;
   std::optional<int32_t> access_pattern_index;
+  std::optional<uint8_t> cost;               // frAccessPoint::getCost()
+  std::optional<uint8_t> type_low;           // typeL_ (frAccessPointEnum)
+  std::optional<uint8_t> type_high;          // typeH_ (frAccessPointEnum)
+  std::optional<bool> has_planar_access;
+  std::optional<bool> has_up_access;
+  std::optional<bool> has_down_access;
 };
 
 // QueryCost / CostFieldView intentionally NOT on the V2.1.e abstract

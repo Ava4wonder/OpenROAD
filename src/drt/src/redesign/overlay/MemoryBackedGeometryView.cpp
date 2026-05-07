@@ -83,9 +83,13 @@ BlockageQueryResult MemoryBackedGeometryView::QueryBlockages(
 PinAccessQueryResult MemoryBackedGeometryView::QueryPinAccess(
     const Rect& box) const
 {
-  (void) box;
-  throw std::logic_error(
-      "GeometryView: QueryPinAccess not supported in V2.1");
+  PinAccessQueryResult out;
+  for (const PinAccessRef& p : pin_access_) {
+    if (BboxOverlap(box, p.bbox)) {
+      out.push_back(p);
+    }
+  }
+  return out;
 }
 
 }  // namespace drt::redesign::overlay

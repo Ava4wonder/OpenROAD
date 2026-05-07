@@ -59,6 +59,20 @@ class MemoryBackedGeometryView : public GeometryView
   {
   }
 
+  // V2.2.a.4 — overload also accepting pin-access candidates.
+  MemoryBackedGeometryView(std::vector<MarkerRef> markers,
+                           std::vector<ShapeRef> route_shapes,
+                           std::vector<GuideRef> guides,
+                           std::vector<BlockageRef> blockages,
+                           std::vector<PinAccessRef> pin_access)
+      : markers_(std::move(markers)),
+        route_shapes_(std::move(route_shapes)),
+        guides_(std::move(guides)),
+        blockages_(std::move(blockages)),
+        pin_access_(std::move(pin_access))
+  {
+  }
+
   MarkerQueryResult QueryMarkers(const Rect& box) const override;
 
   // V2.2.a.1.mem — real implementation. Filters route_shapes_ by
@@ -78,8 +92,12 @@ class MemoryBackedGeometryView : public GeometryView
   BlockageQueryResult QueryBlockages(const Rect& box,
                                      LayerNum layer) const override;
 
-  // V2.2+ methods — still throw per GeometryView contract until
-  // their per-entity sub-commit (V2.2.a.4) lands.
+  // V2.2.a.4 — real implementation. Filters pin_access_ by bbox
+  // overlap. Layer is part of canonical identity but NOT a query
+  // filter (a region query for pin-access isn't a layered concept;
+  // it's "what access candidates lie inside this box?"). If a
+  // future consumer needs layer-scoped queries it will live as a
+  // sibling method, not a parameter overload.
   PinAccessQueryResult QueryPinAccess(const Rect& box) const override;
 
  private:
@@ -87,6 +105,7 @@ class MemoryBackedGeometryView : public GeometryView
   std::vector<ShapeRef> route_shapes_;
   std::vector<GuideRef> guides_;
   std::vector<BlockageRef> blockages_;
+  std::vector<PinAccessRef> pin_access_;
 };
 
 }  // namespace drt::redesign::overlay

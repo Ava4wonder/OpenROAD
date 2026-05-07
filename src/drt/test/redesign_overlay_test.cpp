@@ -14,6 +14,7 @@
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/ShadowDump.h"
 #include "redesign/overlay/SnapshotHandle.h"
 
@@ -437,9 +438,54 @@ bool TestBlockageRefHashDistinguishesPdkFromInst()
   return ro::HashCanonicalRange(v_pdk) != ro::HashCanonicalRange(v_inst);
 }
 
-bool TestQueryPinAccessThrowsInV21()
+// V2.2.a.4 — MemoryBackedGeometryView::QueryPinAccess has a real
+// in-memory impl. RegionQueryGeometryView::QueryPinAccess still
+// throws (the V2.2.a.4 B+C hybrid scope: API/projection-validated,
+// not live-backend validated — see plan note in
+// v2_drt_redesign_execution_plan.md).
+bool TestMemoryBackedQueryPinAccessFilters()
 {
-  ro::MemoryBackedGeometryView view({});
+  ro::PinAccessRef p1;
+  p1.bbox = r::Rect{r::Point{10, 10}, r::Point{10, 10}};  // single point
+  p1.layer = 2;
+  p1.iterm_id = 100;
+  p1.access_point_id = 1;
+  p1.has_planar_access = true;
+  ro::PinAccessRef p2;
+  p2.bbox = r::Rect{r::Point{500, 500}, r::Point{500, 500}};
+  p2.layer = 4;
+  p2.iterm_id = 200;
+  p2.access_point_id = 2;
+  p2.has_up_access = true;
+
+  ro::MemoryBackedGeometryView view({}, {}, {}, {}, {p1, p2});
+
+  auto in_box1 = view.QueryPinAccess(
+      r::Rect{r::Point{5, 5}, r::Point{15, 15}});
+  if (in_box1.size() != 1u
+      || !in_box1[0].iterm_id.has_value()
+      || in_box1[0].iterm_id.value() != 100u
+      || !in_box1[0].has_planar_access.has_value()
+      || !in_box1[0].has_planar_access.value()) {
+    return false;
+  }
+  auto in_neither = view.QueryPinAccess(
+      r::Rect{r::Point{200, 200}, r::Point{300, 300}});
+  return in_neither.empty();
+}
+
+bool TestRegionQueryPinAccessStillThrows()
+{
+  // V2.2.a.4 B+C hybrid contract: RegionQueryGeometryView's
+  // QueryPinAccess is intentionally NOT implemented — pin access has
+  // no semantically equivalent legacy spatial query in
+  // frRegionQuery. Real backend lands when a concrete consumer
+  // identifies the right semantic source; until then, calling it is
+  // a programming error and must throw.
+  ro::RegionQueryGeometryView view(nullptr);
+  // (nullptr design_ would short-circuit to {} for implemented
+  // methods; QueryPinAccess instead throws because the method body
+  // is unimplemented, not because design_ is null.)
   try {
     (void) view.QueryPinAccess(r::Rect{});
   } catch (const std::logic_error&) {
@@ -448,6 +494,40 @@ bool TestQueryPinAccessThrowsInV21()
     return false;
   }
   return false;
+}
+
+bool TestPinAccessRefHashCapturesAccessFlags()
+{
+  // Two pin-access candidates differing only in has_up_access must
+  // hash differently. Proves the optional-bool fields participate in
+  // canonical identity.
+  ro::PinAccessRef p1;
+  p1.bbox = r::Rect{r::Point{0, 0}, r::Point{0, 0}};
+  p1.layer = 2;
+  p1.iterm_id = 100;
+  p1.has_up_access = false;
+  ro::PinAccessRef p2 = p1;
+  p2.has_up_access = true;
+  std::vector<ro::PinAccessRef> v1 = {p1};
+  std::vector<ro::PinAccessRef> v2 = {p2};
+  return ro::HashCanonicalRange(v1) != ro::HashCanonicalRange(v2);
+}
+
+bool TestPinAccessRefHashAbsentVsFalseFlag()
+{
+  // Critical invariant: an absent has_up_access (nullopt) must hash
+  // differently from has_up_access=false. This is the absent-vs-zero
+  // discipline applied to optional<bool>.
+  ro::PinAccessRef absent;
+  absent.bbox = r::Rect{r::Point{0, 0}, r::Point{0, 0}};
+  absent.layer = 2;
+  // absent.has_up_access stays nullopt
+  ro::PinAccessRef explicit_false = absent;
+  explicit_false.has_up_access = false;
+  std::vector<ro::PinAccessRef> v_absent = {absent};
+  std::vector<ro::PinAccessRef> v_false = {explicit_false};
+  return ro::HashCanonicalRange(v_absent)
+         != ro::HashCanonicalRange(v_false);
 }
 
 // ===== V2.1.e.2 — Canonical hashing framework =====
@@ -735,8 +815,8 @@ static_assert(ro::has_canonical_tuple<ro::GuideRef>::value,
               "GuideRef must have CanonicalTuple after V2.2.a.2");
 static_assert(ro::has_canonical_tuple<ro::BlockageRef>::value,
               "BlockageRef must have CanonicalTuple after V2.2.a.3");
-static_assert(!ro::has_canonical_tuple<ro::PinAccessRef>::value,
-              "PinAccessRef CanonicalTuple lands in V2.2.a.4");
+static_assert(ro::has_canonical_tuple<ro::PinAccessRef>::value,
+              "PinAccessRef must have CanonicalTuple after V2.2.a.4");
 
 bool TestSnapshotHandleHoldsViewByShared()
 {
@@ -816,8 +896,14 @@ int main()
        TestMemoryBackedQueryBlockagesFilters},
       {"BlockageRef hash distinguishes PDK from inst-blockage",
        TestBlockageRefHashDistinguishesPdkFromInst},
-      {"GeometryView::QueryPinAccess throws in V2.1",
-       TestQueryPinAccessThrowsInV21},
+      {"MemoryBackedGeometryView::QueryPinAccess filters",
+       TestMemoryBackedQueryPinAccessFilters},
+      {"RegionQueryGeometryView::QueryPinAccess intentionally throws (V2.2.a.4 B+C hybrid)",
+       TestRegionQueryPinAccessStillThrows},
+      {"PinAccessRef hash captures access flags",
+       TestPinAccessRefHashCapturesAccessFlags},
+      {"PinAccessRef hash absent flag != false flag",
+       TestPinAccessRefHashAbsentVsFalseFlag},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

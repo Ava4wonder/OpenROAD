@@ -135,6 +135,31 @@ inline auto CanonicalTuple(const BlockageRef& b)
                          b.source_inst_id);
 }
 
+// V2.2.a.4 — PinAccessRef canonical identity. Pin access is an
+// API/projection checkpoint in V2.2.a.4 — no live RegionQuery
+// backend yet, no FlexDR shadow site. The hash is exercised by
+// MemoryBackedGeometryView synthetic tests. All identity fields are
+// optional so subsets populated by future real-backend impls
+// canonicalize cleanly.
+inline auto CanonicalTuple(const PinAccessRef& p)
+{
+  return std::make_tuple(p.layer,
+                         p.bbox.ll.x,
+                         p.bbox.ll.y,
+                         p.bbox.ur.x,
+                         p.bbox.ur.y,
+                         p.iterm_id,
+                         p.access_point_id,
+                         p.net_id,
+                         p.access_pattern_index,
+                         p.cost,
+                         p.type_low,
+                         p.type_high,
+                         p.has_planar_access,
+                         p.has_up_access,
+                         p.has_down_access);
+}
+
 // SFINAE detector — has_canonical_tuple<T>::value is true iff
 // CanonicalTuple(const T&) exists in scope.
 template <typename T, typename = void>
@@ -186,15 +211,20 @@ inline void WriteCanonical(uint64_t& state, T v) noexcept
   static_assert(std::is_integral_v<T>,
                 "WriteCanonical: integer types only. Add an explicit "
                 "overload for enums or other types.");
-  using U = std::make_unsigned_t<T>;
-  U u = static_cast<U>(v);
-  // Little-endian byte stream.
-  uint8_t buf[sizeof(U)];
-  for (std::size_t i = 0; i < sizeof(U); ++i) {
-    buf[i] = static_cast<uint8_t>(u & 0xFFu);
-    u >>= 8;
+  if constexpr (std::is_same_v<T, bool>) {
+    // make_unsigned<bool> is ill-formed; serialise directly.
+    HashByte(state, v ? 1u : 0u);
+  } else {
+    using U = std::make_unsigned_t<T>;
+    U u = static_cast<U>(v);
+    // Little-endian byte stream.
+    uint8_t buf[sizeof(U)];
+    for (std::size_t i = 0; i < sizeof(U); ++i) {
+      buf[i] = static_cast<uint8_t>(u & 0xFFu);
+      u >>= 8;
+    }
+    HashBytes(state, buf, sizeof(U));
   }
-  HashBytes(state, buf, sizeof(U));
 }
 
 // std::optional<T> with explicit absent/present distinction.
