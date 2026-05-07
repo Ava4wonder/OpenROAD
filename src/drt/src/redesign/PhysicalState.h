@@ -21,6 +21,10 @@
 #include "Footprint.h"
 #include "Snapshot.h"
 
+namespace drt::redesign::overlay {
+class GeometryView;
+}
+
 namespace drt::redesign {
 
 class PhysicalState
@@ -41,7 +45,20 @@ class PhysicalState
   // Workers use this for proposal ranking before submitting to try_commit.
   // Returns hard LegalityVerdict and (optional) soft Score — the hard/
   // soft split is enforced by the type system; see v2 plan §4.3.
+  //
+  // V2.2.c.proj: stub — Snapshot does not yet expose a GeometryView.
+  // Use the GeometryView overload below until V2.2.d wires
+  // PhysicalStateImpl to provide one.
   EvalOutcome eval(const Snapshot& base,
+                   const ProposedDelta& delta,
+                   EvalOptions opts = {}) const;
+
+  // V2.2.c.proj — real eval over an explicit GeometryView base.
+  // Builds an OverlayGeometryView(base, [delta]) internally to score
+  // the delta. LegalityVerdict source is StubAssumeLegal in V2.2.c.proj
+  // (commit_eligible=false). V2.2.c.legality replaces the stub with
+  // CpuDrcOracle.
+  EvalOutcome eval(const overlay::GeometryView& base_geometry,
                    const ProposedDelta& delta,
                    EvalOptions opts = {}) const;
 

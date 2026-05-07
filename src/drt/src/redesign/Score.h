@@ -22,7 +22,12 @@ namespace drt::redesign {
 struct Score
 {
   int    delta_marker_reduction = 0;  // legal-marker reduction only
-  double delta_wirelength = 0.0;
+  // V2.2.c.proj — Manhattan-length proxy (sum of max(dx, dy) over
+  // route-shape bboxes), NOT bbox perimeter. Documented as a proxy
+  // because route-shape semantics are richer than rectangle bbox in
+  // OpenROAD (tracks, widths, vias). Refined when V2.2.e wires a
+  // real frPathSeg path-length accessor.
+  double delta_wirelength_proxy = 0.0;
   int    delta_via_count = 0;
   double delta_congestion = 0.0;
   double delta_timing = 0.0;

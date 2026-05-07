@@ -10,7 +10,11 @@
 #include <stdexcept>
 #include <vector>
 
+#include "redesign/EvalOutcome.h"
 #include "redesign/Footprint.h"
+#include "redesign/LegalityVerdict.h"
+#include "redesign/PhysicalState.h"
+#include "redesign/Score.h"
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
@@ -1120,6 +1124,162 @@ bool TestOverlayPassesGuidesAndMarkersThrough()
   return markers.size() == 1u && guides.size() == 1u;
 }
 
+// ===== V2.2.c.proj — PhysicalState::eval =====
+
+bool TestEvalAddWireProducesPositiveWirelength()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{100, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  r::PhysicalState state;
+  auto outcome = state.eval(*base, pd);
+
+  if (!outcome.score.has_value()) {
+    return false;
+  }
+  // Manhattan length proxy = max(dx=100, dy=5) = 100.
+  if (outcome.score->delta_wirelength_proxy != 100.0) {
+    return false;
+  }
+  if (outcome.score->delta_via_count != 0) {
+    return false;
+  }
+  // V2.1.b hard-gate: stub legality is NEVER commit-eligible, even
+  // though legal=true (the placeholder default).
+  if (outcome.legality.source != r::LegalitySource::StubAssumeLegal) {
+    return false;
+  }
+  return outcome.legality.legal && !outcome.legality.commit_eligible;
+}
+
+bool TestEvalDeleteWireProducesNegativeWirelength()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  del.resolved_net_id = 100;
+  del.shape_kind = 1;
+  r::ProposedDelta pd;
+  pd.delta = del;
+
+  r::PhysicalState state;
+  auto outcome = state.eval(*base, pd);
+
+  if (!outcome.score.has_value()) {
+    return false;
+  }
+  // Manhattan length proxy = -max(50, 5) = -50.
+  if (outcome.score->delta_wirelength_proxy != -50.0) {
+    return false;
+  }
+  // Stub legality, even for resolved deletes.
+  return outcome.legality.source == r::LegalitySource::StubAssumeLegal
+         && !outcome.legality.commit_eligible;
+}
+
+bool TestEvalUnresolvedDeleteIdentitySurfaces()
+{
+  // Unresolved DeleteWire (no resolved_net_id, no shape_kind) →
+  // EvalOutcome surfaces it loudly with
+  // LegalitySource::UnresolvedFootprint and commit_eligible=false.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{
+          MakeFullShape(0, 0, 100, 5, 2, 100, 1)});
+
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  // resolved_net_id and shape_kind intentionally absent
+  r::ProposedDelta pd;
+  pd.delta = del;
+
+  r::PhysicalState state;
+  auto outcome = state.eval(*base, pd);
+
+  return outcome.legality.source
+             == r::LegalitySource::UnresolvedFootprint
+         && !outcome.legality.legal
+         && !outcome.legality.commit_eligible
+         && !outcome.score.has_value();  // no score by default
+}
+
+bool TestEvalUnresolvedDeleteScoreOnlyOnRequest()
+{
+  // Even with score_even_if_illegal, an unresolved-footprint
+  // verdict stays non-committable. The score is provided but it's
+  // a zero-filled stub — eval cannot meaningfully cost a delta
+  // whose effect is unknown.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::DeleteWire del;
+  del.segment_id = 1;
+  // unresolved
+  r::ProposedDelta pd;
+  pd.delta = del;
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.score_even_if_illegal = true;
+  auto outcome = state.eval(*base, pd, opts);
+
+  return outcome.legality.source
+             == r::LegalitySource::UnresolvedFootprint
+         && !outcome.legality.commit_eligible
+         && outcome.score.has_value()
+         && outcome.score->delta_wirelength_proxy == 0.0;
+}
+
+bool TestEvalAddViaIncrementsViaCount()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::AddVia v;
+  v.location = r::Point{500, 500};
+  r::ProposedDelta pd;
+  pd.delta = v;
+
+  r::PhysicalState state;
+  auto outcome = state.eval(*base, pd);
+
+  return outcome.score.has_value()
+         && outcome.score->delta_via_count == 1
+         && !outcome.legality.commit_eligible;  // stub
+}
+
+bool TestEvalSnapshotOverloadStillThrows()
+{
+  // V2.2.c.proj: the Snapshot-taking eval overload remains a stub
+  // (Snapshot doesn't yet expose a GeometryView). V2.2.d wires
+  // PhysicalStateImpl→GeometryView. Until then, calling that
+  // overload is a programming error.
+  r::PhysicalState state;
+  r::Snapshot snap;
+  r::ProposedDelta pd;
+  pd.delta = r::AddWire{};
+  try {
+    (void) state.eval(snap, pd);
+  } catch (const std::logic_error&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -1248,6 +1408,18 @@ int main()
        TestDeleteShapeKindMismatchDoesNotMatch},
       {"V2.2.b.del WriteFootprint::unknown reflects resolution",
        TestDeleteWriteFootprintUnknownWhenUnresolved},
+      {"V2.2.c.proj eval(AddWire) wirelength_proxy = max(dx,dy)",
+       TestEvalAddWireProducesPositiveWirelength},
+      {"V2.2.c.proj eval(DeleteWire resolved) wirelength_proxy negative",
+       TestEvalDeleteWireProducesNegativeWirelength},
+      {"V2.2.c.proj eval(DeleteWire unresolved) UnresolvedFootprint + non-commit",
+       TestEvalUnresolvedDeleteIdentitySurfaces},
+      {"V2.2.c.proj eval(unresolved) score_even_if_illegal still non-commit",
+       TestEvalUnresolvedDeleteScoreOnlyOnRequest},
+      {"V2.2.c.proj eval(AddVia) increments via_count",
+       TestEvalAddViaIncrementsViaCount},
+      {"V2.2.c.proj eval(Snapshot) still throws (V2.2.d wires it)",
+       TestEvalSnapshotOverloadStillThrows},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

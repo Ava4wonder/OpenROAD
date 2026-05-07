@@ -28,11 +28,40 @@ enum class MarkerKind : uint8_t {
   Other,
 };
 
+// V2.2.c.proj — provenance of a LegalityVerdict. The hard-gate
+// discipline from V2.1.b says only verdicts that have actually been
+// validated may make a proposal commit-eligible. Different sources
+// have different evidentiary weight; the source is recorded on the
+// verdict so consumers can refuse to commit on stub evidence.
+enum class LegalitySource : uint8_t {
+  // V2.2.c.proj default — eval was called but no real legality
+  // oracle was wired. legal=true is a *placeholder* value; the
+  // proposal MUST NOT be commit-eligible on this verdict.
+  StubAssumeLegal,
+  // The Delta's identity is incomplete (e.g., DeleteWire without
+  // resolved_net_id, or unknown WriteFootprint). Eval cannot validate
+  // it. legal=false; non-committable.
+  UnresolvedFootprint,
+  // V2.2.c.legality — verdict came from running the L2 legality
+  // oracle (CpuDrcOracle / RuleDeck path). Commit-eligible iff
+  // legal=true.
+  CpuDrcOracle,
+  // Future — verdict produced by the upstream FlexGCWorker exact
+  // checker. The strictest source.
+  UpstreamExact,
+};
+
 struct LegalityVerdict
 {
   bool legal = true;
   std::vector<MarkerKind> violations;  // empty iff legal == true
   uint64_t marker_count_after = 0;
+  // V2.2.c.proj — provenance + commit-eligibility gate.
+  LegalitySource source = LegalitySource::StubAssumeLegal;
+  // V2.1.b hard-gate, V2.2.c.proj surface: a proposal is
+  // commit-eligible only when (legal == true AND source has been
+  // validated). Stub legality always sets this false.
+  bool commit_eligible = false;
 };
 
 }  // namespace drt::redesign
