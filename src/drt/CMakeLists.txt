@@ -145,6 +145,7 @@ if(ENABLE_DRT_REDESIGN)
     target_sources(drt_lib
       PRIVATE
         src/redesign/overlay/MemoryBackedGeometryView.cpp
+        src/redesign/overlay/OracleCandidate.cpp
         src/redesign/overlay/OverlayGeometryView.cpp
         src/redesign/overlay/RegionQueryGeometryView.cpp
         src/redesign/overlay/ShadowDump.cpp

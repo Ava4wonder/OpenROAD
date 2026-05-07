@@ -14,12 +14,30 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 
 #include "LegalityVerdict.h"
 #include "Score.h"
 
 namespace drt::redesign {
+
+// V2.2.c.bridge — selectable legality backend. The PoC path can
+// advance with SyntheticOracle without waiting on real-PDK RuleDeck
+// coverage. eval picks its source from this option.
+enum class LegalityMode : std::uint8_t {
+  StubAssumeLegal,        // V2.2.c.proj default — placeholder, not
+                          // committable. Wirelength/score still
+                          // computed for ranking experiments.
+  SyntheticOracle,        // V2.2.c.legality.synthetic — synthetic
+                          // RuleDeck (same-layer overlap = illegal,
+                          // spacing < threshold = illegal, etc.) so
+                          // the architectural seam can be exercised
+                          // without rule-deck archaeology.
+  CpuDrcOracleRealDeck,   // V2.2.c.legality.realpdk — full
+                          // CpuDrcOracle backed by real ASAP7-style
+                          // RuleDeck. Final form.
+};
 
 struct EvalOptions
 {
@@ -28,6 +46,11 @@ struct EvalOptions
   // measure how close a candidate is to legal). Such proposals are
   // marked speculative-only; they cannot be committed.
   bool score_even_if_illegal = false;
+
+  // V2.2.c.bridge — legality backend selection. Defaults to the
+  // stub source so V2.2.c.proj behaviour is preserved when eval is
+  // called without explicit options.
+  LegalityMode legality_mode = LegalityMode::StubAssumeLegal;
 };
 
 struct EvalOutcome

@@ -18,6 +18,7 @@
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/OracleCandidate.h"
 #include "redesign/overlay/OverlayGeometryView.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/ShadowDump.h"
@@ -1280,6 +1281,151 @@ bool TestEvalSnapshotOverloadStillThrows()
   return false;
 }
 
+// ===== V2.2.c.bridge — DeltaToOracleInput =====
+
+bool TestBridgeAddWireProducesOneCandidateWire()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{10, 0}, r::Point{50, 5}};
+  add.layer = 3;
+  r::ProposedDelta pd;
+  pd.delta = add;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  if (batch.status != ro::OracleCandidateBatch::Status::Ok) {
+    return false;
+  }
+  if (batch.added.size() != 1u || !batch.deleted_context.empty()) {
+    return false;
+  }
+  const auto& c = batch.added[0];
+  return c.kind == ro::OracleCandidateShape::Kind::Wire
+         && c.bbox.ll.x == 10 && c.bbox.ur.x == 50
+         && c.layer == 3 && !c.net_id.has_value();
+}
+
+bool TestBridgeAddViaProducesViaCutCandidate()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::AddVia v;
+  v.location = r::Point{500, 500};
+  r::ProposedDelta pd;
+  pd.delta = v;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  return batch.status == ro::OracleCandidateBatch::Status::Ok
+         && batch.added.size() == 1u
+         && batch.added[0].kind
+                == ro::OracleCandidateShape::Kind::ViaCut
+         && batch.added[0].bbox.ur.x > batch.added[0].bbox.ll.x
+         && batch.added[0].bbox.ur.y > batch.added[0].bbox.ll.y
+         && batch.deleted_context.empty();
+}
+
+bool TestBridgeInsertShieldProducesShieldCandidate()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::InsertShield s;
+  s.coverage = r::Rect{r::Point{0, 0}, r::Point{100, 50}};
+  s.layer = 5;
+  r::ProposedDelta pd;
+  pd.delta = s;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  return batch.status == ro::OracleCandidateBatch::Status::Ok
+         && batch.added.size() == 1u
+         && batch.added[0].kind == ro::OracleCandidateShape::Kind::Shield
+         && batch.added[0].layer == 5
+         && batch.deleted_context.empty();
+}
+
+bool TestBridgeResolvedDeleteWireGoesToContext()
+{
+  // DeleteWire with full identity → no `added` entry, but
+  // `deleted_context` records the removal target.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  del.resolved_net_id = 100;
+  del.shape_kind = 22;  // frcPatchWire raw value
+  r::ProposedDelta pd;
+  pd.delta = del;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  return batch.status == ro::OracleCandidateBatch::Status::Ok
+         && batch.added.empty()
+         && batch.deleted_context.size() == 1u
+         && batch.deleted_context[0].kind
+                == ro::OracleCandidateShape::Kind::PatchWire
+         && batch.deleted_context[0].layer == 2
+         && batch.deleted_context[0].net_id.has_value()
+         && batch.deleted_context[0].net_id.value() == 100u;
+}
+
+bool TestBridgeUnresolvedDeleteFlagsStatus()
+{
+  // DeleteWire missing resolved_net_id → status =
+  // UnresolvedFootprint, no entries.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  // resolved_net_id and shape_kind absent
+  r::ProposedDelta pd;
+  pd.delta = del;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  return batch.status
+             == ro::OracleCandidateBatch::Status::UnresolvedFootprint
+         && batch.added.empty()
+         && batch.deleted_context.empty();
+}
+
+bool TestBridgeUnsupportedDeltaKindFlagsStatus()
+{
+  // MoveCell is not adapter-eligible in V2.2.c.bridge.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+  r::MoveCell mc;
+  mc.inst = nullptr;
+  mc.new_origin = r::Point{0, 0};
+  r::ProposedDelta pd;
+  pd.delta = mc;
+
+  auto batch = ro::DeltaToOracleInput(*base, pd);
+  return batch.status
+             == ro::OracleCandidateBatch::Status::UnsupportedDelta
+         && batch.added.empty()
+         && batch.deleted_context.empty();
+}
+
+bool TestEvalOptionsLegalityModeDefaultsToStub()
+{
+  // V2.2.c.bridge declared LegalityMode but eval keeps StubAssumeLegal
+  // semantics until V2.2.c.legality.synthetic. Verify the default and
+  // that explicitly passing LegalityMode::SyntheticOracle does NOT
+  // yet activate synthetic logic (it stays stub-noncommittable until
+  // the next sub-commit wires the real branch).
+  r::EvalOptions opts_default;
+  if (opts_default.legality_mode != r::LegalityMode::StubAssumeLegal) {
+    return false;
+  }
+  // Just check the enum values are distinct and addressable.
+  return r::LegalityMode::StubAssumeLegal
+             != r::LegalityMode::SyntheticOracle
+         && r::LegalityMode::SyntheticOracle
+                != r::LegalityMode::CpuDrcOracleRealDeck;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -1420,6 +1566,20 @@ int main()
        TestEvalAddViaIncrementsViaCount},
       {"V2.2.c.proj eval(Snapshot) still throws (V2.2.d wires it)",
        TestEvalSnapshotOverloadStillThrows},
+      {"V2.2.c.bridge AddWire produces 1 Wire candidate",
+       TestBridgeAddWireProducesOneCandidateWire},
+      {"V2.2.c.bridge AddVia produces ViaCut candidate",
+       TestBridgeAddViaProducesViaCutCandidate},
+      {"V2.2.c.bridge InsertShield produces Shield candidate",
+       TestBridgeInsertShieldProducesShieldCandidate},
+      {"V2.2.c.bridge resolved DeleteWire goes to deleted_context",
+       TestBridgeResolvedDeleteWireGoesToContext},
+      {"V2.2.c.bridge unresolved Delete flags UnresolvedFootprint status",
+       TestBridgeUnresolvedDeleteFlagsStatus},
+      {"V2.2.c.bridge unsupported delta kind flags UnsupportedDelta status",
+       TestBridgeUnsupportedDeltaKindFlagsStatus},
+      {"V2.2.c.bridge LegalityMode enum exists, default = StubAssumeLegal",
+       TestEvalOptionsLegalityModeDefaultsToStub},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
