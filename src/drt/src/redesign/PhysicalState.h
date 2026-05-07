@@ -23,6 +23,7 @@
 
 namespace drt::redesign::overlay {
 class GeometryView;
+class MutableGeometryStore;
 }
 
 namespace drt::redesign {
@@ -65,9 +66,26 @@ class PhysicalState
   // Two-phase commit (plan §7). Resolves conflicts via `policy`; commits the
   // selected non-conflicting subset; rejects proposals built against a stale
   // snapshot. Atomic with respect to other commits.
+  //
+  // V2.2.d single-Delta scope: `policy` parameter is accepted but
+  // not consulted. Uses default EvalOptions (StubAssumeLegal), which
+  // means everything is rejected as non-committable. Use
+  // try_commit_with_opts to drive the synthetic-oracle PoC path.
   CommitResult try_commit(const Snapshot& base,
                           std::vector<ProposedDelta> proposals,
                           ConflictPolicy& policy);
+
+  // V2.2.d — explicit-opts entry point. Required when caller wants
+  // SyntheticOracle / CpuDrcOracle commit eligibility.
+  CommitResult try_commit_with_opts(
+      const Snapshot& base,
+      std::vector<ProposedDelta> proposals,
+      ConflictPolicy& policy,
+      EvalOptions opts);
+
+  // V2.2.d test-only inspection of the writable backing.
+  const overlay::GeometryView& geometry_view_for_test() const noexcept;
+  overlay::MutableGeometryStore& mutable_store_for_test() noexcept;
 
   uint64_t current_version() const noexcept;
 

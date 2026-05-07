@@ -9,10 +9,12 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
 #include <variant>
 
+#include "overlay/MutableGeometryStore.h"
 #include "overlay/OracleCandidate.h"
 #include "overlay/OverlayGeometryView.h"
 #include "overlay/SyntheticOracle.h"
@@ -23,6 +25,13 @@ class PhysicalStateImpl
 {
  public:
   std::atomic<uint64_t> version{1};
+  // V2.2.d — writable backing. PhysicalState is the only thing
+  // allowed to mutate this; eval/Snapshot consumers see it through
+  // the GeometryView interface.
+  overlay::MutableGeometryStore store;
+  // V2.2.d single-Delta scope: one commit at a time. V2.4's MIS
+  // commit path takes this lock around the whole batch.
+  mutable std::mutex commit_mu;
 };
 
 struct PhysicalState::Impl
@@ -62,6 +71,14 @@ const PhysicalStateImpl* Snapshot::impl() const noexcept
   return impl_.get();
 }
 
+const overlay::GeometryView* Snapshot::geometry() const noexcept
+{
+  if (!impl_) {
+    return nullptr;
+  }
+  return &impl_->store;
+}
+
 uint64_t PhysicalState::current_version() const noexcept
 {
   return impl_->state->version.load(std::memory_order_acquire);
@@ -76,14 +93,16 @@ EvalOutcome PhysicalState::eval(const Snapshot& base,
                                 const ProposedDelta& delta,
                                 EvalOptions opts) const
 {
-  (void) base;
-  (void) delta;
-  (void) opts;
-  throw std::logic_error(
-      "drt::redesign::PhysicalState::eval(Snapshot,...) is a stub "
-      "through V2.2.c.proj; the GeometryView overload is the real "
-      "V2.2.c.proj entry point. PhysicalStateImpl→GeometryView "
-      "wiring lands in V2.2.d.");
+  // V2.2.d — Snapshot now carries a GeometryView pointer via
+  // PhysicalStateImpl::store. Delegate to the GeometryView overload.
+  if (!base.valid() || base.geometry() == nullptr) {
+    EvalOutcome bad;
+    bad.legality.legal = false;
+    bad.legality.source = LegalitySource::UnresolvedFootprint;
+    bad.legality.commit_eligible = false;
+    return bad;
+  }
+  return eval(*base.geometry(), delta, opts);
 }
 
 namespace {
@@ -238,12 +257,117 @@ CommitResult PhysicalState::try_commit(const Snapshot& base,
                                        std::vector<ProposedDelta> proposals,
                                        ConflictPolicy& policy)
 {
-  (void) base;
-  (void) proposals;
+  // V2.2.d — single-Delta commit path. Conflict policy parameter is
+  // accepted but not consulted; V2.4 wires the cross-delta conflict
+  // graph and the policy.select() call. For V2.2.d the loop runs
+  // proposals in order and commits each independently.
   (void) policy;
-  throw std::logic_error(
-      "drt::redesign::PhysicalState::try_commit is a Phase 1 stub; "
-      "implementation lands in Phase 3 per drt_redesign_plan.md §16.");
+
+  CommitResult result;
+  std::lock_guard<std::mutex> g(impl_->state->commit_mu);
+
+  // V2.2.d uses the EvalOptions default (StubAssumeLegal). Real
+  // PoC commits require the caller to call try_commit_with_opts
+  // (added below) and pass LegalityMode::SyntheticOracle. The
+  // default-mode try_commit therefore ALWAYS rejects everything as
+  // non-committable — which is correct: stub-source proposals are
+  // not commit-eligible.
+  EvalOptions opts;
+
+  for (std::size_t i = 0; i < proposals.size(); ++i) {
+    const ProposedDelta& p = proposals[i];
+
+    // Stale-snapshot detection. The proposal was generated against
+    // some snapshot version (p.snapshot_version) and base.version()
+    // is the snapshot the caller is currently committing against.
+    // If they don't match, or if base is stale relative to the
+    // current PhysicalState version, reject as snapshot_stale.
+    const std::uint64_t cur = current_version();
+    if (!base.valid() || base.version() != cur
+        || p.snapshot_version != cur) {
+      result.snapshot_stale.push_back(i);
+      continue;
+    }
+
+    // Eval against the current store.
+    EvalOutcome outcome = eval(impl_->state->store, p, opts);
+    if (!outcome.legality.commit_eligible) {
+      result.rejected_indices.push_back(i);
+      continue;
+    }
+
+    // Apply.
+    if (impl_->state->store.Apply(p.delta)) {
+      result.committed_indices.push_back(i);
+      impl_->state->version.fetch_add(1, std::memory_order_acq_rel);
+    } else {
+      // commit_eligible was true but Apply refused — programming
+      // error in the eval/Apply contract. Surface as rejected and
+      // do not bump the version.
+      result.rejected_indices.push_back(i);
+    }
+  }
+
+  result.new_version = impl_->state->version.load(
+      std::memory_order_acquire);
+  return result;
+}
+
+// V2.2.d — opt-in entry point for PoC commits using the synthetic
+// oracle. Production code paths will land their own opts handling
+// in V2.2.f integration.
+CommitResult PhysicalState::try_commit_with_opts(
+    const Snapshot& base,
+    std::vector<ProposedDelta> proposals,
+    ConflictPolicy& policy,
+    EvalOptions opts)
+{
+  (void) policy;
+  CommitResult result;
+  std::lock_guard<std::mutex> g(impl_->state->commit_mu);
+
+  for (std::size_t i = 0; i < proposals.size(); ++i) {
+    const ProposedDelta& p = proposals[i];
+
+    const std::uint64_t cur = current_version();
+    if (!base.valid() || base.version() != cur
+        || p.snapshot_version != cur) {
+      result.snapshot_stale.push_back(i);
+      continue;
+    }
+
+    EvalOutcome outcome = eval(impl_->state->store, p, opts);
+    if (!outcome.legality.commit_eligible) {
+      result.rejected_indices.push_back(i);
+      continue;
+    }
+
+    if (impl_->state->store.Apply(p.delta)) {
+      result.committed_indices.push_back(i);
+      impl_->state->version.fetch_add(1, std::memory_order_acq_rel);
+    } else {
+      result.rejected_indices.push_back(i);
+    }
+  }
+
+  result.new_version = impl_->state->version.load(
+      std::memory_order_acquire);
+  return result;
+}
+
+// V2.2.d test-only inspection of the writable store. PhysicalState
+// owns the store; tests use this accessor to assert post-commit
+// state without going through Snapshot.
+const overlay::GeometryView& PhysicalState::geometry_view_for_test()
+    const noexcept
+{
+  return impl_->state->store;
+}
+
+overlay::MutableGeometryStore& PhysicalState::mutable_store_for_test()
+    noexcept
+{
+  return impl_->state->store;
 }
 
 }  // namespace drt::redesign

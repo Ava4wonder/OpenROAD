@@ -18,6 +18,7 @@
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/MutableGeometryStore.h"
 #include "redesign/overlay/OracleCandidate.h"
 #include "redesign/overlay/OverlayGeometryView.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
@@ -1262,24 +1263,20 @@ bool TestEvalAddViaIncrementsViaCount()
          && !outcome.legality.commit_eligible;  // stub
 }
 
-bool TestEvalSnapshotOverloadStillThrows()
+bool TestEvalSnapshotOverloadInvalidSnapshotIsUnresolved()
 {
-  // V2.2.c.proj: the Snapshot-taking eval overload remains a stub
-  // (Snapshot doesn't yet expose a GeometryView). V2.2.d wires
-  // PhysicalStateImpl→GeometryView. Until then, calling that
-  // overload is a programming error.
+  // V2.2.d: Snapshot-taking eval no longer throws; an invalid
+  // (default-constructed) Snapshot returns LegalitySource::
+  // UnresolvedFootprint, commit_eligible=false. A valid Snapshot
+  // produces real eval output via Snapshot::geometry().
   r::PhysicalState state;
-  r::Snapshot snap;
+  r::Snapshot bad;  // default-constructed = invalid
   r::ProposedDelta pd;
   pd.delta = r::AddWire{};
-  try {
-    (void) state.eval(snap, pd);
-  } catch (const std::logic_error&) {
-    return true;
-  } catch (...) {
-    return false;
-  }
-  return false;
+  auto outcome = state.eval(bad, pd);
+  return outcome.legality.source
+             == r::LegalitySource::UnresolvedFootprint
+         && !outcome.legality.commit_eligible;
 }
 
 // ===== V2.2.c.bridge — DeltaToOracleInput =====
@@ -1599,6 +1596,231 @@ bool TestSyntheticOracleTrustedSourceRule()
              r::LegalitySource::UnresolvedFootprint);
 }
 
+// ===== V2.2.d — try_commit single-Delta path =====
+
+// Minimal ConflictPolicy stub for V2.2.d tests. Single-Delta scope
+// doesn't consult the policy, so the impl just returns no
+// committed indices.
+class V22dStubPolicy : public r::ConflictPolicy
+{
+ public:
+  std::vector<std::size_t> select(
+      const std::vector<r::ScoredProposal>& scored,
+      const std::vector<std::pair<std::size_t, std::size_t>>&
+          conflict_edges) override
+  {
+    (void) scored;
+    (void) conflict_edges;
+    return {};
+  }
+  r::PolicyKind kind() const noexcept override
+  {
+    return r::PolicyKind::GreedyPriority;
+  }
+};
+
+bool TestTryCommitDefaultModeRejectsAll()
+{
+  // V2.2.d: try_commit with default opts uses StubAssumeLegal,
+  // which is non-committable. AddWire proposal → rejected.
+  // Version stays at 1.
+  r::PhysicalState state;
+  auto snap = state.snapshot();
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+  pd.snapshot_version = snap.version();
+
+  V22dStubPolicy policy;
+  auto result = state.try_commit(snap, {pd}, policy);
+
+  return result.committed_indices.empty()
+         && result.rejected_indices.size() == 1u
+         && result.rejected_indices[0] == 0u
+         && result.snapshot_stale.empty()
+         && result.new_version == snap.version();
+}
+
+bool TestTryCommitWithSyntheticCommitsLegalDelta()
+{
+  // V2.2.d: try_commit_with_opts using LegalityMode::SyntheticOracle
+  // commits an AddWire that doesn't violate the synthetic rules.
+  // The store gains the new shape; version bumps from 1 to 2.
+  r::PhysicalState state;
+  auto snap = state.snapshot();
+  const auto v_before = snap.version();
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{100, 5}};
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+  pd.snapshot_version = v_before;
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  if (result.committed_indices.size() != 1u
+      || !result.rejected_indices.empty()
+      || !result.snapshot_stale.empty()) {
+    return false;
+  }
+  if (result.new_version != v_before + 1) {
+    return false;
+  }
+  // Store now contains the added shape.
+  return state.mutable_store_for_test().route_shape_count() == 1u;
+}
+
+bool TestTryCommitWithSyntheticRejectsIllegalDelta()
+{
+  // Seed an existing shape, then propose an overlapping AddWire.
+  // Synthetic oracle returns illegal; try_commit rejects without
+  // mutation; version stays the same.
+  r::PhysicalState state;
+  state.mutable_store_for_test().SeedRouteShapes(
+      {MakeFullShape(0, 0, 50, 5, 2, 100, 12)});
+  auto snap = state.snapshot();
+  const auto v_before = snap.version();
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{20, 0}, r::Point{30, 5}};  // overlaps
+  add.layer = 2;
+  r::ProposedDelta pd;
+  pd.delta = add;
+  pd.snapshot_version = v_before;
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  return result.committed_indices.empty()
+         && result.rejected_indices.size() == 1u
+         && result.snapshot_stale.empty()
+         && result.new_version == v_before
+         && state.mutable_store_for_test().route_shape_count() == 1u;
+}
+
+bool TestTryCommitStaleSnapshotIsFlagged()
+{
+  // Commit one delta, advancing version. A second proposal whose
+  // snapshot_version still points to the old version is flagged
+  // snapshot_stale, not rejected/committed.
+  r::PhysicalState state;
+  auto snap_v1 = state.snapshot();
+
+  r::AddWire add1;
+  add1.bbox = r::Rect{r::Point{0, 0}, r::Point{100, 5}};
+  add1.layer = 2;
+  r::ProposedDelta pd1;
+  pd1.delta = add1;
+  pd1.snapshot_version = snap_v1.version();
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  state.try_commit_with_opts(snap_v1, {pd1}, policy, opts);
+
+  // Now version is 2. snap_v1 still has version 1. A new proposal
+  // generated against snap_v1 is stale.
+  r::AddWire add2;
+  add2.bbox = r::Rect{r::Point{500, 0}, r::Point{600, 5}};
+  add2.layer = 2;
+  r::ProposedDelta pd2;
+  pd2.delta = add2;
+  pd2.snapshot_version = snap_v1.version();  // = 1, but cur = 2
+
+  auto result
+      = state.try_commit_with_opts(snap_v1, {pd2}, policy, opts);
+
+  return result.snapshot_stale.size() == 1u
+         && result.committed_indices.empty()
+         && result.rejected_indices.empty();
+}
+
+bool TestTryCommitUnresolvedDeleteIsRejected()
+{
+  // DeleteWire with unresolved net_id → eval surfaces
+  // UnresolvedFootprint → try_commit rejects.
+  r::PhysicalState state;
+  auto snap = state.snapshot();
+
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  // resolved_net_id and shape_kind absent
+  r::ProposedDelta pd;
+  pd.delta = del;
+  pd.snapshot_version = snap.version();
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  return result.rejected_indices.size() == 1u
+         && result.committed_indices.empty()
+         && result.new_version == snap.version();
+}
+
+bool TestTryCommitDeleteResolvedRemovesShape()
+{
+  // Seed a shape, then commit a DeleteWire matching its identity.
+  // After commit, the store has 0 shapes.
+  r::PhysicalState state;
+  state.mutable_store_for_test().SeedRouteShapes(
+      {MakeFullShape(0, 0, 50, 5, 2, 100, 12)});
+  auto snap = state.snapshot();
+  const auto v_before = snap.version();
+
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 5}};
+  del.layer = 2;
+  del.resolved_net_id = 100;
+  del.shape_kind = 12;
+  r::ProposedDelta pd;
+  pd.delta = del;
+  pd.snapshot_version = v_before;
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  return result.committed_indices.size() == 1u
+         && result.new_version == v_before + 1
+         && state.mutable_store_for_test().route_shape_count() == 0u;
+}
+
+bool TestSnapshotGeometryReturnsView()
+{
+  // V2.2.d: Snapshot::geometry() now returns a real GeometryView
+  // pointer (was nullptr in V2.1.d).
+  r::PhysicalState state;
+  state.mutable_store_for_test().SeedRouteShapes(
+      {MakeFullShape(0, 0, 100, 5, 2, 100, 12)});
+  auto snap = state.snapshot();
+  const auto* view = snap.geometry();
+  if (view == nullptr) {
+    return false;
+  }
+  auto out = view->QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{200, 50}}, 2);
+  return out.size() == 1u;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -1737,8 +1959,8 @@ int main()
        TestEvalUnresolvedDeleteScoreOnlyOnRequest},
       {"V2.2.c.proj eval(AddVia) increments via_count",
        TestEvalAddViaIncrementsViaCount},
-      {"V2.2.c.proj eval(Snapshot) still throws (V2.2.d wires it)",
-       TestEvalSnapshotOverloadStillThrows},
+      {"V2.2.d eval(Snapshot) invalid -> UnresolvedFootprint (was: throws in V2.2.c.proj)",
+       TestEvalSnapshotOverloadInvalidSnapshotIsUnresolved},
       {"V2.2.c.bridge AddWire produces 1 Wire candidate",
        TestBridgeAddWireProducesOneCandidateWire},
       {"V2.2.c.bridge AddVia produces ViaCut candidate",
@@ -1767,6 +1989,20 @@ int main()
        TestSyntheticOracleCpuDrcModeFallsBackToStub},
       {"V2.2.c.legality.synthetic IsTrustedLegalitySource rule",
        TestSyntheticOracleTrustedSourceRule},
+      {"V2.2.d try_commit default mode rejects all (Stub)",
+       TestTryCommitDefaultModeRejectsAll},
+      {"V2.2.d try_commit_with_opts(SyntheticOracle) commits legal delta",
+       TestTryCommitWithSyntheticCommitsLegalDelta},
+      {"V2.2.d try_commit_with_opts(SyntheticOracle) rejects illegal delta",
+       TestTryCommitWithSyntheticRejectsIllegalDelta},
+      {"V2.2.d try_commit stale snapshot is flagged",
+       TestTryCommitStaleSnapshotIsFlagged},
+      {"V2.2.d try_commit unresolved delete is rejected",
+       TestTryCommitUnresolvedDeleteIsRejected},
+      {"V2.2.d try_commit resolved Delete removes shape",
+       TestTryCommitDeleteResolvedRemovesShape},
+      {"V2.2.d Snapshot::geometry() returns view (no longer nullptr)",
+       TestSnapshotGeometryReturnsView},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
