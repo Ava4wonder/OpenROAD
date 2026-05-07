@@ -937,25 +937,159 @@ bool TestOverlayInsertShieldComposes()
   return on_6.empty();
 }
 
-bool TestOverlayDeleteWireIsCurrentlySkipped()
+// V2.2.b.del — DeleteWire with resolved identity removes a single
+// base shape via multiset subtraction.
+//
+// Helper to construct a base ShapeRef matching the V2.2.b.del
+// canonical-identity contract (bbox, layer, net_id, shape_kind).
+ro::ShapeRef MakeFullShape(int x1, int y1, int x2, int y2,
+                           r::LayerNum layer, r::NetId net_id,
+                           std::uint8_t kind)
 {
-  // V2.2.b ignores DeleteX deltas. V2.2.b.del adds removal semantics.
-  // For now: a DeleteWire delta does NOT change base results.
-  std::vector<ro::ShapeRef> base_shapes;
-  base_shapes.push_back(MakeShape(0, 0, 100, 5, 2, 7));
+  ro::ShapeRef s;
+  s.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  s.layer = layer;
+  s.net_id = net_id;
+  s.shape_kind = kind;
+  return s;
+}
+
+r::DeleteWire MakeDeleteWire(int x1, int y1, int x2, int y2,
+                             r::LayerNum layer, std::uint64_t net_id,
+                             std::uint8_t kind)
+{
+  r::DeleteWire d;
+  d.segment_id = 1;
+  d.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  d.layer = layer;
+  d.resolved_net_id = net_id;
+  d.shape_kind = kind;
+  return d;
+}
+
+bool TestDeleteMultiset_BaseAA_DelA_ResultA()
+{
+  // base=[A,A], delete=[A] → result=[A]
   auto base = std::make_shared<ro::MemoryBackedGeometryView>(
-      std::vector<ro::MarkerRef>{}, base_shapes);
-
-  r::DeleteWire del;
-  del.segment_id = 42;
-  std::vector<r::Delta> deltas{del};
-
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100, 1),
+                                MakeFullShape(0, 0, 10, 5, 2, 100, 1)});
+  std::vector<r::Delta> deltas{MakeDeleteWire(0, 0, 10, 5, 2, 100, 1)};
   ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{50, 50}}, 2);
+  return out.size() == 1u;
+}
 
-  // Base shape still present — Delete is a no-op in V2.2.b.
-  auto on_2 = overlay.QueryRouteShapes(
-      r::Rect{r::Point{-5, -5}, r::Point{200, 50}}, 2);
-  return on_2.size() == 1u;
+bool TestDeleteMultiset_BaseA_DelAA_ResultEmpty()
+{
+  // base=[A], delete=[A,A] → result=[]
+  // Extra delete beyond base count is silently tolerated.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100, 1)});
+  std::vector<r::Delta> deltas{MakeDeleteWire(0, 0, 10, 5, 2, 100, 1),
+                               MakeDeleteWire(0, 0, 10, 5, 2, 100, 1)};
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{50, 50}}, 2);
+  return out.empty();
+}
+
+bool TestDeleteMultiset_BaseAB_DelA_ResultB()
+{
+  // base=[A,B], delete=[A] → result=[B]
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100, 1),
+                                MakeFullShape(20, 0, 30, 5, 2, 200, 1)});
+  std::vector<r::Delta> deltas{MakeDeleteWire(0, 0, 10, 5, 2, 100, 1)};
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{50, 50}}, 2);
+  return out.size() == 1u
+         && out[0].bbox.ll.x == 20  // B's bbox, not A's
+         && out[0].net_id.value_or(0) == 200u;
+}
+
+bool TestDeleteMultiset_DelAbsent_NoEffect()
+{
+  // delete=[C] absent from base → no effect, no crash.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100, 1)});
+  std::vector<r::Delta> deltas{
+      MakeDeleteWire(500, 500, 600, 600, 5, 999, 1)};  // absent
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{1000, 1000}}, 2);
+  return out.size() == 1u;
+}
+
+bool TestDeleteUnresolvedNetIdIsNoop()
+{
+  // V2.2.b.del contract: a DeleteWire without resolved_net_id is
+  // not safe for commit. OverlayGeometryView silently skips it
+  // (production validation happens at WriteFootprint::unknown +
+  // commit-path rejection, not in the view).
+  r::DeleteWire del;
+  del.segment_id = 1;
+  del.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  del.layer = 2;
+  // resolved_net_id and shape_kind intentionally NOT set
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100, 1)});
+  ro::OverlayGeometryView overlay(base, std::vector<r::Delta>{del});
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{50, 50}}, 2);
+  return out.size() == 1u;  // base shape preserved
+}
+
+bool TestDeleteShapeKindMismatchDoesNotMatch()
+{
+  // A path-seg ShapeRef and a delete-wire targeting a "patch wire"
+  // (different shape_kind) at the same bbox+layer+net should NOT
+  // match — exact-identity removal, not bbox-only subtraction.
+  // path_seg = 12, patch_wire = 22 (frBlockObjectEnum values).
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{},
+      std::vector<ro::ShapeRef>{MakeFullShape(0, 0, 10, 5, 2, 100,
+                                              /*kind=path_seg*/ 12)});
+  std::vector<r::Delta> deltas{
+      MakeDeleteWire(0, 0, 10, 5, 2, 100, /*kind=patch_wire*/ 22)};
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto out = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{50, 50}}, 2);
+  return out.size() == 1u;  // path-seg base preserved; patch-wire
+                            // delete didn't match
+}
+
+bool TestDeleteWriteFootprintUnknownWhenUnresolved()
+{
+  // V2.2.b.del contract: DeleteWire without resolved fields has
+  // WriteFootprint::unknown=true (V2.4 commit path will reject it).
+  r::DeleteWire incomplete;
+  incomplete.segment_id = 1;
+  // bbox left zero-area; resolved_net_id absent
+  r::Delta d_inc = incomplete;
+  auto wf_inc = r::WriteFootprint::Of(d_inc);
+  if (!wf_inc.unknown) {
+    return false;
+  }
+
+  // V2.2.b.del contract: DeleteWire with resolved fields has
+  // WriteFootprint::unknown=false (committable in parallel batches).
+  r::DeleteWire complete;
+  complete.segment_id = 1;
+  complete.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  complete.layer = 2;
+  complete.resolved_net_id = 100;
+  complete.shape_kind = 1;
+  r::Delta d_com = complete;
+  auto wf_com = r::WriteFootprint::Of(d_com);
+  return !wf_com.unknown && wf_com.shapes.size() == 1u
+         && wf_com.layers.size() == 1u && wf_com.layers[0] == 2;
 }
 
 bool TestOverlayPassesGuidesAndMarkersThrough()
@@ -1098,10 +1232,22 @@ int main()
        TestOverlayStacksOverlayOverOverlay},
       {"OverlayGeometryView InsertShield composes",
        TestOverlayInsertShieldComposes},
-      {"OverlayGeometryView DeleteWire skipped in V2.2.b (no-op)",
-       TestOverlayDeleteWireIsCurrentlySkipped},
       {"OverlayGeometryView passes guides/markers through",
        TestOverlayPassesGuidesAndMarkersThrough},
+      {"V2.2.b.del multiset: base=[A,A] del=[A] -> [A]",
+       TestDeleteMultiset_BaseAA_DelA_ResultA},
+      {"V2.2.b.del multiset: base=[A] del=[A,A] -> []",
+       TestDeleteMultiset_BaseA_DelAA_ResultEmpty},
+      {"V2.2.b.del multiset: base=[A,B] del=[A] -> [B]",
+       TestDeleteMultiset_BaseAB_DelA_ResultB},
+      {"V2.2.b.del multiset: del=[C] absent -> no effect",
+       TestDeleteMultiset_DelAbsent_NoEffect},
+      {"V2.2.b.del unresolved net_id is silent no-op",
+       TestDeleteUnresolvedNetIdIsNoop},
+      {"V2.2.b.del shape_kind mismatch does not delete",
+       TestDeleteShapeKindMismatchDoesNotMatch},
+      {"V2.2.b.del WriteFootprint::unknown reflects resolution",
+       TestDeleteWriteFootprintUnknownWhenUnresolved},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

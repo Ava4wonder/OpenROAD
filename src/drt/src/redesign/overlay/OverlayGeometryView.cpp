@@ -6,8 +6,16 @@
 
 #include "OverlayGeometryView.h"
 
+#include <map>
 #include <type_traits>
 #include <variant>
+
+#include "Hashing.h"
+// frBaseTypes.h is a pure types/enum header (not an object-internals
+// header like frMarker.h or frDesign.h). Including it here is
+// permitted by the redesign/overlay/ include discipline. Used for
+// frcVia enum value when synthesising delete-target shape_kind.
+#include "frBaseTypes.h"
 
 namespace drt::redesign::overlay {
 
@@ -24,6 +32,52 @@ bool BboxOverlap(const Rect& a, const Rect& b) noexcept
 // via_def.
 constexpr int32_t kDefaultViaEnclosureDbu = 100;
 
+// V2.2.b.del — synthesise a ShapeRef matching what a DeleteWire /
+// DeleteVia delta is targeting for removal. Returns nullopt if the
+// delta's identity is incomplete (per V2.2.b.del contract: unresolved
+// net_id or zero-area bbox is non-committable; OverlayGeometryView
+// silently skips such deletes — production validation happens at the
+// commit layer via WriteFootprint::unknown).
+std::optional<ShapeRef> DeleteTargetShape(const Delta& d)
+{
+  return std::visit(
+      [](const auto& kind) -> std::optional<ShapeRef> {
+        using T = std::decay_t<decltype(kind)>;
+        if constexpr (std::is_same_v<T, DeleteWire>) {
+          if (!kind.resolved_net_id.has_value()
+              || !kind.shape_kind.has_value()) {
+            return std::nullopt;
+          }
+          if (kind.bbox.ll.x == kind.bbox.ur.x
+              && kind.bbox.ll.y == kind.bbox.ur.y) {
+            return std::nullopt;
+          }
+          ShapeRef s;
+          s.bbox = kind.bbox;
+          s.layer = kind.layer;
+          s.net_id = static_cast<NetId>(kind.resolved_net_id.value());
+          s.shape_kind = kind.shape_kind.value();
+          return s;
+        } else if constexpr (std::is_same_v<T, DeleteVia>) {
+          if (!kind.resolved_net_id.has_value()) {
+            return std::nullopt;
+          }
+          if (kind.bbox.ll.x == kind.bbox.ur.x
+              && kind.bbox.ll.y == kind.bbox.ur.y) {
+            return std::nullopt;
+          }
+          ShapeRef s;
+          s.bbox = kind.bbox;
+          s.layer = kind.cut_layer;
+          s.net_id = static_cast<NetId>(kind.resolved_net_id.value());
+          s.shape_kind = static_cast<std::uint8_t>(::drt::frcVia);
+          return s;
+        }
+        return std::nullopt;
+      },
+      d);
+}
+
 }  // namespace
 
 MarkerQueryResult OverlayGeometryView::QueryMarkers(
@@ -39,7 +93,46 @@ ShapeQueryResult OverlayGeometryView::QueryRouteShapes(
     const Rect& box,
     LayerNum layer) const
 {
-  ShapeQueryResult out = base_->QueryRouteShapes(box, layer);
+  ShapeQueryResult base_shapes = base_->QueryRouteShapes(box, layer);
+
+  // V2.2.b.del — multiset subtraction over canonical identity.
+  // Build per-tuple delete count from deltas; filter base_shapes by
+  // decrementing. Order of base shapes is preserved.
+  using Tuple = decltype(CanonicalTuple(std::declval<const ShapeRef&>()));
+  std::map<Tuple, int> delete_counts;
+  for (const Delta& d : deltas_) {
+    auto target = DeleteTargetShape(d);
+    if (!target.has_value()) {
+      continue;  // unresolved delete: silently skipped (V2.2.b.del
+                 // contract — production validation via
+                 // WriteFootprint::unknown).
+    }
+    if (!target->layer.has_value() || target->layer.value() != layer) {
+      continue;  // layer-scope mismatch
+    }
+    if (!BboxOverlap(box, target->bbox)) {
+      continue;  // box-scope mismatch
+    }
+    delete_counts[CanonicalTuple(*target)] += 1;
+  }
+
+  ShapeQueryResult out;
+  out.reserve(base_shapes.size());
+  for (const ShapeRef& b : base_shapes) {
+    auto it = delete_counts.find(CanonicalTuple(b));
+    if (it != delete_counts.end() && it->second > 0) {
+      it->second -= 1;  // consume one base entry
+      continue;
+    }
+    out.push_back(b);
+  }
+  // Note: any remaining positive counts in delete_counts represent
+  // deletes that targeted shapes not present in the base. V2.2.b.del
+  // intentionally tolerates this silently (delete=[C] absent from
+  // base → no effect, no crash). Diagnostic reporting could land in
+  // a follow-up if proposers misbehave often.
+
+  // Now apply additive deltas (existing V2.2.b logic).
   for (const Delta& d : deltas_) {
     std::visit(
         [&](const auto& kind) {
@@ -90,11 +183,11 @@ ShapeQueryResult OverlayGeometryView::QueryRouteShapes(
             s.layer = kind.layer;
             out.push_back(s);
           }
-          // DeleteWire / DeleteVia / MoveCell / ChangePinAccess /
-          // ChangeLayerAssignment / ResizeCell: V2.2.b skips these.
-          // V2.2.b.del adds DeleteX with resolved bbox+layer; the
-          // others are not relevant to QueryRouteShapes anyway
-          // (they affect Blockages / PinAccess / different paths).
+          // DeleteWire / DeleteVia: handled in V2.2.b.del above by
+          // multiset subtraction over canonical ShapeRef identity.
+          // MoveCell / ChangePinAccess / ChangeLayerAssignment /
+          // ResizeCell: not relevant to QueryRouteShapes (they
+          // affect Blockages / PinAccess / different paths).
         },
         d);
   }

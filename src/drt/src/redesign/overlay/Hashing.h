@@ -82,17 +82,18 @@ inline auto CanonicalTuple(const MarkerRef& m)
                          m.source_net_id);
 }
 
-// V2.2.a.1 — ShapeRef canonical identity:
-//   (layer?, bbox.ll.x, bbox.ll.y, bbox.ur.x, bbox.ur.y, net_id?)
+// V2.2.a.1 + V2.2.b.del — ShapeRef canonical identity:
+//   (layer?, bbox.ll.x, bbox.ll.y, bbox.ur.x, bbox.ur.y, net_id?,
+//    shape_kind?)
 //
-// Used for route-shape (frPathSeg / frVia / frPatchWire) projection
-// from RegionQueryGeometryView::QueryRouteShapes. Pointer-free.
-//
-// Note on type collision: two distinct route-shape kinds at the same
-// (bbox, layer, net) would canonicalize identically. In practice this
-// is rare because path-seg and via bboxes have very different shapes
-// (long rectangle vs small square). If V2.2.a's integration shows
-// collisions, ShapeRef gains an optional shape_kind field then.
+// shape_kind landed in V2.2.b.del to support exact-match delete
+// semantics: path-seg vs patch-wire vs via projections must
+// canonicalise distinctly even when their bbox/layer/net coincide.
+// The V2.2.a.{1,2,3} ibex shadow-dump CSVs predate this field and
+// therefore have different hash values from a re-run; that's OK
+// because the hash is debug/regression equivalence only and BOTH
+// legacy and overlay paths use the same ProjectRouteShape (they
+// move together).
 inline auto CanonicalTuple(const ShapeRef& s)
 {
   return std::make_tuple(s.layer,
@@ -100,7 +101,8 @@ inline auto CanonicalTuple(const ShapeRef& s)
                          s.bbox.ll.y,
                          s.bbox.ur.x,
                          s.bbox.ur.y,
-                         s.net_id);
+                         s.net_id,
+                         s.shape_kind);
 }
 
 // V2.2.a.2 — GuideRef canonical identity:

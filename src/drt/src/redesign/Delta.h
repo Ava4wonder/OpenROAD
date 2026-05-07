@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <variant>
 
 namespace drt {
@@ -54,8 +55,21 @@ struct AddWire {
   uint32_t width = 0;
 };
 
+// V2.2.b.del — DeleteWire carries explicit identity for exact-match
+// removal (NOT geometric area subtraction). Production commit
+// REQUIRES bbox + layer + resolved_net_id + shape_kind to be
+// populated; OverlayGeometryView refuses to delete on partial
+// identity (silent no-op + WriteFootprint::unknown=true). Synthetic
+// tests may construct partial identity for negative-path coverage.
 struct DeleteWire {
   SegmentId segment_id = 0;
+  Rect bbox{};
+  LayerNum layer = 0;
+  std::optional<uint64_t> resolved_net_id;
+  // frBlockObjectEnum cast to u8: frcPathSeg or frcPatchWire.
+  // DeleteVia (below) handles frcVia — the kinds are split because
+  // their identity sources differ.
+  std::optional<uint8_t> shape_kind;
 };
 
 struct AddVia {
@@ -64,8 +78,14 @@ struct AddVia {
   drt::frNet* net = nullptr;
 };
 
+// V2.2.b.del — DeleteVia carries explicit identity. cut_layer is the
+// frViaDef::getCutLayerNum() value. shape_kind is intrinsically
+// frcVia and is therefore not a separate field.
 struct DeleteVia {
   ViaId via_id = 0;
+  Rect bbox{};
+  LayerNum cut_layer = 0;
+  std::optional<uint64_t> resolved_net_id;
 };
 
 struct MoveCell {

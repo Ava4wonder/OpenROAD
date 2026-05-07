@@ -71,6 +71,7 @@ std::optional<ShapeRef> ProjectRouteShape(
       if (const ::drt::frNet* net = seg.getNet()) {
         out.net_id = static_cast<NetId>(net->getId());
       }
+      out.shape_kind = static_cast<std::uint8_t>(::drt::frcPathSeg);
       return out;
     }
     case ::drt::frcPatchWire: {
@@ -79,6 +80,7 @@ std::optional<ShapeRef> ProjectRouteShape(
       if (const ::drt::frNet* net = pw.getNet()) {
         out.net_id = static_cast<NetId>(net->getId());
       }
+      out.shape_kind = static_cast<std::uint8_t>(::drt::frcPatchWire);
       return out;
     }
     case ::drt::frcVia: {
@@ -100,6 +102,7 @@ std::optional<ShapeRef> ProjectRouteShape(
       if (const ::drt::frNet* net = v.getNet()) {
         out.net_id = static_cast<NetId>(net->getId());
       }
+      out.shape_kind = static_cast<std::uint8_t>(::drt::frcVia);
       return out;
     }
     default:

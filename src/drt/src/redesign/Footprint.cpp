@@ -50,12 +50,45 @@ WriteFootprint WriteFootprint::Of(const Delta& d)
         } else if constexpr (std::is_same_v<T, InsertShield>) {
           out.shapes.push_back(kind.coverage);
           out.layers.push_back(kind.layer);
+        } else if constexpr (std::is_same_v<T, DeleteWire>) {
+          // V2.2.b.del: DeleteWire now carries explicit
+          // bbox + layer + resolved_net_id + shape_kind. Footprint
+          // is sound iff resolved_net_id AND shape_kind are
+          // populated AND bbox is non-empty. Otherwise the delete
+          // identity is incomplete and the footprint stays unknown
+          // (parallel commit must reject it per the safety
+          // invariant).
+          const bool resolved
+              = kind.resolved_net_id.has_value()
+                && kind.shape_kind.has_value()
+                && (kind.bbox.ll.x != kind.bbox.ur.x
+                    || kind.bbox.ll.y != kind.bbox.ur.y);
+          if (resolved) {
+            out.shapes.push_back(kind.bbox);
+            out.layers.push_back(kind.layer);
+          } else {
+            out.unknown = true;
+          }
+        } else if constexpr (std::is_same_v<T, DeleteVia>) {
+          // V2.2.b.del: DeleteVia carries explicit
+          // bbox + cut_layer + resolved_net_id (shape_kind is
+          // intrinsically frcVia and not a separate field).
+          const bool resolved
+              = kind.resolved_net_id.has_value()
+                && (kind.bbox.ll.x != kind.bbox.ur.x
+                    || kind.bbox.ll.y != kind.bbox.ur.y);
+          if (resolved) {
+            out.shapes.push_back(kind.bbox);
+            out.layers.push_back(kind.cut_layer);
+          } else {
+            out.unknown = true;
+          }
         } else {
-          // DeleteWire, DeleteVia, MoveCell, ChangePinAccess,
-          // ChangeLayerAssignment, ResizeCell: V2.1 cannot produce a
-          // sound footprint without a design-side lookup. Set the
-          // unknown flag so V2.4's commit path rejects these from the
-          // parallel batch — see Footprint.h SAFETY INVARIANT.
+          // MoveCell, ChangePinAccess, ChangeLayerAssignment,
+          // ResizeCell: V2.1 cannot produce a sound footprint
+          // without a design-side lookup. Set the unknown flag so
+          // V2.4's commit path rejects these from the parallel
+          // batch — see Footprint.h SAFETY INVARIANT.
           out.unknown = true;
         }
       },

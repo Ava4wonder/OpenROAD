@@ -52,11 +52,20 @@ struct MarkerRef
 
 // Value-type shape identity. No pointers. Same nullable-field rule as
 // MarkerRef.
+//
+// V2.2.b.del — `shape_kind` is the frBlockObjectEnum (cast to u8) of
+// the projection source: frcPathSeg / frcPatchWire / frcVia. Without
+// it, two distinct route-shape kinds at the same (bbox, layer, net)
+// would canonicalise identically — fine for additive composition but
+// unsafe for delete-by-identity matching where path-seg vs patch-wire
+// vs via must be distinguished. Synthetic tests can leave shape_kind
+// absent; real ProjectRouteShape always populates it.
 struct ShapeRef
 {
   Rect bbox{};
   std::optional<LayerNum> layer;
   std::optional<NetId> net_id;
+  std::optional<std::uint8_t> shape_kind;
 };
 
 // V2.2.a.2 — guides are 3D corridors spanning a layer range. The
