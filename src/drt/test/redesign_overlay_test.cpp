@@ -392,17 +392,49 @@ bool TestGuideRefHashCapturesBothLayerEndpoints()
   return ro::HashCanonicalRange(v1) != ro::HashCanonicalRange(v2);
 }
 
-bool TestQueryBlockagesThrowsInV21()
+// V2.2.a.3 — MemoryBackedGeometryView::QueryBlockages has a real impl.
+bool TestMemoryBackedQueryBlockagesFilters()
 {
-  ro::MemoryBackedGeometryView view({});
-  try {
-    (void) view.QueryBlockages(r::Rect{}, 0);
-  } catch (const std::logic_error&) {
-    return true;
-  } catch (...) {
+  ro::BlockageRef b1;  // PDK-level blockage on layer 2.
+  b1.bbox = r::Rect{r::Point{0, 0}, r::Point{30, 30}};
+  b1.layer = 2;
+  ro::BlockageRef b2;  // Inst-blockage on same bbox, different layer.
+  b2.bbox = r::Rect{r::Point{0, 0}, r::Point{30, 30}};
+  b2.layer = 4;
+  b2.source_inst_id = 42;
+
+  ro::MemoryBackedGeometryView view({}, {}, {}, {b1, b2});
+
+  auto on_2 = view.QueryBlockages(
+      r::Rect{r::Point{10, 10}, r::Point{20, 20}}, 2);
+  if (on_2.size() != 1u || on_2[0].source_inst_id.has_value()) {
+    return false;  // PDK blockage matches; no source_inst_id
+  }
+  auto on_4 = view.QueryBlockages(
+      r::Rect{r::Point{10, 10}, r::Point{20, 20}}, 4);
+  if (on_4.size() != 1u || !on_4[0].source_inst_id.has_value()
+      || on_4[0].source_inst_id.value() != 42u) {
     return false;
   }
-  return false;
+  auto on_5 = view.QueryBlockages(
+      r::Rect{r::Point{10, 10}, r::Point{20, 20}}, 5);
+  return on_5.empty();
+}
+
+bool TestBlockageRefHashDistinguishesPdkFromInst()
+{
+  // PDK blockage and inst-blockage with same bbox+layer must hash
+  // differently — proves source_inst_id participates in canonical
+  // identity (not just bbox+layer).
+  ro::BlockageRef pdk;
+  pdk.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 10}};
+  pdk.layer = 2;
+  // pdk.source_inst_id absent
+  ro::BlockageRef inst = pdk;
+  inst.source_inst_id = 7;
+  std::vector<ro::BlockageRef> v_pdk = {pdk};
+  std::vector<ro::BlockageRef> v_inst = {inst};
+  return ro::HashCanonicalRange(v_pdk) != ro::HashCanonicalRange(v_inst);
 }
 
 bool TestQueryPinAccessThrowsInV21()
@@ -701,8 +733,8 @@ static_assert(ro::has_canonical_tuple<ro::ShapeRef>::value,
               "ShapeRef must have CanonicalTuple after V2.2.a.1");
 static_assert(ro::has_canonical_tuple<ro::GuideRef>::value,
               "GuideRef must have CanonicalTuple after V2.2.a.2");
-static_assert(!ro::has_canonical_tuple<ro::BlockageRef>::value,
-              "BlockageRef CanonicalTuple lands in V2.2.a.3");
+static_assert(ro::has_canonical_tuple<ro::BlockageRef>::value,
+              "BlockageRef must have CanonicalTuple after V2.2.a.3");
 static_assert(!ro::has_canonical_tuple<ro::PinAccessRef>::value,
               "PinAccessRef CanonicalTuple lands in V2.2.a.4");
 
@@ -780,8 +812,10 @@ int main()
        TestMemoryBackedQueryGuidesFilters},
       {"GuideRef hash captures both layer endpoints",
        TestGuideRefHashCapturesBothLayerEndpoints},
-      {"GeometryView::QueryBlockages throws in V2.1",
-       TestQueryBlockagesThrowsInV21},
+      {"MemoryBackedGeometryView::QueryBlockages filters",
+       TestMemoryBackedQueryBlockagesFilters},
+      {"BlockageRef hash distinguishes PDK from inst-blockage",
+       TestBlockageRefHashDistinguishesPdkFromInst},
       {"GeometryView::QueryPinAccess throws in V2.1",
        TestQueryPinAccessThrowsInV21},
       {"SnapshotHandle holds GeometryView via shared_ptr",

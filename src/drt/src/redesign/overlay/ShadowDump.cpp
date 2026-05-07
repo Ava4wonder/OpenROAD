@@ -324,6 +324,25 @@ void ShadowDump::RecordGuideComparison(std::uint64_t legacy_hash,
   Record(rec);
 }
 
+void ShadowDump::RecordBlockageComparison(std::uint64_t legacy_hash,
+                                          std::uint64_t overlay_hash,
+                                          std::size_t legacy_count,
+                                          std::size_t overlay_count,
+                                          const Rect& box,
+                                          std::int32_t layer)
+{
+  ComparisonRecord rec;
+  rec.entity = Entity::Blockage;
+  rec.query_kind = "query";
+  rec.box = box;
+  rec.layer = layer;
+  rec.legacy_hash = legacy_hash;
+  rec.overlay_hash = overlay_hash;
+  rec.legacy_count = legacy_count;
+  rec.overlay_count = overlay_count;
+  Record(rec);
+}
+
 std::uint64_t ShadowDump::comparison_count() noexcept
 {
   return comparison_counter().load(std::memory_order_relaxed);

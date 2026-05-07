@@ -72,10 +72,16 @@ struct GuideRef
   std::optional<NetId> net_id;
 };
 
+// V2.2.a.3 — blockages come in two flavours: frBlockage (PDK / block-
+// level) and frInstBlockage (instance-derived). Both carry a bbox
+// from the regionQuery index and a layer from the query parameter.
+// `source_inst_id` is present iff the blockage was an frInstBlockage,
+// which is what distinguishes the two flavours canonically.
 struct BlockageRef
 {
   Rect bbox{};
   std::optional<LayerNum> layer;
+  std::optional<std::uint64_t> source_inst_id;
 };
 
 struct PinAccessRef

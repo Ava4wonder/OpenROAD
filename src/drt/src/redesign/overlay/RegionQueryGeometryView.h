@@ -94,6 +94,24 @@ std::optional<ShapeRef> ProjectRouteShape(
 // captures (begin_layer, end_layer, bbox, net_id). Pointer-free.
 GuideRef ProjectGuide(const ::drt::frGuide& g);
 
+// V2.2.a.3 — single source of truth for frBlockObject -> BlockageRef
+// projection. Returns nullopt for non-blockage kinds (route shapes
+// go to ProjectRouteShape, terms / nets / etc. drop out). For
+// frInstBlockage, source_inst_id is populated from getInst()->getId().
+//
+// Backend-call note (V2.2.a.3 design choice): QueryBlockages and
+// QueryRouteShapes share an underlying regionQuery->query(box, layer)
+// call site. V2.2.a.3 intentionally uses a SEPARATE semantic query
+// even though the backend source call overlaps with QueryRouteShapes.
+// Backend query coalescing is deferred until performance profiling
+// shows it matters; the API clarity gain (caller asks "show me
+// blockages" or "show me routes" rather than "give me everything and
+// I'll filter") outweighs the call duplication for V2.2.
+std::optional<BlockageRef> ProjectBlockage(
+    const ::drt::frBlockObject& obj,
+    const ::odb::Rect& bbox,
+    LayerNum layer);
+
 // V2.1.e.4 shadow validation. Diagnostic-only, never alters behaviour.
 //
 // Compare a legacy regionQuery->queryMarker result against
@@ -143,5 +161,16 @@ void ShadowCompareRouteShapes(
 void ShadowCompareGuides(const ::drt::frDesign* design,
                          const ::odb::Rect& box,
                          const std::vector<::drt::frGuide*>& legacy_result);
+
+// V2.2.a.3 — blockage shadow validation. Same call site as
+// ShadowCompareRouteShapes; both filter the same legacy result via
+// their respective Project* helpers. Backend coalescing deferred
+// (see ProjectBlockage doc).
+void ShadowCompareBlockages(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    int layer,
+    const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
+        legacy_result);
 
 }  // namespace drt::redesign::overlay

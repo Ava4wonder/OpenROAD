@@ -97,6 +97,15 @@ class ShadowDump
                                     std::size_t overlay_count,
                                     const Rect& box);
 
+  // V2.2.a.3 — blockage comparison wrapper. Layer-scoped query (same
+  // call as route_shape but different entity).
+  static void RecordBlockageComparison(std::uint64_t legacy_hash,
+                                       std::uint64_t overlay_hash,
+                                       std::size_t legacy_count,
+                                       std::size_t overlay_count,
+                                       const Rect& box,
+                                       std::int32_t layer);
+
   // Process-wide aggregates (across all entities).
   static std::uint64_t comparison_count() noexcept;
   static std::uint64_t mismatch_count() noexcept;

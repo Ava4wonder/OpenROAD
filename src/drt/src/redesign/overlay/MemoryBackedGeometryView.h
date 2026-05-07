@@ -47,6 +47,18 @@ class MemoryBackedGeometryView : public GeometryView
   {
   }
 
+  // V2.2.a.3 — overload also accepting blockages.
+  MemoryBackedGeometryView(std::vector<MarkerRef> markers,
+                           std::vector<ShapeRef> route_shapes,
+                           std::vector<GuideRef> guides,
+                           std::vector<BlockageRef> blockages)
+      : markers_(std::move(markers)),
+        route_shapes_(std::move(route_shapes)),
+        guides_(std::move(guides)),
+        blockages_(std::move(blockages))
+  {
+  }
+
   MarkerQueryResult QueryMarkers(const Rect& box) const override;
 
   // V2.2.a.1.mem — real implementation. Filters route_shapes_ by
@@ -60,16 +72,21 @@ class MemoryBackedGeometryView : public GeometryView
   // queryGuide overload).
   GuideQueryResult QueryGuides(const Rect& box) const override;
 
-  // V2.2+ methods — still throw per GeometryView contract until
-  // their per-entity sub-commit (V2.2.a.{3,4}) lands.
+  // V2.2.a.3 — real implementation. Filters blockages_ by bbox
+  // overlap AND layer match (absent BlockageRef.layer = "any layer"
+  // for synthetic data convenience).
   BlockageQueryResult QueryBlockages(const Rect& box,
                                      LayerNum layer) const override;
+
+  // V2.2+ methods — still throw per GeometryView contract until
+  // their per-entity sub-commit (V2.2.a.4) lands.
   PinAccessQueryResult QueryPinAccess(const Rect& box) const override;
 
  private:
   std::vector<MarkerRef> markers_;
   std::vector<ShapeRef> route_shapes_;
   std::vector<GuideRef> guides_;
+  std::vector<BlockageRef> blockages_;
 };
 
 }  // namespace drt::redesign::overlay

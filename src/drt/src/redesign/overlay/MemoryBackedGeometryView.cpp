@@ -67,10 +67,17 @@ BlockageQueryResult MemoryBackedGeometryView::QueryBlockages(
     const Rect& box,
     LayerNum layer) const
 {
-  (void) box;
-  (void) layer;
-  throw std::logic_error(
-      "GeometryView: QueryBlockages not supported in V2.1");
+  BlockageQueryResult out;
+  for (const BlockageRef& b : blockages_) {
+    if (!BboxOverlap(box, b.bbox)) {
+      continue;
+    }
+    if (b.layer.has_value() && b.layer.value() != layer) {
+      continue;
+    }
+    out.push_back(b);
+  }
+  return out;
 }
 
 PinAccessQueryResult MemoryBackedGeometryView::QueryPinAccess(

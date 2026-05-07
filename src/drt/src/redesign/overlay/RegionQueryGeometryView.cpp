@@ -15,7 +15,10 @@
 #include "Hashing.h"
 #include "ShadowDump.h"
 #include "db/obj/frBlockObject.h"
+#include "db/obj/frBlockage.h"
 #include "db/obj/frGuide.h"
+#include "db/obj/frInst.h"
+#include "db/obj/frInstBlockage.h"
 #include "db/obj/frMarker.h"
 #include "db/obj/frNet.h"
 #include "db/obj/frShape.h"
@@ -103,6 +106,36 @@ std::optional<ShapeRef> ProjectRouteShape(
       // Non-route-shape kinds (blockages, terms, etc.) are caller's
       // problem. V2.2.a.3 (BlockageRef) handles blockages with its
       // own projection.
+      return std::nullopt;
+  }
+}
+
+std::optional<BlockageRef> ProjectBlockage(
+    const ::drt::frBlockObject& obj,
+    const ::odb::Rect& bbox,
+    LayerNum layer)
+{
+  switch (obj.typeId()) {
+    case ::drt::frcBlockage: {
+      BlockageRef out;
+      out.bbox = ToOverlayRect(bbox);
+      out.layer = layer;
+      // PDK / block-level blockage — no source_inst_id.
+      return out;
+    }
+    case ::drt::frcInstBlockage: {
+      const auto& ib
+          = static_cast<const ::drt::frInstBlockage&>(obj);
+      BlockageRef out;
+      out.bbox = ToOverlayRect(bbox);
+      out.layer = layer;
+      if (const ::drt::frInst* inst = ib.getInst()) {
+        out.source_inst_id = static_cast<std::uint64_t>(inst->getId());
+      }
+      return out;
+    }
+    default:
+      // Not a blockage — caller filters.
       return std::nullopt;
   }
 }
@@ -224,10 +257,33 @@ BlockageQueryResult RegionQueryGeometryView::QueryBlockages(
     const Rect& box,
     LayerNum layer) const
 {
-  (void) box;
-  (void) layer;
-  throw std::logic_error(
-      "GeometryView: QueryBlockages not supported in V2.1");
+  if (design_ == nullptr) {
+    return {};
+  }
+  const ::drt::frRegionQuery* rq = design_->getRegionQuery();
+  if (rq == nullptr) {
+    return {};
+  }
+  ::drt::frRegionQuery::Objects<::drt::frBlockObject> raw;
+  // Same backend call as QueryRouteShapes; filter is by typeId.
+  // Backend coalescing deferred per V2.2.a.3 design note.
+  rq->query(FromOverlayRect(box),
+            static_cast<::drt::frLayerNum>(layer),
+            raw);
+
+  BlockageQueryResult out;
+  out.reserve(raw.size());
+  for (const auto& entry : raw) {
+    const ::drt::frBlockObject* obj = entry.second;
+    if (obj == nullptr) {
+      continue;
+    }
+    auto projected = ProjectBlockage(*obj, entry.first, layer);
+    if (projected.has_value()) {
+      out.push_back(*projected);
+    }
+  }
+  return out;
 }
 
 PinAccessQueryResult RegionQueryGeometryView::QueryPinAccess(
@@ -288,6 +344,59 @@ void ShadowCompareRouteShapes(
     // projection / filter / box-conversion drift in either side.
     std::cerr << "[drt-redesign-overlay] V2.2.a.1 shadow route-shape "
               << "hash mismatch: legacy=" << std::hex << legacy_hash
+              << " overlay=" << overlay_hash << std::dec
+              << " layer=" << layer
+              << " legacy_count=" << legacy_proj.size()
+              << " overlay_count=" << overlay.size() << "\n";
+  }
+}
+
+void ShadowCompareBlockages(
+    const ::drt::frDesign* design,
+    const ::odb::Rect& box,
+    int layer,
+    const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
+        legacy_result)
+{
+  if (design == nullptr) {
+    return;
+  }
+
+  BlockageQueryResult legacy_proj;
+  legacy_proj.reserve(legacy_result.size());
+  for (const auto& entry : legacy_result) {
+    if (entry.second == nullptr) {
+      continue;
+    }
+    auto projected = ProjectBlockage(
+        *entry.second, entry.first, static_cast<LayerNum>(layer));
+    if (projected.has_value()) {
+      legacy_proj.push_back(*projected);
+    }
+  }
+
+  RegionQueryGeometryView view(design);
+  const Rect overlay_box = ToOverlayRect(box);
+  const BlockageQueryResult overlay
+      = view.QueryBlockages(overlay_box, static_cast<LayerNum>(layer));
+
+  const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
+  const uint64_t overlay_hash = HashCanonicalRange(overlay);
+
+  ShadowDump::ComparisonRecord rec;
+  rec.entity = ShadowDump::Entity::Blockage;
+  rec.query_kind = "query";
+  rec.box = overlay_box;
+  rec.layer = layer;
+  rec.legacy_hash = legacy_hash;
+  rec.overlay_hash = overlay_hash;
+  rec.legacy_count = legacy_proj.size();
+  rec.overlay_count = overlay.size();
+  ShadowDump::Record(rec);
+
+  if (legacy_hash != overlay_hash) {
+    std::cerr << "[drt-redesign-overlay] V2.2.a.3 shadow blockage hash "
+              << "mismatch: legacy=" << std::hex << legacy_hash
               << " overlay=" << overlay_hash << std::dec
               << " layer=" << layer
               << " legacy_count=" << legacy_proj.size()

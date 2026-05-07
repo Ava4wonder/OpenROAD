@@ -2754,12 +2754,15 @@ void FlexDRWorker::initMazeCost_fixedObj(const frDesign* design)
     }
     design->getRegionQuery()->query(getExtBox(), layerNum, result);
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
-    // V2.2.a.1.shadow validation. Legacy `result` above remains
-    // authoritative; this call only verifies that
-    // RegionQueryGeometryView::QueryRouteShapes projects to the same
-    // canonical ShapeRef set on the same (design, box, layer). On
-    // hash mismatch a stderr diagnostic fires; `result` unmodified.
+    // V2.2.a.1.shadow + V2.2.a.3 — shadow both route shapes and
+    // blockages over the same legacy `result`. Each ShadowCompare*
+    // path filters via its own Project* helper; the backend query
+    // calls are duplicated. Backend coalescing is deferred per the
+    // V2.2.a.3 design note (see ProjectBlockage doc) — API clarity
+    // outweighs the extra call until profiling shows otherwise.
     drt::redesign::overlay::ShadowCompareRouteShapes(
+        design, getExtBox(), static_cast<int>(layerNum), result);
+    drt::redesign::overlay::ShadowCompareBlockages(
         design, getExtBox(), static_cast<int>(layerNum), result);
 #endif
     // process blockage first, then unblock based on pin shape

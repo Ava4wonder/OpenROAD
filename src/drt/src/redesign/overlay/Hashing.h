@@ -119,6 +119,22 @@ inline auto CanonicalTuple(const GuideRef& g)
                          g.net_id);
 }
 
+// V2.2.a.3 — BlockageRef canonical identity:
+//   (layer?, bbox.{ll,ur}.{x,y}, source_inst_id?)
+//
+// source_inst_id distinguishes frInstBlockage from frBlockage at the
+// hash level — two blockages at the same (bbox, layer) but different
+// origin canonicalize differently, which is the right semantics.
+inline auto CanonicalTuple(const BlockageRef& b)
+{
+  return std::make_tuple(b.layer,
+                         b.bbox.ll.x,
+                         b.bbox.ll.y,
+                         b.bbox.ur.x,
+                         b.bbox.ur.y,
+                         b.source_inst_id);
+}
+
 // SFINAE detector — has_canonical_tuple<T>::value is true iff
 // CanonicalTuple(const T&) exists in scope.
 template <typename T, typename = void>
