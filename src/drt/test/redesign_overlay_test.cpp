@@ -17,6 +17,7 @@
 #include "redesign/Score.h"
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
+#include "redesign/overlay/MazeSearchProposer.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
 #include "redesign/overlay/MutableGeometryStore.h"
 #include "redesign/overlay/OracleCandidate.h"
@@ -1821,6 +1822,135 @@ bool TestSnapshotGeometryReturnsView()
   return out.size() == 1u;
 }
 
+// ===== V2.2.e — MazeSearchProposer (synthetic) =====
+
+bool TestProposerEmitsSingleAddWireProposal()
+{
+  // Input: target net 100, route_box (10..50, 0..5), layer 2.
+  // Output: ProposedDelta wrapping AddWire with that bbox + layer.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 100;
+  in.route_box = r::Rect{r::Point{10, 0}, r::Point{50, 5}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{1, 0, 0};
+  in.snapshot_version = 1;
+
+  auto pd = ro::MazeSearchProposer::Propose(*base, in);
+
+  // Delta payload is AddWire with the input box + layer.
+  if (!std::holds_alternative<r::AddWire>(pd.delta)) {
+    return false;
+  }
+  const auto& aw = std::get<r::AddWire>(pd.delta);
+  if (aw.bbox.ll.x != 10 || aw.bbox.ur.x != 50 || aw.layer != 2) {
+    return false;
+  }
+
+  // ProposedDelta metadata.
+  if (pd.source != r::DeltaSource::DetailedRoutePatch) {
+    return false;
+  }
+  if (pd.snapshot_version != 1u) {
+    return false;
+  }
+  if (!(pd.id == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+
+  // Read footprint records the proposer's queried region.
+  if (pd.read_footprint.geometry.rects.size() != 1u
+      || pd.read_footprint.geometry.layers.size() != 1u
+      || pd.read_footprint.geometry.layers[0] != 2) {
+    return false;
+  }
+
+  // Write footprint sound (unknown=false), shapes/layers populated.
+  return !pd.write_footprint.unknown
+         && pd.write_footprint.shapes.size() == 1u
+         && pd.write_footprint.layers.size() == 1u
+         && pd.write_footprint.layers[0] == 2;
+}
+
+bool TestProposerToTryCommitEndToEnd()
+{
+  // Empty PhysicalState. Proposer emits an AddWire on layer 2.
+  // try_commit_with_opts(SyntheticOracle) commits it. Store gains
+  // 1 shape; version bumps.
+  r::PhysicalState state;
+  auto snap = state.snapshot();
+
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 100;
+  in.route_box = r::Rect{r::Point{10, 0}, r::Point{50, 5}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{1, 0, 0};
+  in.snapshot_version = snap.version();
+
+  auto pd = ro::MazeSearchProposer::Propose(*snap.geometry(), in);
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  return result.committed_indices.size() == 1u
+         && result.rejected_indices.empty()
+         && state.mutable_store_for_test().route_shape_count() == 1u;
+}
+
+bool TestProposerOverlapsBaseGetsRejected()
+{
+  // Seed a shape at (0..50, 0..5) layer 2. Proposer emits an
+  // overlapping AddWire. Synthetic oracle says illegal; try_commit
+  // rejects.
+  r::PhysicalState state;
+  state.mutable_store_for_test().SeedRouteShapes(
+      {MakeFullShape(0, 0, 50, 5, 2, 100, 12)});
+  auto snap = state.snapshot();
+
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 200;
+  in.route_box = r::Rect{r::Point{20, 0}, r::Point{30, 5}};  // overlap
+  in.layer = 2;
+  in.delta_id = r::DeltaId{1, 0, 0};
+  in.snapshot_version = snap.version();
+
+  auto pd = ro::MazeSearchProposer::Propose(*snap.geometry(), in);
+
+  V22dStubPolicy policy;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto result
+      = state.try_commit_with_opts(snap, {pd}, policy, opts);
+
+  return result.rejected_indices.size() == 1u
+         && result.committed_indices.empty()
+         && state.mutable_store_for_test().route_shape_count() == 1u;
+}
+
+bool TestProposerStableDeltaIdAcrossCalls()
+{
+  // Two Propose calls with the same Input.delta_id produce
+  // ProposedDelta values whose `id` field matches. Determinism
+  // requirement from v2 §7.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 100;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{42, 7, 3};
+
+  auto pd1 = ro::MazeSearchProposer::Propose(*base, in);
+  auto pd2 = ro::MazeSearchProposer::Propose(*base, in);
+  return pd1.id == pd2.id && pd1.id == r::DeltaId{42, 7, 3};
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -2003,6 +2133,14 @@ int main()
        TestTryCommitDeleteResolvedRemovesShape},
       {"V2.2.d Snapshot::geometry() returns view (no longer nullptr)",
        TestSnapshotGeometryReturnsView},
+      {"V2.2.e proposer emits 1 AddWire ProposedDelta (synthetic)",
+       TestProposerEmitsSingleAddWireProposal},
+      {"V2.2.e propose -> try_commit end-to-end (Synthetic)",
+       TestProposerToTryCommitEndToEnd},
+      {"V2.2.e propose overlapping base -> commit rejects",
+       TestProposerOverlapsBaseGetsRejected},
+      {"V2.2.e proposer DeltaId stable across calls",
+       TestProposerStableDeltaIdAcrossCalls},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

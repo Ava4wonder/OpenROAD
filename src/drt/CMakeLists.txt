@@ -144,6 +144,7 @@ if(ENABLE_DRT_REDESIGN)
   if(ENABLE_DRT_REDESIGN_OVERLAY)
     target_sources(drt_lib
       PRIVATE
+        src/redesign/overlay/MazeSearchProposer.cpp
         src/redesign/overlay/MemoryBackedGeometryView.cpp
         src/redesign/overlay/MutableGeometryStore.cpp
         src/redesign/overlay/OracleCandidate.cpp
