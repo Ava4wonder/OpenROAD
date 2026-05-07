@@ -54,9 +54,13 @@ ShapeQueryResult MemoryBackedGeometryView::QueryRouteShapes(
 GuideQueryResult MemoryBackedGeometryView::QueryGuides(
     const Rect& box) const
 {
-  (void) box;
-  throw std::logic_error(
-      "GeometryView: QueryGuides not supported in V2.1");
+  GuideQueryResult out;
+  for (const GuideRef& g : guides_) {
+    if (BboxOverlap(box, g.bbox)) {
+      out.push_back(g);
+    }
+  }
+  return out;
 }
 
 BlockageQueryResult MemoryBackedGeometryView::QueryBlockages(

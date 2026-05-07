@@ -15,6 +15,7 @@
 #include "Hashing.h"
 #include "ShadowDump.h"
 #include "db/obj/frBlockObject.h"
+#include "db/obj/frGuide.h"
 #include "db/obj/frMarker.h"
 #include "db/obj/frNet.h"
 #include "db/obj/frShape.h"
@@ -106,6 +107,18 @@ std::optional<ShapeRef> ProjectRouteShape(
   }
 }
 
+GuideRef ProjectGuide(const ::drt::frGuide& g)
+{
+  GuideRef out;
+  out.bbox = ToOverlayRect(g.getBBox());
+  out.begin_layer = static_cast<LayerNum>(g.getBeginLayerNum());
+  out.end_layer = static_cast<LayerNum>(g.getEndLayerNum());
+  if (const ::drt::frNet* net = g.getNet()) {
+    out.net_id = static_cast<NetId>(net->getId());
+  }
+  return out;
+}
+
 MarkerRef ProjectMarker(const ::drt::frMarker& m)
 {
   MarkerRef out;
@@ -186,9 +199,25 @@ ShapeQueryResult RegionQueryGeometryView::QueryRouteShapes(
 GuideQueryResult RegionQueryGeometryView::QueryGuides(
     const Rect& box) const
 {
-  (void) box;
-  throw std::logic_error(
-      "GeometryView: QueryGuides not supported in V2.1");
+  if (design_ == nullptr) {
+    return {};
+  }
+  const ::drt::frRegionQuery* rq = design_->getRegionQuery();
+  if (rq == nullptr) {
+    return {};
+  }
+  std::vector<::drt::frGuide*> raw;
+  rq->queryGuide(FromOverlayRect(box), raw);
+
+  GuideQueryResult out;
+  out.reserve(raw.size());
+  for (const ::drt::frGuide* g : raw) {
+    if (g == nullptr) {
+      continue;
+    }
+    out.push_back(ProjectGuide(*g));
+  }
+  return out;
 }
 
 BlockageQueryResult RegionQueryGeometryView::QueryBlockages(
@@ -261,6 +290,49 @@ void ShadowCompareRouteShapes(
               << "hash mismatch: legacy=" << std::hex << legacy_hash
               << " overlay=" << overlay_hash << std::dec
               << " layer=" << layer
+              << " legacy_count=" << legacy_proj.size()
+              << " overlay_count=" << overlay.size() << "\n";
+  }
+}
+
+void ShadowCompareGuides(const ::drt::frDesign* design,
+                         const ::odb::Rect& box,
+                         const std::vector<::drt::frGuide*>& legacy_result)
+{
+  if (design == nullptr) {
+    return;
+  }
+
+  GuideQueryResult legacy_proj;
+  legacy_proj.reserve(legacy_result.size());
+  for (const ::drt::frGuide* g : legacy_result) {
+    if (g != nullptr) {
+      legacy_proj.push_back(ProjectGuide(*g));
+    }
+  }
+
+  RegionQueryGeometryView view(design);
+  const Rect overlay_box = ToOverlayRect(box);
+  const GuideQueryResult overlay = view.QueryGuides(overlay_box);
+
+  const uint64_t legacy_hash = HashCanonicalRange(legacy_proj);
+  const uint64_t overlay_hash = HashCanonicalRange(overlay);
+
+  ShadowDump::ComparisonRecord rec;
+  rec.entity = ShadowDump::Entity::Guide;
+  rec.query_kind = "queryGuide";
+  rec.box = overlay_box;
+  // Layer-less query — leave rec.layer absent.
+  rec.legacy_hash = legacy_hash;
+  rec.overlay_hash = overlay_hash;
+  rec.legacy_count = legacy_proj.size();
+  rec.overlay_count = overlay.size();
+  ShadowDump::Record(rec);
+
+  if (legacy_hash != overlay_hash) {
+    std::cerr << "[drt-redesign-overlay] V2.2.a.2 shadow guide hash "
+              << "mismatch: legacy=" << std::hex << legacy_hash
+              << " overlay=" << overlay_hash << std::dec
               << " legacy_count=" << legacy_proj.size()
               << " overlay_count=" << overlay.size() << "\n";
   }

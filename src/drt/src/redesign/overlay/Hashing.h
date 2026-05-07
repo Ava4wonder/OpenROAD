@@ -103,6 +103,22 @@ inline auto CanonicalTuple(const ShapeRef& s)
                          s.net_id);
 }
 
+// V2.2.a.2 — GuideRef canonical identity:
+//   (begin_layer?, end_layer?, bbox.{ll,ur}.{x,y}, net_id?)
+//
+// Pointer-free. Both layer endpoints participate so multi-layer
+// guides with shared bbox+net are not conflated.
+inline auto CanonicalTuple(const GuideRef& g)
+{
+  return std::make_tuple(g.begin_layer,
+                         g.end_layer,
+                         g.bbox.ll.x,
+                         g.bbox.ll.y,
+                         g.bbox.ur.x,
+                         g.bbox.ur.y,
+                         g.net_id);
+}
+
 // SFINAE detector — has_canonical_tuple<T>::value is true iff
 // CanonicalTuple(const T&) exists in scope.
 template <typename T, typename = void>

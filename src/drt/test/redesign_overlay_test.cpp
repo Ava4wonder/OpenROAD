@@ -338,17 +338,58 @@ bool TestMemoryBackedQueryRouteShapesFilters()
   return on_layer3.size() == 1u;
 }
 
-bool TestQueryGuidesThrowsInV21()
+// V2.2.a.2 — MemoryBackedGeometryView::QueryGuides has a real impl.
+// The throw test from V2.1 is replaced.
+bool TestMemoryBackedQueryGuidesFilters()
 {
-  ro::MemoryBackedGeometryView view({});
-  try {
-    (void) view.QueryGuides(r::Rect{});
-  } catch (const std::logic_error&) {
-    return true;
-  } catch (...) {
+  ro::GuideRef g1;
+  g1.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 50}};
+  g1.begin_layer = 2;
+  g1.end_layer = 4;
+  g1.net_id = 100;
+  ro::GuideRef g2;
+  g2.bbox = r::Rect{r::Point{200, 200}, r::Point{250, 250}};
+  g2.begin_layer = 6;
+  g2.end_layer = 6;
+  g2.net_id = 200;
+
+  ro::MemoryBackedGeometryView view({}, {}, {g1, g2});
+
+  auto in_box1 = view.QueryGuides(
+      r::Rect{r::Point{10, 10}, r::Point{30, 30}});
+  if (in_box1.size() != 1u
+      || !in_box1[0].begin_layer.has_value()
+      || in_box1[0].begin_layer.value() != 2
+      || !in_box1[0].end_layer.has_value()
+      || in_box1[0].end_layer.value() != 4) {
     return false;
   }
-  return false;
+  auto in_box2 = view.QueryGuides(
+      r::Rect{r::Point{220, 220}, r::Point{230, 230}});
+  if (in_box2.size() != 1u
+      || in_box2[0].begin_layer.value() != 6) {
+    return false;
+  }
+  auto in_neither = view.QueryGuides(
+      r::Rect{r::Point{100, 100}, r::Point{110, 110}});
+  return in_neither.empty();
+}
+
+bool TestGuideRefHashCapturesBothLayerEndpoints()
+{
+  // Two guides differing only in end_layer must hash differently —
+  // this proves the begin/end layer pair captures full identity, not
+  // just begin.
+  ro::GuideRef g1;
+  g1.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 10}};
+  g1.begin_layer = 2;
+  g1.end_layer = 4;
+  g1.net_id = 100;
+  ro::GuideRef g2 = g1;
+  g2.end_layer = 5;  // only diff
+  std::vector<ro::GuideRef> v1 = {g1};
+  std::vector<ro::GuideRef> v2 = {g2};
+  return ro::HashCanonicalRange(v1) != ro::HashCanonicalRange(v2);
 }
 
 bool TestQueryBlockagesThrowsInV21()
@@ -658,8 +699,8 @@ static_assert(ro::has_canonical_tuple<ro::MarkerRef>::value,
               "MarkerRef must have CanonicalTuple");
 static_assert(ro::has_canonical_tuple<ro::ShapeRef>::value,
               "ShapeRef must have CanonicalTuple after V2.2.a.1");
-static_assert(!ro::has_canonical_tuple<ro::GuideRef>::value,
-              "GuideRef CanonicalTuple lands in V2.2.a.2");
+static_assert(ro::has_canonical_tuple<ro::GuideRef>::value,
+              "GuideRef must have CanonicalTuple after V2.2.a.2");
 static_assert(!ro::has_canonical_tuple<ro::BlockageRef>::value,
               "BlockageRef CanonicalTuple lands in V2.2.a.3");
 static_assert(!ro::has_canonical_tuple<ro::PinAccessRef>::value,
@@ -735,8 +776,10 @@ int main()
        TestMemoryBackedQueryMarkersDistinguishesAbsentLayer},
       {"MemoryBackedGeometryView::QueryRouteShapes filters",
        TestMemoryBackedQueryRouteShapesFilters},
-      {"GeometryView::QueryGuides throws in V2.1",
-       TestQueryGuidesThrowsInV21},
+      {"MemoryBackedGeometryView::QueryGuides filters",
+       TestMemoryBackedQueryGuidesFilters},
+      {"GuideRef hash captures both layer endpoints",
+       TestGuideRefHashCapturesBothLayerEndpoints},
       {"GeometryView::QueryBlockages throws in V2.1",
        TestQueryBlockagesThrowsInV21},
       {"GeometryView::QueryPinAccess throws in V2.1",

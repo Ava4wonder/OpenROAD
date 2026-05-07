@@ -37,6 +37,16 @@ class MemoryBackedGeometryView : public GeometryView
   {
   }
 
+  // V2.2.a.2 — overload also accepting guides.
+  MemoryBackedGeometryView(std::vector<MarkerRef> markers,
+                           std::vector<ShapeRef> route_shapes,
+                           std::vector<GuideRef> guides)
+      : markers_(std::move(markers)),
+        route_shapes_(std::move(route_shapes)),
+        guides_(std::move(guides))
+  {
+  }
+
   MarkerQueryResult QueryMarkers(const Rect& box) const override;
 
   // V2.2.a.1.mem — real implementation. Filters route_shapes_ by
@@ -45,9 +55,13 @@ class MemoryBackedGeometryView : public GeometryView
   ShapeQueryResult QueryRouteShapes(const Rect& box,
                                     LayerNum layer) const override;
 
-  // V2.2+ methods — still throw per GeometryView contract until
-  // their per-entity sub-commit (V2.2.a.{2,3,4}) lands.
+  // V2.2.a.2 — real implementation. Filters guides_ by bbox overlap.
+  // The guide query is layer-less (matching frRegionQuery's unlayered
+  // queryGuide overload).
   GuideQueryResult QueryGuides(const Rect& box) const override;
+
+  // V2.2+ methods — still throw per GeometryView contract until
+  // their per-entity sub-commit (V2.2.a.{3,4}) lands.
   BlockageQueryResult QueryBlockages(const Rect& box,
                                      LayerNum layer) const override;
   PinAccessQueryResult QueryPinAccess(const Rect& box) const override;
@@ -55,6 +69,7 @@ class MemoryBackedGeometryView : public GeometryView
  private:
   std::vector<MarkerRef> markers_;
   std::vector<ShapeRef> route_shapes_;
+  std::vector<GuideRef> guides_;
 };
 
 }  // namespace drt::redesign::overlay

@@ -306,6 +306,24 @@ void ShadowDump::RecordRouteShapeComparison(std::uint64_t legacy_hash,
   Record(rec);
 }
 
+void ShadowDump::RecordGuideComparison(std::uint64_t legacy_hash,
+                                       std::uint64_t overlay_hash,
+                                       std::size_t legacy_count,
+                                       std::size_t overlay_count,
+                                       const Rect& box)
+{
+  ComparisonRecord rec;
+  rec.entity = Entity::Guide;
+  rec.query_kind = "queryGuide";
+  rec.box = box;
+  // Layer-less query — leave rec.layer as nullopt.
+  rec.legacy_hash = legacy_hash;
+  rec.overlay_hash = overlay_hash;
+  rec.legacy_count = legacy_count;
+  rec.overlay_count = overlay_count;
+  Record(rec);
+}
+
 std::uint64_t ShadowDump::comparison_count() noexcept
 {
   return comparison_counter().load(std::memory_order_relaxed);

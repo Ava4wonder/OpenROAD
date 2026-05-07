@@ -89,6 +89,14 @@ class ShadowDump
                                          const Rect& box,
                                          std::int32_t layer);
 
+  // V2.2.a.2 — guide comparison wrapper. Layer-less query, so no
+  // layer column.
+  static void RecordGuideComparison(std::uint64_t legacy_hash,
+                                    std::uint64_t overlay_hash,
+                                    std::size_t legacy_count,
+                                    std::size_t overlay_count,
+                                    const Rect& box);
+
   // Process-wide aggregates (across all entities).
   static std::uint64_t comparison_count() noexcept;
   static std::uint64_t mismatch_count() noexcept;

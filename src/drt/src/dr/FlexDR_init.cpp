@@ -302,6 +302,14 @@ void FlexDRWorker::initNetObjs(
   if (isInitDR()) {
     std::vector<frGuide*> guides;
     design->getRegionQuery()->queryGuide(getRouteBox(), guides);
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+    // V2.2.a.2 shadow validation. Layer-less queryGuide → layer-less
+    // GeometryView::QueryGuides. Both project to GuideRef via the
+    // single ProjectGuide source of truth. Diagnostic only —
+    // `guides` is unmodified.
+    drt::redesign::overlay::ShadowCompareGuides(
+        design, getRouteBox(), guides);
+#endif
     for (auto& guide : guides) {
       if (auto net = guide->getNet()) {
         if (getRipupMode() == RipUpMode::INCR && net->hasInitialRouting()) {

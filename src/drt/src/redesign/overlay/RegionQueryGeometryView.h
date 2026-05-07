@@ -34,6 +34,7 @@
 namespace drt {
 class frBlockObject;
 class frDesign;
+class frGuide;
 class frMarker;
 }  // namespace drt
 namespace odb {
@@ -88,6 +89,11 @@ std::optional<ShapeRef> ProjectRouteShape(
     const ::drt::frBlockObject& obj,
     const ::odb::Rect& bbox);
 
+// V2.2.a.2 — single source of truth for frGuide -> GuideRef
+// projection. Guides are 3D corridors; the canonical identity
+// captures (begin_layer, end_layer, bbox, net_id). Pointer-free.
+GuideRef ProjectGuide(const ::drt::frGuide& g);
+
 // V2.1.e.4 shadow validation. Diagnostic-only, never alters behaviour.
 //
 // Compare a legacy regionQuery->queryMarker result against
@@ -126,5 +132,16 @@ void ShadowCompareRouteShapes(
     int layer,
     const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
         legacy_result);
+
+// V2.2.a.2 — guide shadow validation. Shadow-not-substitution.
+//
+// Compares the legacy `regionQuery->queryGuide(box, vector<frGuide*>&)`
+// (layer-less variant) output against
+// `RegionQueryGeometryView::QueryGuides(box)`. Both sides project via
+// ProjectGuide. CSV row recorded via ShadowDump with entity=guide,
+// query_kind=queryGuide, layer empty (layer-less query).
+void ShadowCompareGuides(const ::drt::frDesign* design,
+                         const ::odb::Rect& box,
+                         const std::vector<::drt::frGuide*>& legacy_result);
 
 }  // namespace drt::redesign::overlay

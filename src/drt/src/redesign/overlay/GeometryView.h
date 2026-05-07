@@ -59,14 +59,16 @@ struct ShapeRef
   std::optional<NetId> net_id;
 };
 
-// V2.1: declared so the abstract interface can name them in
-// signatures. **Their semantics are not implemented in V2.1** — V2.2.a
-// fills in the projection logic and the matching CanonicalTuple
-// overload per entity, in its own per-entity commit.
+// V2.2.a.2 — guides are 3D corridors spanning a layer range. The
+// canonical identity captures both endpoints; either may be absent
+// for synthetic data, but real frGuide projection always populates
+// both. Compressing to a single layer would conflate distinct
+// multi-layer guides.
 struct GuideRef
 {
   Rect bbox{};
-  std::optional<LayerNum> layer;
+  std::optional<LayerNum> begin_layer;
+  std::optional<LayerNum> end_layer;
   std::optional<NetId> net_id;
 };
 
