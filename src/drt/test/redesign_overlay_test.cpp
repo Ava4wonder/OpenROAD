@@ -14,6 +14,7 @@
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MemoryBackedGeometryView.h"
+#include "redesign/overlay/OverlayGeometryView.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/ShadowDump.h"
 #include "redesign/overlay/SnapshotHandle.h"
@@ -802,6 +803,189 @@ bool TestShadowDumpBadPathDoesNotThrow()
   return !threw && ro::ShadowDump::comparison_count() == 2;
 }
 
+// ===== V2.2.b — OverlayGeometryView =====
+
+bool TestOverlayPassThroughEmptyDeltas()
+{
+  // No deltas → overlay queries equal base queries.
+  std::vector<ro::MarkerRef> base_markers;
+  base_markers.push_back(MakeMarker(0, 0, 10, 10, 2));
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeShape(0, 0, 100, 5, 2, 1));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      base_markers, base_shapes);
+
+  ro::OverlayGeometryView overlay(base, {});
+
+  auto base_markers_q
+      = base->QueryMarkers(r::Rect{r::Point{-5, -5}, r::Point{50, 50}});
+  auto overlay_markers_q
+      = overlay.QueryMarkers(r::Rect{r::Point{-5, -5}, r::Point{50, 50}});
+  if (base_markers_q.size() != overlay_markers_q.size()) {
+    return false;
+  }
+
+  auto base_shapes_q = base->QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{200, 50}}, 2);
+  auto overlay_shapes_q = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{200, 50}}, 2);
+  return base_shapes_q.size() == overlay_shapes_q.size()
+         && base_shapes_q.size() == 1u;
+}
+
+bool TestOverlayAddsAddWireToQueryRouteShapes()
+{
+  // Empty base + AddWire delta → QueryRouteShapes returns the added
+  // shape on the matching layer + bbox.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{10, 0}, r::Point{50, 5}};
+  add.layer = 3;
+  add.net = nullptr;  // synthetic; net_id will be absent in V2.2.b
+  std::vector<r::Delta> deltas{add};
+
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+
+  // Same layer, overlapping bbox: returns 1 shape.
+  auto on_3 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{0, -10}, r::Point{100, 10}}, 3);
+  if (on_3.size() != 1u
+      || on_3[0].bbox.ll.x != 10 || on_3[0].bbox.ur.x != 50
+      || !on_3[0].layer.has_value() || on_3[0].layer.value() != 3
+      || on_3[0].net_id.has_value()) {
+    return false;
+  }
+
+  // Different layer: empty.
+  auto on_4 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{0, -10}, r::Point{100, 10}}, 4);
+  if (!on_4.empty()) {
+    return false;
+  }
+
+  // Same layer, non-overlapping bbox: empty.
+  auto far_box = overlay.QueryRouteShapes(
+      r::Rect{r::Point{1000, 1000}, r::Point{2000, 2000}}, 3);
+  return far_box.empty();
+}
+
+bool TestOverlayComposesAddWithBase()
+{
+  // Base has 1 shape on layer 2. Add delta on layer 2 — query
+  // returns 2 shapes.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeShape(0, 0, 100, 5, 2, 7));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{200, 0}, r::Point{300, 5}};
+  add.layer = 2;
+  std::vector<r::Delta> deltas{add};
+
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+
+  auto on_2 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{500, 50}}, 2);
+  return on_2.size() == 2u;
+}
+
+bool TestOverlayStacksOverlayOverOverlay()
+{
+  // Composability: OverlayGeometryView over an OverlayGeometryView
+  // over a base.
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::AddWire a;
+  a.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  a.layer = 2;
+  auto inner = std::make_shared<ro::OverlayGeometryView>(
+      base, std::vector<r::Delta>{a});
+
+  r::AddWire b;
+  b.bbox = r::Rect{r::Point{20, 0}, r::Point{30, 5}};
+  b.layer = 2;
+  ro::OverlayGeometryView outer(inner, std::vector<r::Delta>{b});
+
+  auto out = outer.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{100, 50}}, 2);
+  return out.size() == 2u;
+}
+
+bool TestOverlayInsertShieldComposes()
+{
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, std::vector<ro::ShapeRef>{});
+
+  r::InsertShield shield;
+  shield.coverage = r::Rect{r::Point{0, 0}, r::Point{100, 50}};
+  shield.layer = 5;
+  std::vector<r::Delta> deltas{shield};
+
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+  auto on_5 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{10, 10}, r::Point{20, 20}}, 5);
+  if (on_5.size() != 1u
+      || on_5[0].layer.value_or(-1) != 5) {
+    return false;
+  }
+  auto on_6 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{10, 10}, r::Point{20, 20}}, 6);
+  return on_6.empty();
+}
+
+bool TestOverlayDeleteWireIsCurrentlySkipped()
+{
+  // V2.2.b ignores DeleteX deltas. V2.2.b.del adds removal semantics.
+  // For now: a DeleteWire delta does NOT change base results.
+  std::vector<ro::ShapeRef> base_shapes;
+  base_shapes.push_back(MakeShape(0, 0, 100, 5, 2, 7));
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      std::vector<ro::MarkerRef>{}, base_shapes);
+
+  r::DeleteWire del;
+  del.segment_id = 42;
+  std::vector<r::Delta> deltas{del};
+
+  ro::OverlayGeometryView overlay(base, std::move(deltas));
+
+  // Base shape still present — Delete is a no-op in V2.2.b.
+  auto on_2 = overlay.QueryRouteShapes(
+      r::Rect{r::Point{-5, -5}, r::Point{200, 50}}, 2);
+  return on_2.size() == 1u;
+}
+
+bool TestOverlayPassesGuidesAndMarkersThrough()
+{
+  // V2.2.b: no Add/Delete deltas for markers or guides; pass-through
+  // to base.
+  std::vector<ro::MarkerRef> base_markers;
+  base_markers.push_back(MakeMarker(0, 0, 10, 10, 2));
+  ro::GuideRef g;
+  g.bbox = r::Rect{r::Point{0, 0}, r::Point{50, 50}};
+  g.begin_layer = 2;
+  g.end_layer = 4;
+  auto base = std::make_shared<ro::MemoryBackedGeometryView>(
+      base_markers, std::vector<ro::ShapeRef>{},
+      std::vector<ro::GuideRef>{g});
+
+  // Even with an unrelated AddWire delta in the list, markers and
+  // guides are still pass-through.
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{0, 0}, r::Point{10, 5}};
+  add.layer = 2;
+  ro::OverlayGeometryView overlay(base, std::vector<r::Delta>{add});
+
+  auto markers
+      = overlay.QueryMarkers(r::Rect{r::Point{-5, -5}, r::Point{50, 50}});
+  auto guides
+      = overlay.QueryGuides(r::Rect{r::Point{-5, -5}, r::Point{100, 100}});
+  return markers.size() == 1u && guides.size() == 1u;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -904,6 +1088,20 @@ int main()
        TestPinAccessRefHashCapturesAccessFlags},
       {"PinAccessRef hash absent flag != false flag",
        TestPinAccessRefHashAbsentVsFalseFlag},
+      {"OverlayGeometryView empty deltas pass through",
+       TestOverlayPassThroughEmptyDeltas},
+      {"OverlayGeometryView adds AddWire to QueryRouteShapes",
+       TestOverlayAddsAddWireToQueryRouteShapes},
+      {"OverlayGeometryView composes Add with base",
+       TestOverlayComposesAddWithBase},
+      {"OverlayGeometryView stacks (overlay over overlay)",
+       TestOverlayStacksOverlayOverOverlay},
+      {"OverlayGeometryView InsertShield composes",
+       TestOverlayInsertShieldComposes},
+      {"OverlayGeometryView DeleteWire skipped in V2.2.b (no-op)",
+       TestOverlayDeleteWireIsCurrentlySkipped},
+      {"OverlayGeometryView passes guides/markers through",
+       TestOverlayPassesGuidesAndMarkersThrough},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
