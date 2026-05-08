@@ -1951,6 +1951,162 @@ bool TestProposerStableDeltaIdAcrossCalls()
   return pd1.id == pd2.id && pd1.id == r::DeltaId{42, 7, 3};
 }
 
+// ===== V2.3.a — ProposalSet + batch eval =====
+
+namespace {
+
+// Helper: build a ProposedDelta for a synthetic AddWire with the
+// given DeltaId and bbox. snapshot_version=0 (caller can override).
+r::ProposedDelta MakeProposalAddWire(const r::DeltaId& id,
+                                     int x1, int y1, int x2, int y2,
+                                     r::LayerNum layer)
+{
+  r::AddWire add;
+  add.bbox = r::Rect{r::Point{x1, y1}, r::Point{x2, y2}};
+  add.layer = layer;
+  r::ProposedDelta pd;
+  pd.delta = add;
+  pd.id = id;
+  return pd;
+}
+
+}  // namespace
+
+bool TestBatchEvalEmptySet()
+{
+  ro::MemoryBackedGeometryView base({});
+  r::PhysicalState state;
+  r::ProposalSet set;
+  auto result = state.batch_eval(base, set);
+  return result.outcomes.empty()
+         && result.outcome_proposal_ids.empty()
+         && result.summary.batch_size == 0u
+         && result.summary.legal_count == 0u
+         && result.summary.commit_eligible_count == 0u;
+}
+
+bool TestBatchEvalSingleProposalMatchesSingleEval()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+
+  // Single eval reference.
+  auto single = state.eval(base, pd, opts);
+
+  // Batch eval over 1.
+  r::ProposalSet set;
+  set.proposals.push_back(pd);
+  auto batch = state.batch_eval(base, set, opts);
+
+  if (batch.outcomes.size() != 1u
+      || batch.outcome_proposal_ids.size() != 1u
+      || batch.summary.batch_size != 1u) {
+    return false;
+  }
+  return batch.outcomes[0].legality.source == single.legality.source
+         && batch.outcomes[0].legality.legal == single.legality.legal
+         && batch.outcomes[0].legality.commit_eligible
+                == single.legality.commit_eligible;
+}
+
+bool TestBatchEvalMixedProposalsCountsCorrectly()
+{
+  // Mix:
+  //  P1: AddWire far from any base shape          → legal
+  //  P2: AddWire overlapping base                 → illegal
+  //  P3: DeleteWire unresolved                    → UnresolvedFootprint
+  //  P4: MoveCell                                 → UnsupportedDelta
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 50, 5, 2, 100, 12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  // Distinct DeltaIds so sort is well-defined.
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 200, 0, 300, 5, 2));  // legal
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 1}, 20, 0, 30, 5, 2));  // illegal
+  // P3: DeleteWire unresolved
+  r::DeleteWire del;
+  del.segment_id = 9;
+  // bbox absent / zero-area + no resolved_net_id → unresolved
+  r::ProposedDelta p3;
+  p3.delta = del;
+  p3.id = r::DeltaId{1, 0, 2};
+  set.proposals.push_back(p3);
+  // P4: MoveCell → UnsupportedDelta
+  r::MoveCell mv;
+  mv.inst = nullptr;
+  r::ProposedDelta p4;
+  p4.delta = mv;
+  p4.id = r::DeltaId{1, 0, 3};
+  set.proposals.push_back(p4);
+
+  auto batch = state.batch_eval(base, set, opts);
+
+  return batch.outcomes.size() == 4u
+         && batch.summary.batch_size == 4u
+         && batch.summary.legal_count == 1u
+         && batch.summary.commit_eligible_count == 1u
+         && batch.summary.unresolved_count >= 1u   // p3 + p4 collapse
+                                                    // to UnresolvedFootprint
+                                                    // at the verdict layer
+         && batch.summary.unsupported_count == 1u;  // p4 only
+                                                    // at the bridge layer
+}
+
+bool TestBatchEvalSortsByDeltaIdRegardlessOfInputOrder()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+
+  auto pa = MakeProposalAddWire(r::DeltaId{2, 0, 0}, 0, 0, 10, 5, 2);
+  auto pb = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 10, 5, 2);
+  auto pc = MakeProposalAddWire(r::DeltaId{3, 0, 0}, 0, 0, 10, 5, 2);
+
+  r::ProposalSet set1;
+  set1.proposals = {pa, pb, pc};
+  r::ProposalSet set2;
+  set2.proposals = {pc, pa, pb};
+
+  auto r1 = state.batch_eval(base, set1);
+  auto r2 = state.batch_eval(base, set2);
+
+  // Both must produce DeltaId-sorted output.
+  if (r1.outcome_proposal_ids.size() != 3u
+      || r2.outcome_proposal_ids.size() != 3u) {
+    return false;
+  }
+  if (!(r1.outcome_proposal_ids[0] == r::DeltaId{1, 0, 0})
+      || !(r1.outcome_proposal_ids[1] == r::DeltaId{2, 0, 0})
+      || !(r1.outcome_proposal_ids[2] == r::DeltaId{3, 0, 0})) {
+    return false;
+  }
+  return r2.outcome_proposal_ids == r1.outcome_proposal_ids;
+}
+
+bool TestBatchEvalTotalTimeNonNegative()
+{
+  // Coarse sanity: total_eval_time_ns should be >= 0 (steady_clock
+  // is monotonic). Not a perf claim — just confirms timing wiring.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    set.proposals.push_back(MakeProposalAddWire(
+        r::DeltaId{1, 0, i}, 0, 0, 10, 5, 2));
+  }
+  auto batch = state.batch_eval(base, set);
+  return batch.summary.total_eval_time_ns >= 0;
+}
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -2141,6 +2297,16 @@ int main()
        TestProposerOverlapsBaseGetsRejected},
       {"V2.2.e proposer DeltaId stable across calls",
        TestProposerStableDeltaIdAcrossCalls},
+      {"V2.3.a batch_eval empty set",
+       TestBatchEvalEmptySet},
+      {"V2.3.a batch_eval single proposal matches single eval",
+       TestBatchEvalSingleProposalMatchesSingleEval},
+      {"V2.3.a batch_eval mixed proposals (legal/illegal/unresolved/unsupported)",
+       TestBatchEvalMixedProposalsCountsCorrectly},
+      {"V2.3.a batch_eval sorts outputs by DeltaId regardless of input order",
+       TestBatchEvalSortsByDeltaIdRegardlessOfInputOrder},
+      {"V2.3.a batch_eval total_eval_time_ns >= 0",
+       TestBatchEvalTotalTimeNonNegative},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

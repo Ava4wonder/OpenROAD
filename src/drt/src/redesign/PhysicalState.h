@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 
+#include "BatchEval.h"
 #include "CommitResult.h"
 #include "ConflictPolicy.h"
 #include "Delta.h"
@@ -62,6 +63,23 @@ class PhysicalState
   EvalOutcome eval(const overlay::GeometryView& base_geometry,
                    const ProposedDelta& delta,
                    EvalOptions opts = {}) const;
+
+  // V2.3.a — batched multi-proposal evaluation. K candidate
+  // ProposedDeltas evaluated against the same base. Result vectors
+  // are sorted by stable DeltaId for canonical ordering — the
+  // caller does not have to pre-sort. Each per-proposal outcome is
+  // identical to a single-eval call (same logic, same legality
+  // mode, same score formula). Per-proposal eval times sum into
+  // summary.total_eval_time_ns.
+  //
+  // V2.3.a SCOPE — mechanics validation only. Batch eval is a
+  // sorted loop over single eval(). No legality-oracle batching,
+  // no GPU dispatch — those are V2.4+ work. The architectural
+  // payoff in this commit is that ProposalSet → BatchEvalResult is
+  // a typed call site that V2.3.b's selector can consume.
+  BatchEvalResult batch_eval(const overlay::GeometryView& base_geometry,
+                             const ProposalSet& set,
+                             EvalOptions opts = {}) const;
 
   // Two-phase commit (plan §7). Resolves conflicts via `policy`; commits the
   // selected non-conflicting subset; rejects proposals built against a stale

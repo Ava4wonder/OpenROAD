@@ -7,7 +7,9 @@
 
 #include "PhysicalState.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <stdexcept>
@@ -251,6 +253,70 @@ EvalOutcome PhysicalState::eval(
 
   outcome.score = score;
   return outcome;
+}
+
+BatchEvalResult PhysicalState::batch_eval(
+    const overlay::GeometryView& base_geometry,
+    const ProposalSet& set,
+    EvalOptions opts) const
+{
+  BatchEvalResult result;
+  result.outcomes.reserve(set.proposals.size());
+  result.outcome_proposal_ids.reserve(set.proposals.size());
+  result.summary.batch_size = set.proposals.size();
+
+  // V2.3.a — canonical ordering: build sorted index list by stable
+  // DeltaId so output ordering is deterministic regardless of input
+  // permutation. The caller can correlate via outcome_proposal_ids.
+  std::vector<std::size_t> idx(set.proposals.size());
+  for (std::size_t i = 0; i < idx.size(); ++i) {
+    idx[i] = i;
+  }
+  std::sort(idx.begin(), idx.end(),
+            [&](std::size_t a, std::size_t b) {
+              return set.proposals[a].id < set.proposals[b].id;
+            });
+
+  for (std::size_t k : idx) {
+    const ProposedDelta& p = set.proposals[k];
+
+    const auto t0 = std::chrono::steady_clock::now();
+    EvalOutcome outcome = eval(base_geometry, p, opts);
+    const auto t1 = std::chrono::steady_clock::now();
+    result.summary.total_eval_time_ns
+        += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
+               .count();
+
+    // Tally summary counters.
+    if (outcome.legality.legal) {
+      result.summary.legal_count += 1;
+    }
+    if (outcome.legality.commit_eligible) {
+      result.summary.commit_eligible_count += 1;
+    }
+    if (outcome.legality.source == LegalitySource::UnresolvedFootprint) {
+      result.summary.unresolved_count += 1;
+    }
+    // V2.2.c.bridge maps adapter-level UnsupportedDelta to
+    // UnresolvedFootprint at the verdict layer (no separate enum
+    // value). For V2.3.a we count UnsupportedDelta separately by
+    // re-invoking the bridge — cheap relative to eval. This keeps
+    // the summary semantically clean even if the verdict source
+    // collapses both into one bucket.
+    {
+      const auto batch
+          = overlay::DeltaToOracleInput(base_geometry, p);
+      if (batch.status
+          == overlay::OracleCandidateBatch::Status::UnsupportedDelta) {
+        result.summary.unsupported_count += 1;
+      }
+    }
+
+    result.outcomes.push_back(std::move(outcome));
+    result.outcome_proposal_ids.push_back(p.id);
+  }
+
+  return result;
 }
 
 CommitResult PhysicalState::try_commit(const Snapshot& base,
