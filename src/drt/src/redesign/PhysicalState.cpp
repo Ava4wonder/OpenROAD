@@ -263,6 +263,7 @@ BatchEvalResult PhysicalState::batch_eval(
   BatchEvalResult result;
   result.outcomes.reserve(set.proposals.size());
   result.outcome_proposal_ids.reserve(set.proposals.size());
+  result.adapter_unsupported.reserve(set.proposals.size());
   result.summary.batch_size = set.proposals.size();
 
   // V2.3.a — canonical ordering: build sorted index list by stable
@@ -300,20 +301,23 @@ BatchEvalResult PhysicalState::batch_eval(
     // V2.2.c.bridge maps adapter-level UnsupportedDelta to
     // UnresolvedFootprint at the verdict layer (no separate enum
     // value). For V2.3.a we count UnsupportedDelta separately by
-    // re-invoking the bridge — cheap relative to eval. This keeps
-    // the summary semantically clean even if the verdict source
-    // collapses both into one bucket.
+    // re-invoking the bridge — cheap relative to eval. V2.3.b also
+    // captures the per-proposal flag so the selector can
+    // distinguish UnsupportedDelta from UnresolvedFootprint.
+    bool adapter_unsupported = false;
     {
       const auto batch
           = overlay::DeltaToOracleInput(base_geometry, p);
       if (batch.status
           == overlay::OracleCandidateBatch::Status::UnsupportedDelta) {
         result.summary.unsupported_count += 1;
+        adapter_unsupported = true;
       }
     }
 
     result.outcomes.push_back(std::move(outcome));
     result.outcome_proposal_ids.push_back(p.id);
+    result.adapter_unsupported.push_back(adapter_unsupported);
   }
 
   return result;

@@ -15,6 +15,7 @@
 #include "redesign/LegalityVerdict.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/Score.h"
+#include "redesign/Selection.h"
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MazeSearchProposer.h"
@@ -2107,6 +2108,264 @@ bool TestBatchEvalTotalTimeNonNegative()
   return batch.summary.total_eval_time_ns >= 0;
 }
 
+// ===== V2.3.b — SelectBest + RejectionReason =====
+
+bool TestSelectBestEmptyBatchHasNoWinner()
+{
+  r::BatchEvalResult empty;
+  auto sel = r::SelectBest(empty);
+  return !sel.has_winner && sel.rejected.empty();
+}
+
+bool TestSelectBestSingleCommitEligibleWins()
+{
+  // One legal proposal under SyntheticOracle. It must be selected
+  // and there must be no rejected entries.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  auto batch = state.batch_eval(base, set, opts);
+  auto sel = r::SelectBest(batch);
+
+  return sel.has_winner && sel.winner_id == r::DeltaId{1, 0, 0}
+         && sel.winner_score.has_value() && sel.rejected.empty();
+}
+
+bool TestSelectBestNoCommitEligibleNoWinner()
+{
+  // All-stub legality (default opts) → nothing is commit_eligible.
+  // Expect: no winner; every proposal tagged Unknown
+  // (LegalitySource::StubAssumeLegal, legal=true, commit_eligible=false).
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+
+  r::ProposalSet set;
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 1}, 0, 0, 100, 5, 2));
+  auto batch = state.batch_eval(base, set);  // default = StubAssumeLegal
+  auto sel = r::SelectBest(batch);
+
+  if (sel.has_winner || sel.rejected.size() != 2u) {
+    return false;
+  }
+  for (const auto& rj : sel.rejected) {
+    if (rj.reason != r::RejectionReason::Unknown) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestSelectBestPicksHighestAggregateScore()
+{
+  // Two commit_eligible AddWires of different lengths. The longer
+  // one has higher aggregate (delta_wirelength_proxy is positive)
+  // and must win; the loser is tagged LowerScore.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  // Short wire (length 50).
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 50, 5, 2));
+  // Long wire (length 500), placed far away to stay legal.
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 1}, 1000, 0, 1500, 5, 2));
+  auto batch = state.batch_eval(base, set, opts);
+  auto sel = r::SelectBest(batch);
+
+  if (!sel.has_winner) {
+    return false;
+  }
+  if (!(sel.winner_id == r::DeltaId{1, 0, 1})) {
+    return false;
+  }
+  if (sel.rejected.size() != 1u) {
+    return false;
+  }
+  return sel.rejected[0].id == r::DeltaId{1, 0, 0}
+         && sel.rejected[0].reason == r::RejectionReason::LowerScore;
+}
+
+bool TestSelectBestTieBreaksByLowestDeltaId()
+{
+  // Two identical AddWires placed at different locations (far from
+  // base shapes so both legal). Aggregate scores will be equal.
+  // Tie-break: lowest DeltaId wins.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{2, 0, 0}, 1000, 0, 1100, 5, 2));
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 2000, 0, 2100, 5, 2));
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{3, 0, 0}, 3000, 0, 3100, 5, 2));
+  auto batch = state.batch_eval(base, set, opts);
+  auto sel = r::SelectBest(batch);
+
+  if (!sel.has_winner) {
+    return false;
+  }
+  // All three have equal aggregate; lowest DeltaId is {1,0,0}.
+  if (!(sel.winner_id == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  if (sel.rejected.size() != 2u) {
+    return false;
+  }
+  // Rejected list is in DeltaId-sorted order.
+  if (!(sel.rejected[0].id == r::DeltaId{2, 0, 0})
+      || !(sel.rejected[1].id == r::DeltaId{3, 0, 0})) {
+    return false;
+  }
+  for (const auto& rj : sel.rejected) {
+    if (rj.reason != r::RejectionReason::LowerScore) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestSelectBestClassifiesRejectionReasonsAcrossKinds()
+{
+  // Mix:
+  //   P1: legal AddWire far from base    → winner
+  //   P2: AddWire overlapping base       → Illegal (synthetic verdict)
+  //   P3: DeleteWire unresolved identity → UnresolvedFootprint
+  //   P4: MoveCell                       → UnsupportedDelta
+  //   P5: legal AddWire shorter than P1  → LowerScore
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 50, 5, 2, 100, 12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  // P1 — long, legal.
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 1000, 0, 2000, 5, 2));
+  // P2 — overlaps base (illegal).
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 1}, 20, 0, 30, 5, 2));
+  // P3 — DeleteWire unresolved.
+  r::DeleteWire del;
+  del.segment_id = 9;
+  r::ProposedDelta p3;
+  p3.delta = del;
+  p3.id = r::DeltaId{1, 0, 2};
+  set.proposals.push_back(p3);
+  // P4 — MoveCell, adapter UnsupportedDelta.
+  r::MoveCell mv;
+  mv.inst = nullptr;
+  r::ProposedDelta p4;
+  p4.delta = mv;
+  p4.id = r::DeltaId{1, 0, 3};
+  set.proposals.push_back(p4);
+  // P5 — legal, shorter than P1.
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 4}, 3000, 0, 3010, 5, 2));
+
+  auto batch = state.batch_eval(base, set, opts);
+  auto sel = r::SelectBest(batch);
+
+  if (!sel.has_winner || !(sel.winner_id == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  if (sel.rejected.size() != 4u) {
+    return false;
+  }
+
+  // Expected DeltaId-sorted order:
+  //   {1,0,1} Illegal
+  //   {1,0,2} UnresolvedFootprint
+  //   {1,0,3} UnsupportedDelta
+  //   {1,0,4} LowerScore
+  const std::pair<r::DeltaId, r::RejectionReason> expected[] = {
+      {r::DeltaId{1, 0, 1}, r::RejectionReason::Illegal},
+      {r::DeltaId{1, 0, 2}, r::RejectionReason::UnresolvedFootprint},
+      {r::DeltaId{1, 0, 3}, r::RejectionReason::UnsupportedDelta},
+      {r::DeltaId{1, 0, 4}, r::RejectionReason::LowerScore},
+  };
+  for (std::size_t i = 0; i < 4; ++i) {
+    if (!(sel.rejected[i].id == expected[i].first)) {
+      return false;
+    }
+    if (sel.rejected[i].reason != expected[i].second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestSelectBestDeterministicAcrossInputPermutations()
+{
+  // Same proposals in two different input orders — selection
+  // results must be identical (winner DeltaId, rejected list, all
+  // reasons).
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  auto pa = MakeProposalAddWire(r::DeltaId{2, 0, 0}, 1000, 0, 1500, 5, 2);
+  auto pb = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 2000, 0, 2050, 5, 2);
+  auto pc = MakeProposalAddWire(r::DeltaId{3, 0, 0}, 3000, 0, 3500, 5, 2);
+
+  r::ProposalSet set1;
+  set1.proposals = {pa, pb, pc};
+  r::ProposalSet set2;
+  set2.proposals = {pc, pa, pb};
+
+  auto sel1 = r::SelectBest(state.batch_eval(base, set1, opts));
+  auto sel2 = r::SelectBest(state.batch_eval(base, set2, opts));
+
+  if (sel1.has_winner != sel2.has_winner) {
+    return false;
+  }
+  if (!(sel1.winner_id == sel2.winner_id)) {
+    return false;
+  }
+  if (sel1.rejected.size() != sel2.rejected.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < sel1.rejected.size(); ++i) {
+    if (!(sel1.rejected[i].id == sel2.rejected[i].id)
+        || sel1.rejected[i].reason != sel2.rejected[i].reason) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// V2.3.b — Conflict reason is reserved (V2.4 will emit it). Verify
+// the enum value exists and is distinct from every other reason so
+// downstream call sites (shadow dump column, log readers) can lock
+// in the encoding now and not have to renumber when V2.4 lights up
+// the conflict path.
+static_assert(static_cast<int>(r::RejectionReason::Conflict)
+                  != static_cast<int>(r::RejectionReason::Illegal),
+              "Conflict must be a distinct enum value");
+static_assert(static_cast<int>(r::RejectionReason::Conflict)
+                  != static_cast<int>(r::RejectionReason::LowerScore),
+              "Conflict must be a distinct enum value");
+static_assert(static_cast<int>(r::RejectionReason::Conflict)
+                  != static_cast<int>(r::RejectionReason::Unknown),
+              "Conflict must be a distinct enum value");
+
 // ===== Compile-time absence of CanonicalTuple for V2.2+ entities =====
 //
 // V2.1.e shipped MarkerRef CanonicalTuple. V2.2.a.1 added ShapeRef.
@@ -2307,6 +2566,20 @@ int main()
        TestBatchEvalSortsByDeltaIdRegardlessOfInputOrder},
       {"V2.3.a batch_eval total_eval_time_ns >= 0",
        TestBatchEvalTotalTimeNonNegative},
+      {"V2.3.b SelectBest empty batch -> no winner",
+       TestSelectBestEmptyBatchHasNoWinner},
+      {"V2.3.b SelectBest single commit_eligible proposal wins",
+       TestSelectBestSingleCommitEligibleWins},
+      {"V2.3.b SelectBest no commit_eligible -> no winner, all Unknown",
+       TestSelectBestNoCommitEligibleNoWinner},
+      {"V2.3.b SelectBest picks highest aggregate score",
+       TestSelectBestPicksHighestAggregateScore},
+      {"V2.3.b SelectBest tie-breaks by lowest DeltaId",
+       TestSelectBestTieBreaksByLowestDeltaId},
+      {"V2.3.b SelectBest classifies Illegal/Unresolved/Unsupported/LowerScore",
+       TestSelectBestClassifiesRejectionReasonsAcrossKinds},
+      {"V2.3.b SelectBest deterministic across input permutations",
+       TestSelectBestDeterministicAcrossInputPermutations},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

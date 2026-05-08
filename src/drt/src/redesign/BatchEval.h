@@ -60,6 +60,14 @@ struct BatchEvalResult
   // outcomes[i]. Lets the caller correlate back to a known proposal
   // even though the internal vector was sorted.
   std::vector<DeltaId> outcome_proposal_ids;
+  // V2.3.b — per-proposal adapter status flag. The verdict layer
+  // collapses adapter UnsupportedDelta into LegalitySource::
+  // UnresolvedFootprint, so a downstream selector cannot tell them
+  // apart from outcomes alone. This parallel vector preserves the
+  // distinction without coupling EvalOutcome to the adapter chain.
+  // adapter_unsupported[i] == true means
+  // OracleCandidateBatch::Status::UnsupportedDelta for proposal i.
+  std::vector<bool> adapter_unsupported;
   BatchEvalSummary summary;
 };
 

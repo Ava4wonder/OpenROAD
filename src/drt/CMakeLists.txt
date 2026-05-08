@@ -127,6 +127,7 @@ if(ENABLE_DRT_REDESIGN)
     PRIVATE
       src/redesign/Footprint.cpp
       src/redesign/PhysicalState.cpp
+      src/redesign/Selection.cpp
       src/redesign/simd/Geom.cpp
       src/redesign/legality/CpuDrcOracle.cpp
       src/redesign/legality/Predicates.cpp
