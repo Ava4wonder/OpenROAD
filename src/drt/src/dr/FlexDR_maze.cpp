@@ -21,7 +21,11 @@
 
 #include "boost/polygon/polygon.hpp"
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
+#include "redesign/BatchEval.h"
+#include "redesign/BatchSummaryDump.h"
+#include "redesign/ConflictPolicy.h"
 #include "redesign/PhysicalState.h"
+#include "redesign/Selection.h"
 #include "redesign/overlay/MazeSearchProposer.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/ShadowDump.h"
@@ -3229,50 +3233,127 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
   }
 
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
-  // V2.2.f shadow: exercise the V2 propose → eval seam in the
-  // production routing context. Production routing below proceeds
-  // unchanged; this block runs in parallel as observation only.
-  // No try_commit, no store mutation — V2.2.f.drive (later) flips
-  // the gate that lets the V2 path actually drive routing.
+  // V2.3.c shadow: K-proposal batch_eval → SelectBest → internal
+  // try_commit → BatchSummaryDump. Replaces V2.2.f's single-proposal
+  // shadow. Production routing below proceeds unchanged; this block
+  // runs in parallel as observation only and never mutates the real
+  // routing DB. The internal try_commit operates on `v2_state`'s
+  // private writable store (initialised empty per call) and bumps
+  // only that store's version, NOT production state.
   {
     namespace dr_overlay = drt::redesign::overlay;
+    namespace dr_re = drt::redesign;
+
     dr_overlay::RegionQueryGeometryView v2_view(getDesign());
-    dr_overlay::MazeSearchProposer::Input v2_in;
-    v2_in.net_id = net->getFrNet() != nullptr
-                       ? static_cast<drt::redesign::NetId>(
-                             net->getFrNet()->getId())
-                       : 0;
+
+    const dr_re::NetId v2_net_id
+        = net->getFrNet() != nullptr
+              ? static_cast<dr_re::NetId>(net->getFrNet()->getId())
+              : 0;
     const odb::Rect rb = getRouteBox();
-    v2_in.route_box.ll.x = rb.xMin();
-    v2_in.route_box.ll.y = rb.yMin();
-    v2_in.route_box.ur.x = rb.xMax();
-    v2_in.route_box.ur.y = rb.yMax();
-    // V2.2.f synthetic: hardcoded layer 2. V2.2.e.real / V2.2.f.real
-    // resolve the per-net primary routing layer.
-    v2_in.layer = 2;
-    v2_in.delta_id.region_id = static_cast<std::uint32_t>(v2_in.net_id);
-    v2_in.delta_id.proposer_id = 0;
-    v2_in.delta_id.attempt_index = 0;
-    v2_in.snapshot_version = 0;
+    // V2.3.c synthetic: hardcoded layer 2 (matches V2.2.f).
+    constexpr drt::redesign::LayerNum kV2Layer = 2;
 
-    auto v2_pd = dr_overlay::MazeSearchProposer::Propose(v2_view, v2_in);
+    dr_re::PhysicalState v2_state;
+    dr_re::EvalOptions v2_opts;
+    v2_opts.legality_mode = dr_re::LegalityMode::SyntheticOracle;
 
-    drt::redesign::PhysicalState v2_state;
-    drt::redesign::EvalOptions v2_opts;
-    v2_opts.legality_mode
-        = drt::redesign::LegalityMode::SyntheticOracle;
-    auto v2_outcome = v2_state.eval(v2_view, v2_pd, v2_opts);
+    // K=4 synthetic proposals. Each attempt shrinks ur.x by
+    // `attempt` DBU so wirelength (and aggregate score) are
+    // distinct across attempts — gives SelectBest something to
+    // rank. The shrink stays inside `rb` for any rb wider than 4
+    // DBU; degenerate cases (rb.xMax()-rb.xMin() < kBatchSize)
+    // still produce K syntactically-valid proposals, just with
+    // some collapsing to zero-area which the oracle will reject.
+    constexpr std::uint32_t kBatchSize = 4;
+    dr_re::ProposalSet v2_set;
+    v2_set.proposals.reserve(kBatchSize);
+    v2_set.base_snapshot_version = v2_state.current_version();
 
-    dr_overlay::ShadowDump::RecordV2LoopProposal(
-        v2_in.net_id,
-        v2_in.route_box,
-        static_cast<std::int32_t>(v2_in.layer),
-        v2_outcome.legality.legal,
-        static_cast<std::uint8_t>(v2_outcome.legality.source),
-        v2_outcome.legality.commit_eligible,
-        v2_outcome.score.has_value()
-            ? v2_outcome.score->delta_via_count
-            : 0);
+    for (std::uint32_t attempt = 0; attempt < kBatchSize; ++attempt) {
+      dr_overlay::MazeSearchProposer::Input in;
+      in.net_id = v2_net_id;
+      in.route_box.ll.x = rb.xMin();
+      in.route_box.ll.y = rb.yMin();
+      in.route_box.ur.x
+          = rb.xMax() - static_cast<int>(attempt);
+      in.route_box.ur.y = rb.yMax();
+      in.layer = kV2Layer;
+      in.delta_id.region_id = static_cast<std::uint32_t>(v2_net_id);
+      in.delta_id.proposer_id = 0;
+      in.delta_id.attempt_index = attempt;
+      in.snapshot_version = v2_set.base_snapshot_version;
+
+      auto pd = dr_overlay::MazeSearchProposer::Propose(v2_view, in);
+
+      // Preserve the V2.2.f V2Loop ShadowDump per-proposal record:
+      // run a single eval to fill the V2Loop row. The downstream
+      // batch_eval re-evals the same proposals; the cost is K
+      // extra eval() calls, which is acceptable for a synthetic
+      // shadow path. V2.4+ collapses this when the shadow path
+      // graduates to drive mode.
+      auto outcome = v2_state.eval(v2_view, pd, v2_opts);
+      dr_overlay::ShadowDump::RecordV2LoopProposal(
+          v2_net_id,
+          in.route_box,
+          static_cast<std::int32_t>(in.layer),
+          outcome.legality.legal,
+          static_cast<std::uint8_t>(outcome.legality.source),
+          outcome.legality.commit_eligible,
+          outcome.score.has_value() ? outcome.score->delta_via_count
+                                    : 0);
+
+      v2_set.proposals.push_back(std::move(pd));
+    }
+
+    // V2.3.a — batch_eval against v2_view (real production
+    // geometry). V2.3.b — SelectBest applies the deterministic
+    // commit_eligible-then-score-then-DeltaId rule.
+    auto v2_batch = v2_state.batch_eval(v2_view, v2_set, v2_opts);
+    auto v2_sel = dr_re::SelectBest(v2_batch);
+
+    // V2.3.c — internal try_commit of the winner (if any). v2_state
+    // is per-call and its store is empty; this exercises the
+    // try_commit_with_opts path mechanics (snapshot validation,
+    // version bump, Apply) without touching production state.
+    // V2.4 wires real conflict-graph commit; this stub policy is
+    // never consulted in the single-Delta path.
+    class V23cShadowStubPolicy : public dr_re::ConflictPolicy
+    {
+     public:
+      std::vector<std::size_t> select(
+          const std::vector<dr_re::ScoredProposal>& scored,
+          const std::vector<std::pair<std::size_t, std::size_t>>&
+              edges) override
+      {
+        (void) scored;
+        (void) edges;
+        return {};
+      }
+      dr_re::PolicyKind kind() const noexcept override
+      {
+        return dr_re::PolicyKind::GreedyPriority;
+      }
+    };
+    if (v2_sel.has_winner) {
+      std::vector<dr_re::ProposedDelta> commit_set;
+      for (const auto& pd : v2_set.proposals) {
+        if (pd.id == v2_sel.winner_id) {
+          commit_set.push_back(pd);
+          break;
+        }
+      }
+      V23cShadowStubPolicy v2_policy;
+      auto v2_snap = v2_state.snapshot();
+      (void) v2_state.try_commit_with_opts(
+          v2_snap, std::move(commit_set), v2_policy, v2_opts);
+    }
+
+    // V2.3.b.dump — one row per batch. seqno=0 → BatchSummaryDump
+    // assigns a process-wide seqno at write time.
+    auto v2_row = dr_re::MakeBatchSummaryRow(
+        v2_batch, v2_sel, v2_net_id, /*seqno=*/0);
+    dr_re::BatchSummaryDump::Record(v2_row);
   }
 #endif
   frOrderedIdSet<drPin*> unConnPins;
