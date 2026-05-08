@@ -13,6 +13,7 @@
 #include "redesign/EvalOutcome.h"
 #include "redesign/Footprint.h"
 #include "redesign/LegalityVerdict.h"
+#include "redesign/BatchSummaryDump.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
@@ -2351,6 +2352,200 @@ bool TestSelectBestDeterministicAcrossInputPermutations()
   return true;
 }
 
+// ===== V2.3.b.dump — BatchSummaryDump =====
+
+bool TestBatchSummaryRowFromMixedBatch()
+{
+  // Build the same mixed-batch as
+  // TestSelectBestClassifiesRejectionReasonsAcrossKinds and verify
+  // MakeBatchSummaryRow populates the per-reason counters and the
+  // winner fields correctly.
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 50, 5, 2, 100, 12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 0}, 1000, 0, 2000, 5, 2));  // win
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 1}, 20, 0, 30, 5, 2));  // illegal
+  r::DeleteWire del;
+  del.segment_id = 9;
+  r::ProposedDelta p3;
+  p3.delta = del;
+  p3.id = r::DeltaId{1, 0, 2};
+  set.proposals.push_back(p3);  // unresolved
+  r::MoveCell mv;
+  r::ProposedDelta p4;
+  p4.delta = mv;
+  p4.id = r::DeltaId{1, 0, 3};
+  set.proposals.push_back(p4);  // unsupported
+  set.proposals.push_back(
+      MakeProposalAddWire(r::DeltaId{1, 0, 4}, 3000, 0, 3010, 5, 2));  // lower
+
+  auto batch = state.batch_eval(base, set, opts);
+  auto sel = r::SelectBest(batch);
+
+  const std::uint64_t kNetId = 42;
+  const std::uint64_t kSeqno = 7;
+  auto row = r::MakeBatchSummaryRow(batch, sel, kNetId, kSeqno);
+
+  if (row.net_id != kNetId || row.seqno != kSeqno
+      || row.batch_size != 5u) {
+    return false;
+  }
+  if (!row.has_winner || !(row.winner_delta_id == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  // Expect commit_eligible_count == 2 (winner + the LowerScore loser).
+  if (row.num_commit_eligible != 2u) {
+    return false;
+  }
+  if (row.num_illegal != 1u || row.num_unresolved != 1u
+      || row.num_unsupported != 1u || row.num_lower_score != 1u
+      || row.num_conflict != 0u) {
+    return false;
+  }
+  // Winner score should be > 0 (Manhattan length proxy for a 1000-unit
+  // wire).
+  return row.winner_score > 0.0;
+}
+
+bool TestBatchSummaryRowEmptyBatchHasNoWinner()
+{
+  r::BatchEvalResult empty;
+  r::SelectionResult sel = r::SelectBest(empty);
+  auto row = r::MakeBatchSummaryRow(empty, sel, /*net_id=*/0,
+                                    /*seqno=*/1);
+  return !row.has_winner && row.batch_size == 0u
+         && row.num_commit_eligible == 0u && row.num_illegal == 0u
+         && row.num_lower_score == 0u && row.num_conflict == 0u
+         && row.EncodeWinnerDeltaId().empty();
+}
+
+bool TestBatchSummaryRowEncodeWinnerDeltaId()
+{
+  r::BatchSummaryRow row;
+  row.has_winner = true;
+  row.winner_delta_id = r::DeltaId{3, 7, 11};
+  return row.EncodeWinnerDeltaId() == "3:7:11";
+}
+
+bool TestBatchSummaryDumpCountersUpdateWithoutEnv()
+{
+  // Counters update regardless of env-var enable.
+  r::BatchSummaryDump::ResetForTest();
+  r::BatchSummaryRow row;
+  row.batch_size = 4;
+  row.has_winner = true;
+  row.num_illegal = 1;
+  row.num_unresolved = 1;
+  row.num_lower_score = 1;
+  r::BatchSummaryDump::Record(row);
+
+  if (r::BatchSummaryDump::batch_count() != 1u) {
+    return false;
+  }
+  if (r::BatchSummaryDump::batches_with_winner() != 1u) {
+    return false;
+  }
+  if (r::BatchSummaryDump::total_proposals() != 4u) {
+    return false;
+  }
+  if (r::BatchSummaryDump::total_rejection_count_for(
+          r::RejectionReason::Illegal)
+      != 1u) {
+    return false;
+  }
+  if (r::BatchSummaryDump::total_rejection_count_for(
+          r::RejectionReason::LowerScore)
+      != 1u) {
+    return false;
+  }
+  return true;
+}
+
+bool TestBatchSummaryDumpEnabledWritesHeaderAndRow()
+{
+  r::BatchSummaryDump::ResetForTest();
+
+  // Direct a unique path so concurrent test runs don't collide.
+  std::ostringstream path_os;
+  path_os << "/tmp/openroad-redesign-batch-test/" << ::getpid()
+          << "_summary.csv";
+  const std::string path = path_os.str();
+  std::remove(path.c_str());
+
+  ::setenv("OPENROAD_REDESIGN_BATCH_DUMP", "1", /*overwrite=*/1);
+  ::setenv("OPENROAD_REDESIGN_BATCH_DUMP_PATH", path.c_str(),
+           /*overwrite=*/1);
+
+  r::BatchSummaryRow row;
+  row.seqno = 99;
+  row.net_id = 12345;
+  row.batch_size = 3;
+  row.has_winner = true;
+  row.winner_delta_id = r::DeltaId{1, 2, 3};
+  row.winner_score = 42.0;
+  row.num_commit_eligible = 2;
+  row.num_lower_score = 1;
+  r::BatchSummaryDump::Record(row);
+
+  // Read back.
+  std::ifstream f(path);
+  if (!f.is_open()) {
+    ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP");
+    ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP_PATH");
+    return false;
+  }
+  std::string header;
+  std::getline(f, header);
+  std::string data;
+  std::getline(f, data);
+  f.close();
+  ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP");
+  ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP_PATH");
+  std::remove(path.c_str());
+  r::BatchSummaryDump::ResetForTest();
+
+  // Header must contain the exact column names from the schema.
+  if (header.find("pid") == std::string::npos
+      || header.find("net_id") == std::string::npos
+      || header.find("winner_delta_id") == std::string::npos
+      || header.find("num_conflict") == std::string::npos) {
+    return false;
+  }
+  // Data row must contain net_id, encoded winner DeltaId, and the
+  // explicit per-reason columns.
+  return data.find(",12345,") != std::string::npos
+         && data.find(",1:2:3,") != std::string::npos
+         && data.find(",42") != std::string::npos;
+}
+
+bool TestBatchSummaryDumpBadPathDoesNotThrow()
+{
+  r::BatchSummaryDump::ResetForTest();
+  ::setenv("OPENROAD_REDESIGN_BATCH_DUMP", "1", /*overwrite=*/1);
+  ::setenv("OPENROAD_REDESIGN_BATCH_DUMP_PATH",
+           "/etc/hostname/never_writable_subdir/dump.csv",
+           /*overwrite=*/1);
+  bool threw = false;
+  try {
+    r::BatchSummaryRow row;
+    row.batch_size = 1;
+    r::BatchSummaryDump::Record(row);
+  } catch (...) {
+    threw = true;
+  }
+  ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP");
+  ::unsetenv("OPENROAD_REDESIGN_BATCH_DUMP_PATH");
+  r::BatchSummaryDump::ResetForTest();
+  return !threw;
+}
+
 // V2.3.b — Conflict reason is reserved (V2.4 will emit it). Verify
 // the enum value exists and is distinct from every other reason so
 // downstream call sites (shadow dump column, log readers) can lock
@@ -2580,6 +2775,18 @@ int main()
        TestSelectBestClassifiesRejectionReasonsAcrossKinds},
       {"V2.3.b SelectBest deterministic across input permutations",
        TestSelectBestDeterministicAcrossInputPermutations},
+      {"V2.3.b.dump BatchSummaryRow from mixed batch is correct",
+       TestBatchSummaryRowFromMixedBatch},
+      {"V2.3.b.dump BatchSummaryRow on empty batch has no winner",
+       TestBatchSummaryRowEmptyBatchHasNoWinner},
+      {"V2.3.b.dump EncodeWinnerDeltaId formats region:proposer:attempt",
+       TestBatchSummaryRowEncodeWinnerDeltaId},
+      {"V2.3.b.dump counters update without env var",
+       TestBatchSummaryDumpCountersUpdateWithoutEnv},
+      {"V2.3.b.dump enabled writes header + row",
+       TestBatchSummaryDumpEnabledWritesHeaderAndRow},
+      {"V2.3.b.dump bad path is best-effort, never throws",
+       TestBatchSummaryDumpBadPathDoesNotThrow},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

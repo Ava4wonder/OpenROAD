@@ -125,6 +125,7 @@ target_link_libraries(drt_lib
 if(ENABLE_DRT_REDESIGN)
   target_sources(drt_lib
     PRIVATE
+      src/redesign/BatchSummaryDump.cpp
       src/redesign/Footprint.cpp
       src/redesign/PhysicalState.cpp
       src/redesign/Selection.cpp
