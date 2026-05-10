@@ -14,6 +14,7 @@
 #include "redesign/Footprint.h"
 #include "redesign/LegalityVerdict.h"
 #include "redesign/BatchSummaryDump.h"
+#include "redesign/ConflictGraph.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
@@ -2546,6 +2547,184 @@ bool TestBatchSummaryDumpBadPathDoesNotThrow()
   return !threw;
 }
 
+// ===== V2.4.a — ConflictGraph =====
+
+namespace {
+
+// Build a ProposedDelta around an AddWire whose write_footprint is
+// derived from the AddWire bbox + layer (sound, unknown=false). Used
+// to drive geometry-conflict tests with controlled overlap patterns.
+r::ProposedDelta MakeProposalAddWireWithFootprint(const r::DeltaId& id,
+                                                  int x1, int y1,
+                                                  int x2, int y2,
+                                                  r::LayerNum layer)
+{
+  auto pd = MakeProposalAddWire(id, x1, y1, x2, y2, layer);
+  pd.write_footprint = r::WriteFootprint::Of(pd.delta);
+  return pd;
+}
+
+}  // namespace
+
+bool TestConflictGraphEmptySetIsEmpty()
+{
+  r::ProposalSet set;
+  auto g = r::BuildConflictGraph(set);
+  return g.node_ids.empty() && g.edges.empty();
+}
+
+bool TestConflictGraphSingleProposalHasNoEdges()
+{
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  auto g = r::BuildConflictGraph(set);
+  return g.node_ids.size() == 1u && g.edges.empty();
+}
+
+bool TestConflictGraphDisjointProposalsHaveNoEdges()
+{
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 1000, 0, 1100, 5, 2));
+  auto g = r::BuildConflictGraph(set);
+  return g.node_ids.size() == 2u && g.edges.empty();
+}
+
+bool TestConflictGraphOverlappingSameLayerHasOneEdge()
+{
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 2));  // overlaps in [50,100]
+  auto g = r::BuildConflictGraph(set);
+  if (g.edges.size() != 1u) {
+    return false;
+  }
+  return g.edges[0].a == 0u && g.edges[0].b == 1u
+         && g.edges[0].kind == r::ConflictKind::Geometry;
+}
+
+bool TestConflictGraphOverlappingDifferentLayerHasNoEdge()
+{
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));  // layer 2
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 3));  // layer 3, same bbox region
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.empty();
+}
+
+bool TestConflictGraphTouchingEdgesCount()
+{
+  // Mirror SyntheticOracle::BboxOverlap convention — touching counts.
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 100, 0, 200, 5, 2));  // shares x=100 edge
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.size() == 1u
+         && g.edges[0].kind == r::ConflictKind::Geometry;
+}
+
+bool TestConflictGraphUnknownFootprintConflictsWithEverything()
+{
+  // SAFETY INVARIANT: write_footprint.unknown=true MUST conflict with
+  // every other proposal. MoveCell yields unknown=true.
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  // P1: legal AddWire far away — by itself no conflict with P0.
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 5000, 0, 5100, 5, 2));
+  // P2: MoveCell → write_footprint.unknown=true.
+  r::MoveCell mv;
+  r::ProposedDelta p2;
+  p2.delta = mv;
+  p2.id = r::DeltaId{1, 0, 2};
+  p2.write_footprint = r::WriteFootprint::Of(p2.delta);
+  set.proposals.push_back(p2);
+
+  auto g = r::BuildConflictGraph(set);
+  // P2 conflicts with P0 and P1 → 2 edges. P0/P1 do not conflict
+  // with each other → 0 edges. Total = 2.
+  if (g.edges.size() != 2u) {
+    return false;
+  }
+  // Edges are (a, b) sorted: (0, 2) before (1, 2).
+  return g.edges[0].a == 0u && g.edges[0].b == 2u
+         && g.edges[1].a == 1u && g.edges[1].b == 2u;
+}
+
+bool TestConflictGraphCompleteOverlapKEqualsFour()
+{
+  // The V2.3.c synthetic K=4 pattern: same bbox shrunk on ur.x.
+  // All four pairwise overlap on layer 2 → complete graph K_4 has
+  // C(4,2) = 6 edges.
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    set.proposals.push_back(MakeProposalAddWireWithFootprint(
+        r::DeltaId{1, 0, i}, 0, 0,
+        1000 - static_cast<int>(i), 5, 2));
+  }
+  auto g = r::BuildConflictGraph(set);
+  if (g.node_ids.size() != 4u || g.edges.size() != 6u) {
+    return false;
+  }
+  // Edges in (a, b) sorted order: (0,1)(0,2)(0,3)(1,2)(1,3)(2,3).
+  const std::pair<std::size_t, std::size_t> expected[] = {
+      {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+  for (std::size_t k = 0; k < 6; ++k) {
+    if (g.edges[k].a != expected[k].first
+        || g.edges[k].b != expected[k].second
+        || g.edges[k].kind != r::ConflictKind::Geometry) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestConflictGraphDeterministicAcrossRebuilds()
+{
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 2}, 1000, 0, 1100, 5, 2));
+  auto g1 = r::BuildConflictGraph(set);
+  auto g2 = r::BuildConflictGraph(set);
+  if (g1.edges.size() != g2.edges.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < g1.edges.size(); ++i) {
+    if (!(g1.edges[i] == g2.edges[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
+// Lock in the encoding now so consumers (the BatchSummaryDump
+// num_conflict column, the future GreedyPriority MIS solver) don't
+// need renumbering when V2.4.b lights them up.
+static_assert(static_cast<int>(r::ConflictKind::Net)
+                  != static_cast<int>(r::ConflictKind::Geometry),
+              "Net must be a distinct ConflictKind value");
+static_assert(static_cast<int>(r::ConflictKind::ReadWrite)
+                  != static_cast<int>(r::ConflictKind::Geometry),
+              "ReadWrite must be a distinct ConflictKind value");
+static_assert(static_cast<int>(r::ConflictKind::ReadWrite)
+                  != static_cast<int>(r::ConflictKind::Net),
+              "ReadWrite must be a distinct ConflictKind value");
+
 // V2.3.b — Conflict reason is reserved (V2.4 will emit it). Verify
 // the enum value exists and is distinct from every other reason so
 // downstream call sites (shadow dump column, log readers) can lock
@@ -2787,6 +2966,24 @@ int main()
        TestBatchSummaryDumpEnabledWritesHeaderAndRow},
       {"V2.3.b.dump bad path is best-effort, never throws",
        TestBatchSummaryDumpBadPathDoesNotThrow},
+      {"V2.4.a ConflictGraph empty set -> empty graph",
+       TestConflictGraphEmptySetIsEmpty},
+      {"V2.4.a ConflictGraph single proposal -> 0 edges",
+       TestConflictGraphSingleProposalHasNoEdges},
+      {"V2.4.a ConflictGraph disjoint proposals -> 0 edges",
+       TestConflictGraphDisjointProposalsHaveNoEdges},
+      {"V2.4.a ConflictGraph overlapping same-layer -> 1 Geometry edge",
+       TestConflictGraphOverlappingSameLayerHasOneEdge},
+      {"V2.4.a ConflictGraph overlapping different-layer -> 0 edges",
+       TestConflictGraphOverlappingDifferentLayerHasNoEdge},
+      {"V2.4.a ConflictGraph touching edges count as overlap",
+       TestConflictGraphTouchingEdgesCount},
+      {"V2.4.a ConflictGraph unknown footprint conflicts with everything",
+       TestConflictGraphUnknownFootprintConflictsWithEverything},
+      {"V2.4.a ConflictGraph K=4 mutual overlap -> 6 edges (complete)",
+       TestConflictGraphCompleteOverlapKEqualsFour},
+      {"V2.4.a ConflictGraph deterministic across rebuilds",
+       TestConflictGraphDeterministicAcrossRebuilds},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
