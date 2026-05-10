@@ -3768,17 +3768,54 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // originals are destroyed; we need to remove them from
         // the spatial index AND add the clones, otherwise the
         // next net's gcWorker_->main() iterates stale pointers.
+        //
+        // V2.6.f.2 — extend to FULL state teardown+rebuild via
+        // subPathCost + modEolCosts_poly + addPathCost. Mirrors
+        // route_queue_main's pre-route teardown (lines 1930-1935)
+        // and routeNet's post-route rebuild
+        // (routeNet_postRouteAddPathCost + line 1988
+        // modEolCosts_poly addRouteShape). Foundation for
+        // V2.6.f.5's K-bias re-route — between teardown and
+        // rebuild we'd run alternative searches; for V2.6.f.2 we
+        // only do teardown→rebuild without re-route, so hash
+        // remains byte-identical (clones have identical content;
+        // subPathCost then addPathCost on equal shapes is
+        // net-zero on the gridGraph cost map).
         auto& worker_rq = getWorkerRegionQuery();
+        drt::gcNet* gc_net = (gcWorker_ != nullptr)
+            ? gcWorker_->getNet(net->getFrNet())
+            : nullptr;
+        // (1) UNDO original contributions: subPathCost + WRQ.remove
+        //     + modEolCosts_poly(subRouteShape).
         for (const auto& orig : conn_figs) {
           if (orig != nullptr) {
+            subPathCost(orig.get(), /*modEol=*/false,
+                        /*modCutSpc=*/true);
             worker_rq.remove(orig.get());
           }
         }
+        if (gc_net != nullptr) {
+          modEolCosts_poly(gc_net, ModCostType::subRouteShape);
+        }
+        // (2) Clear + addRoute clones.
         net->clearRouteConnFigs();
         for (auto& c : clones) {
           drt::drConnFig* added_ptr = c.get();
           net->addRoute(std::move(c), /*isExt=*/false);
           worker_rq.add(added_ptr);
+        }
+        // (3) ADD clones' contributions: addPathCost +
+        //     modEolCosts_poly(addRouteShape). Walks the just-
+        //     installed routeConnFigs because the unique_ptrs
+        //     in `clones` were moved into the drNet.
+        for (const auto& uConnFig : net->getRouteConnFigs()) {
+          if (uConnFig != nullptr) {
+            addPathCost(uConnFig.get(), /*modEol=*/false,
+                        /*modCutSpc=*/true);
+          }
+        }
+        if (gc_net != nullptr) {
+          modEolCosts_poly(gc_net, ModCostType::addRouteShape);
         }
         // V2.6.c crash fix — gcWorker_'s gcNet holds non-owning
         // pointers into drNet::routeConnFigs_. After clear+addRoute
