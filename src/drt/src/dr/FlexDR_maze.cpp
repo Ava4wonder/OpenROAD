@@ -3606,6 +3606,70 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         sp.adapter_unsupported = false;
         dr_re::ProposalStaging::Instance().Stage(std::move(sp));
       }
+
+      // V2.6.c — α-style mutation. When the
+      // OPENROAD_DRT_REDESIGN_DRIVE_REPLACE env var is set,
+      // physically clone each drConnFig in net->getRouteConnFigs()
+      // and replace the originals with the clones. Content is
+      // identical (the clones come from the drPathSeg / drVia /
+      // drPatchWire copy constructors), so hash equality vs
+      // baseline is preserved by construction. This exercises
+      // the full mutation path:
+      //   * drNet::clearRouteConnFigs() (destroys the originals)
+      //   * drNet::addRoute() per clone
+      //   * worker->end() commits the clones to frBlock
+      //
+      // V2.6.c PROOF OF CONCEPT — content-preserving replacement
+      // only. V2.6.d will swap in V2-modified content (which
+      // breaks hash equality intentionally and triggers the full
+      // quality-gate suite). For V2.6.c, the goal is to validate
+      // the mutation pipeline without the additional risk of
+      // changing routes.
+      const char* replace_env
+          = std::getenv("OPENROAD_DRT_REDESIGN_DRIVE_REPLACE");
+      const bool replace_enabled
+          = replace_env != nullptr && replace_env[0] != '\0'
+            && replace_env[0] != '0';
+      if (replace_enabled) {
+        std::vector<std::unique_ptr<drt::drConnFig>> clones;
+        clones.reserve(conn_figs.size());
+        for (const auto& cf_uptr : conn_figs) {
+          const drt::drBlockObject* cf = cf_uptr.get();
+          if (cf == nullptr) {
+            continue;
+          }
+          const auto kind = cf->typeId();
+          std::unique_ptr<drt::drConnFig> clone;
+          if (kind == drt::drcPathSeg) {
+            const auto* seg = static_cast<const drt::drPathSeg*>(cf);
+            clone = std::make_unique<drt::drPathSeg>(*seg);
+          } else if (kind == drt::drcVia) {
+            const auto* via = static_cast<const drt::drVia*>(cf);
+            clone = std::make_unique<drt::drVia>(*via);
+          } else if (kind == drt::drcPatchWire) {
+            const auto* pw = static_cast<const drt::drPatchWire*>(cf);
+            clone = std::make_unique<drt::drPatchWire>(*pw);
+          } else {
+            continue;
+          }
+          clones.push_back(std::move(clone));
+        }
+        net->clearRouteConnFigs();
+        for (auto& c : clones) {
+          net->addRoute(std::move(c), /*isExt=*/false);
+        }
+        // V2.6.c crash fix — gcWorker_'s gcNet holds non-owning
+        // pointers into drNet::routeConnFigs_. After clear+addRoute
+        // those pointers dangle. Re-sync gcWorker_'s view with the
+        // new clones using the SAME chain upstream uses in the
+        // CLEAN_PATCHES block above:
+        //   setTargetNet → updateDRNet → updateGCWorker
+        if (gcWorker_ != nullptr) {
+          gcWorker_->setTargetNet(net->getFrNet());
+          gcWorker_->updateDRNet(net);
+          gcWorker_->updateGCWorker();
+        }
+      }
     }
 #endif
   }
