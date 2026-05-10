@@ -3761,9 +3761,24 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           }
           clones.push_back(std::move(clone));
         }
+        // V2.6.e — workerRegionQuery holds pointers to the
+        // originals at this point (line 1932 removed THIS net's
+        // routeConnFigs before routeNet, but they were re-added
+        // during routeNet's own work). After clear+addRoute the
+        // originals are destroyed; we need to remove them from
+        // the spatial index AND add the clones, otherwise the
+        // next net's gcWorker_->main() iterates stale pointers.
+        auto& worker_rq = getWorkerRegionQuery();
+        for (const auto& orig : conn_figs) {
+          if (orig != nullptr) {
+            worker_rq.remove(orig.get());
+          }
+        }
         net->clearRouteConnFigs();
         for (auto& c : clones) {
+          drt::drConnFig* added_ptr = c.get();
           net->addRoute(std::move(c), /*isExt=*/false);
+          worker_rq.add(added_ptr);
         }
         // V2.6.c crash fix — gcWorker_'s gcNet holds non-owning
         // pointers into drNet::routeConnFigs_. After clear+addRoute
@@ -3771,10 +3786,29 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // new clones using the SAME chain upstream uses in the
         // CLEAN_PATCHES block above:
         //   setTargetNet → updateDRNet → updateGCWorker
+        //
+        // V2.6.e — at DRIVE_N>1 the V2.6.c chain alone wasn't
+        // enough: the SECOND admit's `gcWorker_->main()` later
+        // crashed in patchMetalShape_cornerSpacing because
+        // gcWorker_'s pWires_ queue (drPatchWire instances queued
+        // up by V2.6.c's updateGCWorker for net A) outlived net A
+        // and dangled when net B's main() iterated them.
+        //   Adding clearPWires() + resetTargetNet() after the
+        // refresh discards the per-net patch queue + per-net
+        // target so net B starts from a clean slate.
         if (gcWorker_ != nullptr) {
+          // V2.6.e — minimal refresh chain. Just rebuild gcNet
+          // for this net via setTargetNet+updateDRNet so the
+          // gcNet's pin shapes point at the clones, but skip
+          // updateGCWorker (which queues patches and produces
+          // markers — those persist across routeNet calls and
+          // dangle when the next net's main() iterates them).
+          // The next net's normal CLEAN_PATCHES / route_queue
+          // gcWorker chain runs updateGCWorker fresh on its own
+          // target.
           gcWorker_->setTargetNet(net->getFrNet());
           gcWorker_->updateDRNet(net);
-          gcWorker_->updateGCWorker();
+          gcWorker_->resetTargetNet();
         }
       }
     }
