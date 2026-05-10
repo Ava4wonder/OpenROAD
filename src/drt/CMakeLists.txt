@@ -128,6 +128,7 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/BatchSummaryDump.cpp
       src/redesign/ConflictGraph.cpp
       src/redesign/Footprint.cpp
+      src/redesign/GreedyPriorityPolicy.cpp
       src/redesign/PhysicalState.cpp
       src/redesign/Selection.cpp
       src/redesign/simd/Geom.cpp

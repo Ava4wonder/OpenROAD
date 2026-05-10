@@ -15,6 +15,7 @@
 #include "redesign/LegalityVerdict.h"
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/ConflictGraph.h"
+#include "redesign/GreedyPriorityPolicy.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
@@ -2890,6 +2891,168 @@ bool TestProposerSetsProposalNetId()
   return pd.proposal_net_id == 4242u;
 }
 
+// ===== V2.4.c — GreedyPriorityPolicy =====
+
+namespace {
+
+// Helper: assemble a ScoredProposal vector inline from
+// (DeltaId, aggregate-score) pairs. Other Score fields are zeroed —
+// the policy only consumes Score::aggregate.
+std::vector<r::ScoredProposal> MakeScored(
+    std::initializer_list<std::pair<r::DeltaId, double>> entries)
+{
+  std::vector<r::ScoredProposal> out;
+  out.reserve(entries.size());
+  for (const auto& e : entries) {
+    r::ScoredProposal sp;
+    sp.proposal.id = e.first;
+    sp.legality.legal = true;
+    sp.legality.commit_eligible = true;
+    sp.score.aggregate = e.second;
+    out.push_back(sp);
+  }
+  return out;
+}
+
+}  // namespace
+
+bool TestGreedyEmptyInputReturnsEmpty()
+{
+  r::GreedyPriorityPolicy p;
+  auto sel = p.select({}, {});
+  return sel.empty();
+}
+
+bool TestGreedySingleProposalNoEdgesIsSelected()
+{
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 100.0}});
+  auto sel = p.select(scored, {});
+  return sel.size() == 1u && sel[0] == 0u;
+}
+
+bool TestGreedyTwoIndependentBothSelected()
+{
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 100.0},
+                            {r::DeltaId{1, 0, 1}, 50.0}});
+  auto sel = p.select(scored, {});
+  return sel.size() == 2u && sel[0] == 0u && sel[1] == 1u;
+}
+
+bool TestGreedyOneEdgeHigherScoreWins()
+{
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 50.0},
+                            {r::DeltaId{1, 0, 1}, 100.0}});
+  // Edge between (0, 1) → only one survives; index 1 has higher
+  // score and wins.
+  auto sel = p.select(scored, {{0, 1}});
+  return sel.size() == 1u && sel[0] == 1u;
+}
+
+bool TestGreedyEqualScoreLowerDeltaIdWins()
+{
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{2, 0, 0}, 50.0},
+                            {r::DeltaId{1, 0, 0}, 50.0}});
+  // Both score=50. Edge (0,1) → only one wins; tie broken by
+  // ascending DeltaId. DeltaId{1,0,0} < {2,0,0}, so index 1 wins.
+  auto sel = p.select(scored, {{0, 1}});
+  return sel.size() == 1u && sel[0] == 1u;
+}
+
+bool TestGreedyChainPicksEnds()
+{
+  // A-B-C chain (edges (0,1) and (1,2)). Equal scores. Greedy picks
+  // by priority order; equal scores break by DeltaId. With
+  // DeltaIds {1,0,0}, {1,0,1}, {1,0,2} the priority order is
+  // 0, 1, 2. Greedy admits 0, blocks 1 (edge to 0), admits 2 (no
+  // edge to remaining selected = {0}).
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 10.0},
+                            {r::DeltaId{1, 0, 1}, 10.0},
+                            {r::DeltaId{1, 0, 2}, 10.0}});
+  auto sel = p.select(scored, {{0, 1}, {1, 2}});
+  return sel.size() == 2u && sel[0] == 0u && sel[1] == 2u;
+}
+
+bool TestGreedyHighScoreMiddleAlwaysAdmitted()
+{
+  // Same chain, but the middle node has the highest score. Greedy
+  // admits the middle first, blocks both ends.
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 1.0},
+                            {r::DeltaId{1, 0, 1}, 100.0},
+                            {r::DeltaId{1, 0, 2}, 1.0}});
+  auto sel = p.select(scored, {{0, 1}, {1, 2}});
+  return sel.size() == 1u && sel[0] == 1u;
+}
+
+bool TestGreedyDeterministicAcrossEdgePermutations()
+{
+  // Same scored vector; edge list given in two different
+  // orderings. Output must match.
+  r::GreedyPriorityPolicy p;
+  auto scored = MakeScored({{r::DeltaId{1, 0, 0}, 30.0},
+                            {r::DeltaId{1, 0, 1}, 50.0},
+                            {r::DeltaId{1, 0, 2}, 40.0},
+                            {r::DeltaId{1, 0, 3}, 10.0}});
+  auto sel1 = p.select(scored, {{0, 1}, {1, 2}, {2, 3}});
+  auto sel2 = p.select(scored, {{2, 3}, {0, 1}, {1, 2}});
+  // Deterministic regardless of edge-list permutation.
+  return sel1 == sel2;
+}
+
+bool TestGreedyMakeEdgeListFromConflictGraph()
+{
+  // Round-trip: ConflictGraph → MakeEdgeList → vector<pair> with
+  // the same edges in the same canonical order.
+  r::ProposalSet set;
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 2));
+  set.proposals.push_back(MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 2}, 1000, 0, 1100, 5, 2));
+  auto g = r::BuildConflictGraph(set);
+  auto edges = r::MakeEdgeList(g);
+  return edges.size() == 1u && edges[0].first == 0u
+         && edges[0].second == 1u;
+}
+
+bool TestGreedyEndToEndConflictGraphPlusSolver()
+{
+  // Full V2.4.a→b→c chain: build proposals with overlapping
+  // bboxes, build ConflictGraph, flatten to edges, run greedy.
+  // K=4 mutual overlap + descending scores. Greedy admits proposal
+  // 0 (highest score), blocks all the others (complete graph).
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    set.proposals.push_back(MakeProposalAddWireWithFootprint(
+        r::DeltaId{1, 0, i}, 0, 0,
+        1000 - static_cast<int>(i), 5, 2));
+  }
+  auto g = r::BuildConflictGraph(set);
+  auto edges = r::MakeEdgeList(g);
+
+  // Score by aggregate = wirelength. Index 0 is widest (1000) so
+  // highest aggregate.
+  std::vector<r::ScoredProposal> scored;
+  for (std::size_t i = 0; i < set.proposals.size(); ++i) {
+    r::ScoredProposal sp;
+    sp.proposal = set.proposals[i];
+    sp.legality.legal = true;
+    sp.legality.commit_eligible = true;
+    sp.score.aggregate = 1000.0 - static_cast<double>(i);
+    scored.push_back(sp);
+  }
+  r::GreedyPriorityPolicy p;
+  auto sel = p.select(scored, edges);
+  return sel.size() == 1u && sel[0] == 0u
+         && p.kind() == r::PolicyKind::GreedyPriority;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3179,6 +3342,26 @@ int main()
        TestConflictGraphMixedThreeKindsInOneBatch},
       {"V2.4.b MazeSearchProposer propagates net_id to proposal_net_id",
        TestProposerSetsProposalNetId},
+      {"V2.4.c GreedyPriority empty input -> empty selection",
+       TestGreedyEmptyInputReturnsEmpty},
+      {"V2.4.c GreedyPriority single proposal no edges -> selected",
+       TestGreedySingleProposalNoEdgesIsSelected},
+      {"V2.4.c GreedyPriority two independent -> both selected",
+       TestGreedyTwoIndependentBothSelected},
+      {"V2.4.c GreedyPriority one edge higher score wins",
+       TestGreedyOneEdgeHigherScoreWins},
+      {"V2.4.c GreedyPriority equal score lower DeltaId wins",
+       TestGreedyEqualScoreLowerDeltaIdWins},
+      {"V2.4.c GreedyPriority chain picks endpoints",
+       TestGreedyChainPicksEnds},
+      {"V2.4.c GreedyPriority high-score middle blocks both ends",
+       TestGreedyHighScoreMiddleAlwaysAdmitted},
+      {"V2.4.c GreedyPriority deterministic across edge permutations",
+       TestGreedyDeterministicAcrossEdgePermutations},
+      {"V2.4.c MakeEdgeList round-trips ConflictGraph",
+       TestGreedyMakeEdgeListFromConflictGraph},
+      {"V2.4.c End-to-end ConflictGraph + GreedyPriority on K=4 complete",
+       TestGreedyEndToEndConflictGraphPlusSolver},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
