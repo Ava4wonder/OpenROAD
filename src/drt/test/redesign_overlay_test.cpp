@@ -22,6 +22,7 @@
 #include "redesign/Selection.h"
 #include "redesign/CongestionTimingProvider.h"
 #include "redesign/DriveGate.h"
+#include "redesign/MazeBiasOverride.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/Predicates.h"
 #include "redesign/overlay/GeometryView.h"
@@ -4403,6 +4404,119 @@ bool TestPerturbationWithEmptyRoute()
          && kvars[1].empty() && kvars[2].empty();
 }
 
+// ===== V2.6.f.1 — MazeBiasOverride =====
+
+namespace {
+
+// Mock satisfying the gridgraph surface MazeBiasOverride needs:
+//   getDRCCost / getMarkerCost / getFixedShapeCost (const)
+//   setCost(drc, marker, fixed_shape)
+struct MockGridGraph
+{
+  std::uint32_t drc = 32;
+  std::uint32_t marker = 32;
+  std::uint32_t fixed_shape = 8;
+  std::uint32_t getDRCCost() const { return drc; }
+  std::uint32_t getMarkerCost() const { return marker; }
+  std::uint32_t getFixedShapeCost() const { return fixed_shape; }
+  void setCost(std::uint32_t d, std::uint32_t m, std::uint32_t f)
+  {
+    drc = d;
+    marker = m;
+    fixed_shape = f;
+  }
+};
+
+}  // namespace
+
+bool TestMazeBiasOverrideAppliesAndRestores()
+{
+  MockGridGraph gg;
+  gg.drc = 32;
+  gg.marker = 32;
+  gg.fixed_shape = 8;
+  {
+    r::MazeBiasOverride<MockGridGraph> bias(gg, 64, 16, 4);
+    if (gg.drc != 64 || gg.marker != 16 || gg.fixed_shape != 4) {
+      return false;
+    }
+  }
+  // After scope exit: original values restored.
+  return gg.drc == 32 && gg.marker == 32 && gg.fixed_shape == 8;
+}
+
+bool TestMazeBiasOverrideSavedValuesAreReadable()
+{
+  MockGridGraph gg;
+  gg.drc = 100;
+  gg.marker = 50;
+  gg.fixed_shape = 25;
+  r::MazeBiasOverride<MockGridGraph> bias(gg, 1, 1, 1);
+  return bias.saved_drc() == 100u && bias.saved_marker() == 50u
+         && bias.saved_fixed_shape() == 25u;
+}
+
+bool TestMazeBiasOverrideNestedScopesRestoreInOrder()
+{
+  // Outer: bias to (10, 20, 30). Inner: bias to (100, 200, 300).
+  // After inner falls out of scope, gg should read (10, 20, 30)
+  // — the OUTER scope's value, not the original.
+  MockGridGraph gg;
+  gg.drc = 1;
+  gg.marker = 2;
+  gg.fixed_shape = 3;
+  {
+    r::MazeBiasOverride<MockGridGraph> outer(gg, 10, 20, 30);
+    {
+      r::MazeBiasOverride<MockGridGraph> inner(gg, 100, 200, 300);
+      if (gg.drc != 100 || gg.marker != 200 || gg.fixed_shape != 300) {
+        return false;
+      }
+    }
+    if (gg.drc != 10 || gg.marker != 20 || gg.fixed_shape != 30) {
+      return false;
+    }
+  }
+  // Outer fell out → original restored.
+  return gg.drc == 1 && gg.marker == 2 && gg.fixed_shape == 3;
+}
+
+bool TestMazeBiasOverrideZeroBiasIsValid()
+{
+  // Setting bias to (0, 0, 0) is allowed — caller may want to
+  // disable certain cost contributions for a candidate.
+  MockGridGraph gg;
+  gg.drc = 32;
+  gg.marker = 32;
+  gg.fixed_shape = 8;
+  {
+    r::MazeBiasOverride<MockGridGraph> bias(gg, 0, 0, 0);
+    if (gg.drc != 0 || gg.marker != 0 || gg.fixed_shape != 0) {
+      return false;
+    }
+  }
+  return gg.drc == 32 && gg.marker == 32 && gg.fixed_shape == 8;
+}
+
+bool TestMazeBiasOverrideRestoreSurvivesExceptionInScope()
+{
+  // Destructors must run on stack-unwind even when an exception
+  // is thrown inside the bias scope.
+  MockGridGraph gg;
+  gg.drc = 32;
+  gg.marker = 32;
+  gg.fixed_shape = 8;
+  bool caught = false;
+  try {
+    r::MazeBiasOverride<MockGridGraph> bias(gg, 64, 16, 4);
+    throw std::runtime_error("test");
+  } catch (const std::runtime_error&) {
+    caught = true;
+  }
+  return caught && gg.drc == 32 && gg.marker == 32
+         && gg.fixed_shape == 8;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -4812,6 +4926,16 @@ int main()
        TestGenerateKPerturbationsK1IsIdentityOnly},
       {"V2.6.d.a Perturbation handles empty input route",
        TestPerturbationWithEmptyRoute},
+      {"V2.6.f.1 MazeBiasOverride applies bias and restores on scope exit",
+       TestMazeBiasOverrideAppliesAndRestores},
+      {"V2.6.f.1 MazeBiasOverride saved values are readable",
+       TestMazeBiasOverrideSavedValuesAreReadable},
+      {"V2.6.f.1 MazeBiasOverride nested scopes restore in order",
+       TestMazeBiasOverrideNestedScopesRestoreInOrder},
+      {"V2.6.f.1 MazeBiasOverride zero bias is valid",
+       TestMazeBiasOverrideZeroBiasIsValid},
+      {"V2.6.f.1 MazeBiasOverride restore survives exception in scope",
+       TestMazeBiasOverrideRestoreSurvivesExceptionInScope},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

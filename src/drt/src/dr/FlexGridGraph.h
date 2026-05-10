@@ -927,6 +927,13 @@ class FlexGridGraph
     ggMarkerCost_ = markerCostIn;
     ggFixedShapeCost_ = FixedShapeCostIn;
   }
+  // V2.6.f.1 — read accessors paired with setCost so RAII helpers
+  // (redesign::MazeBiasOverride) can save the current weights,
+  // apply a bias, and restore on scope exit. No behaviour change
+  // to upstream code — these are passive const reads.
+  frUInt4 getDRCCost() const { return ggDRCCost_; }
+  frUInt4 getMarkerCost() const { return ggMarkerCost_; }
+  frUInt4 getFixedShapeCost() const { return ggFixedShapeCost_; }
   frCoord getHalfViaEncArea(frMIdx z, bool isLayer1) const
   {
     return (isLayer1 ? (*halfViaEncArea_)[z].first
