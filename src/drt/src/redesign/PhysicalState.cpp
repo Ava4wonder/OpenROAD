@@ -246,10 +246,19 @@ EvalOutcome PhysicalState::eval(
       },
       delta.delta);
 
-  // V2.2.c.proj aggregate: simple sum. V2.2.c.score adds
-  // phase-dependent weighted aggregation.
+  // V2.5.a aggregate: cost-weighted sum with Khan-Rovinski-style
+  // 4-vector applied. Defaults of CostWeights{1,1,1,1} reduce this
+  // to V2.4's `wirelength + 100*via_count` because delta_history_cost
+  // and delta_marker_reduction are zero for today's synthetic
+  // proposals. V2.5.c will populate the congestion/timing terms;
+  // a future commit feeds CostWeights from the RL policy.
   score.aggregate
-      = score.delta_wirelength_proxy + 100.0 * score.delta_via_count;
+      = score.delta_wirelength_proxy
+        + 100.0 * score.delta_via_count
+              * opts.cost_weights.fixed_shape
+        + opts.cost_weights.drc * score.delta_history_cost
+        - opts.cost_weights.marker
+              * static_cast<double>(score.delta_marker_reduction);
 
   outcome.score = score;
   return outcome;

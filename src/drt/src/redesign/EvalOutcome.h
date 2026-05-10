@@ -39,6 +39,32 @@ enum class LegalityMode : std::uint8_t {
                           // RuleDeck. Final form.
 };
 
+// V2.5.a — per-iteration cost-weight 4-vector. Names + semantics
+// match Khan-Rovinski (DATE 2026, NYU) so that when their offline
+// CQL policy is open-sourced, integration is a hookup not a
+// rewrite. The policy outputs (drcCost, markerCost, fixedShapeCost,
+// markerDecay) per iteration; this struct is the receiving slot.
+//
+// Defaults are all 1.0 so that an EvalOptions value built without
+// explicit cost weights produces aggregate scores byte-identical
+// to V2.4 behaviour (drc/marker fields are zero today, fixed_shape
+// multiplies the existing 100×via_count term).
+//
+// V2.5.a SCOPE — seam only. The aggregate formula in
+// PhysicalState::eval consumes these weights, but no RL policy is
+// wired here. V2.5.c populates the per-net congestion/timing
+// score terms; a future commit lands the Khan-Rovinski LibTorch
+// hook at the iteration boundary.
+struct CostWeights
+{
+  double drc = 1.0;          // multiplier on history-cost term
+  double marker = 1.0;       // multiplier on marker-reduction term
+  double fixed_shape = 1.0;  // multiplier on the via-count cost term
+  double marker_decay = 1.0; // exponential decay applied per iteration
+                             // by the future RL policy; eval treats
+                             // it as a passthrough today.
+};
+
 struct EvalOptions
 {
   // Compute Score even if LegalityVerdict::legal == false. Used for
@@ -51,6 +77,11 @@ struct EvalOptions
   // stub source so V2.2.c.proj behaviour is preserved when eval is
   // called without explicit options.
   LegalityMode legality_mode = LegalityMode::StubAssumeLegal;
+
+  // V2.5.a — cost-weight 4-vector; defaults preserve V2.4
+  // behaviour. Set non-default values to bias the score aggregate
+  // (e.g., from a Khan-Rovinski-style RL policy).
+  CostWeights cost_weights{};
 };
 
 struct EvalOutcome

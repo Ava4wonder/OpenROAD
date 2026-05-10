@@ -3509,6 +3509,104 @@ bool TestCrossWorkerRowFeedsBatchSummaryDumpCorrectly()
                 == 1u;
 }
 
+// ===== V2.5.a — EvalOptions::CostWeights seam =====
+
+bool TestCostWeightsDefaultsAreUnity()
+{
+  r::EvalOptions opts;
+  return opts.cost_weights.drc == 1.0
+         && opts.cost_weights.marker == 1.0
+         && opts.cost_weights.fixed_shape == 1.0
+         && opts.cost_weights.marker_decay == 1.0;
+}
+
+bool TestCostWeightsDefaultsPreserveV24Aggregate()
+{
+  // With default CostWeights{1,1,1,1} the aggregate must equal
+  // V2.4's wirelength + 100*via_count formula. Today's synthetic
+  // AddWire score has delta_history_cost=0 and
+  // delta_marker_reduction=0, so the new terms vanish at default
+  // weights and the aggregate is byte-identical to V2.4.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  // Default cost_weights.
+
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 1000, 5, 2);
+  auto out = state.eval(base, pd, opts);
+  if (!out.score.has_value()) {
+    return false;
+  }
+  // Wirelength proxy = max(dx, dy) of bbox = max(1000, 5) = 1000.
+  // delta_via_count = 0 for AddWire.
+  // Aggregate = 1000 + 100*0*1.0 + 1.0*0 - 1.0*0 = 1000.
+  return out.score->aggregate == 1000.0;
+}
+
+bool TestCostWeightsFixedShapeBiasesViaTerm()
+{
+  // AddVia gives delta_via_count = +1. With fixed_shape=2.0 the
+  // via term doubles → aggregate goes from 100 (default) to 200.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  opts.cost_weights.fixed_shape = 2.0;
+
+  r::AddVia av;
+  av.location = r::Point{500, 500};
+  av.via_def = nullptr;
+  r::ProposedDelta pd;
+  pd.delta = av;
+  pd.id = r::DeltaId{1, 0, 0};
+  pd.write_footprint = r::WriteFootprint::Of(pd.delta);
+
+  auto out = state.eval(base, pd, opts);
+  if (!out.score.has_value()) {
+    return false;
+  }
+  // delta_wirelength_proxy = 0 (AddVia adds no wire), delta_via_count
+  // = 1, fixed_shape = 2.0 → aggregate = 0 + 100 * 1 * 2.0 = 200.
+  return out.score->aggregate == 200.0;
+}
+
+bool TestCostWeightsCarriedThroughBatchEval()
+{
+  // batch_eval forwards the same EvalOptions to each per-proposal
+  // eval(). Verify that non-default weights affect every
+  // outcome's score.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts_default;
+  opts_default.legality_mode = r::LegalityMode::SyntheticOracle;
+  r::EvalOptions opts_biased;
+  opts_biased.legality_mode = r::LegalityMode::SyntheticOracle;
+  opts_biased.cost_weights.fixed_shape = 5.0;
+
+  r::ProposalSet set;
+  // Single proposal, AddVia, so the via term shows up.
+  r::AddVia av;
+  av.location = r::Point{500, 500};
+  av.via_def = nullptr;
+  r::ProposedDelta pd;
+  pd.delta = av;
+  pd.id = r::DeltaId{1, 0, 0};
+  pd.write_footprint = r::WriteFootprint::Of(pd.delta);
+  set.proposals.push_back(pd);
+
+  auto batch_default = state.batch_eval(base, set, opts_default);
+  auto batch_biased = state.batch_eval(base, set, opts_biased);
+
+  if (!batch_default.outcomes[0].score.has_value()
+      || !batch_biased.outcomes[0].score.has_value()) {
+    return false;
+  }
+  // Default = 100 (1 via × 100 × 1.0). Biased = 500 (1 via × 100 × 5.0).
+  return batch_default.outcomes[0].score->aggregate == 100.0
+         && batch_biased.outcomes[0].score->aggregate == 500.0;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3848,6 +3946,14 @@ int main()
        TestCrossWorkerRowAllDisjointZeroConflict},
       {"V2.4.f cross-worker row feeds BatchSummaryDump correctly",
        TestCrossWorkerRowFeedsBatchSummaryDumpCorrectly},
+      {"V2.5.a CostWeights defaults are 1.0 each",
+       TestCostWeightsDefaultsAreUnity},
+      {"V2.5.a CostWeights defaults preserve V2.4 aggregate formula",
+       TestCostWeightsDefaultsPreserveV24Aggregate},
+      {"V2.5.a CostWeights.fixed_shape biases via term",
+       TestCostWeightsFixedShapeBiasesViaTerm},
+      {"V2.5.a CostWeights carried through batch_eval",
+       TestCostWeightsCarriedThroughBatchEval},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
