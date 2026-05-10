@@ -32,6 +32,10 @@ ProposedDelta MazeSearchProposer::Propose(const GeometryView& base,
   pd.worker_id = -1;  // unbound in V2.2.e minimal
   pd.snapshot_version = in.snapshot_version;
   pd.id = in.delta_id;
+  // V2.4.b — propagate the net identity to the canonical
+  // proposal_net_id field so the conflict graph can detect
+  // same-net writes. Input.net_id was previously dropped.
+  pd.proposal_net_id = in.net_id;
 
   // Read footprint: the (route_box, layer) the proposer "read."
   pd.read_footprint.geometry.rects.push_back(in.route_box);

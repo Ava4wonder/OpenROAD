@@ -155,6 +155,17 @@ struct ReadFootprint
 // against), the stable identifier, and the read/write footprints used
 // for OCC commit-eligibility (§3) and conflict-graph construction
 // (V2.4 §4.4). Forward-declared in Delta.h.
+//
+// V2.4.b — `proposal_net_id` is the canonical NetId this Delta
+// mutates (zero = unset / synthetic). The Delta variants today
+// carry net identity inconsistently (AddWire/AddVia have
+// `frNet*`, DeleteWire/DeleteVia have `optional<uint64_t>
+// resolved_net_id`, MoveCell has nothing), so the conflict graph
+// reads net identity from this single field instead of walking
+// into the variant. Real proposers populate it from the frNet
+// handle; synthetic tests set it directly. Net-conflict edges are
+// emitted only when BOTH proposals have non-zero net_id and the
+// values match.
 struct ProposedDelta
 {
   Delta delta;
@@ -162,6 +173,7 @@ struct ProposedDelta
   int worker_id = -1;
   uint64_t snapshot_version = 0;
   DeltaId id{};
+  NetId proposal_net_id = 0;
   ReadFootprint read_footprint{};
   WriteFootprint write_footprint{};
 };

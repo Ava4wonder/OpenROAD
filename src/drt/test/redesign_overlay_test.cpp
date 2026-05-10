@@ -2711,6 +2711,185 @@ bool TestConflictGraphDeterministicAcrossRebuilds()
   return true;
 }
 
+// ===== V2.4.b — Net + ReadWrite conflict =====
+
+bool TestConflictGraphSameNetDifferentBboxNetEdge()
+{
+  // Two AddWires on the same net but spatially disjoint and on
+  // DIFFERENT layers. Geometry test fails (different layer); Net
+  // test fires.
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.proposal_net_id = 17;
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 1000, 0, 1100, 5, 3);
+  pb.proposal_net_id = 17;
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.size() == 1u
+         && g.edges[0].kind == r::ConflictKind::Net
+         && g.edges[0].a == 0u && g.edges[0].b == 1u;
+}
+
+bool TestConflictGraphDifferentNetsNoNetEdge()
+{
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.proposal_net_id = 17;
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 1000, 0, 1100, 5, 3);
+  pb.proposal_net_id = 99;
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.empty();
+}
+
+bool TestConflictGraphZeroNetIdNeverMatches()
+{
+  // Both proposals have net_id == 0 (synthetic / unset). Must NOT
+  // produce a Net edge — otherwise every synthetic test would
+  // collide.
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  // pa.proposal_net_id = 0 (default)
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 1000, 0, 1100, 5, 3);
+  // pb.proposal_net_id = 0 (default)
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.empty();
+}
+
+bool TestConflictGraphReadOverlapsWriteEdge()
+{
+  // A reads (10, 0)-(50, 5) layer 2; B writes (30, 0)-(60, 5)
+  // layer 2 (placed elsewhere so no write-write collision; use a
+  // different layer for the actual write). Different layers for
+  // write to keep it clean: B writes (30,0)-(60,5) on layer 3,
+  // A reads on layer 2 — so we need to also read from layer 3 to
+  // see the conflict.
+  //
+  // Cleaner setup: A writes layer 2 (and also reads layer 3 via
+  // explicit footprint), B writes layer 3 disjoint from A's write.
+  // A's read on layer 3 overlaps B's write on layer 3 → ReadWrite.
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.read_footprint.geometry.rects.push_back(
+      r::Rect{r::Point{200, 0}, r::Point{400, 5}});
+  pa.read_footprint.geometry.layers.push_back(3);
+
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 300, 0, 500, 5, 3);
+  // No net match (default 0). Write disjoint from A's write
+  // (different layers anyway).
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.size() == 1u
+         && g.edges[0].kind == r::ConflictKind::ReadWrite;
+}
+
+bool TestConflictGraphReadDifferentLayerNoEdge()
+{
+  // A reads layer 5; B writes layer 3 in the same xy region.
+  // Different layer → no ReadWrite edge.
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.read_footprint.geometry.rects.push_back(
+      r::Rect{r::Point{200, 0}, r::Point{400, 5}});
+  pa.read_footprint.geometry.layers.push_back(5);
+
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 300, 0, 500, 5, 3);
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.empty();
+}
+
+bool TestConflictGraphPrecedenceGeometryWinsOverNet()
+{
+  // A and B overlap on layer 2 AND share the same net. Per
+  // precedence Geometry > Net, the edge kind must be Geometry.
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.proposal_net_id = 17;
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 2);
+  pb.proposal_net_id = 17;
+  set.proposals.push_back(pa);
+  set.proposals.push_back(pb);
+  auto g = r::BuildConflictGraph(set);
+  return g.edges.size() == 1u
+         && g.edges[0].kind == r::ConflictKind::Geometry;
+}
+
+bool TestConflictGraphMixedThreeKindsInOneBatch()
+{
+  // A: writes (0,0)-(100,5) layer 2,    net=17, reads layer 4 at (1000, 0)-(1100, 5)
+  // B: writes (50,0)-(150,5) layer 2,   net=99               <- (A,B) Geometry
+  // C: writes (5000,0)-(5100,5) layer 2, net=17              <- (A,C) Net
+  //    (disjoint from A spatially, same net as A)
+  // D: writes (1000,0)-(1100,5) layer 4, net=42              <- (A,D) ReadWrite
+  //    (disjoint spatially+layer from A's write, but A reads its layer 4 region)
+  // (B,C), (B,D), (C,D) — none of those should fire (verify too).
+  r::ProposalSet set;
+  auto pa = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pa.proposal_net_id = 17;
+  pa.read_footprint.geometry.rects.push_back(
+      r::Rect{r::Point{1000, 0}, r::Point{1100, 5}});
+  pa.read_footprint.geometry.layers.push_back(4);
+
+  auto pb = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 50, 0, 150, 5, 2);
+  pb.proposal_net_id = 99;
+
+  auto pc = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 2}, 5000, 0, 5100, 5, 2);
+  pc.proposal_net_id = 17;
+
+  auto pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 3}, 1000, 0, 1100, 5, 4);
+  pd.proposal_net_id = 42;
+
+  set.proposals = {pa, pb, pc, pd};
+  auto g = r::BuildConflictGraph(set);
+  if (g.edges.size() != 3u) {
+    return false;
+  }
+  // Edges in (a, b) sorted order: (0,1), (0,2), (0,3).
+  return g.edges[0].a == 0u && g.edges[0].b == 1u
+         && g.edges[0].kind == r::ConflictKind::Geometry
+         && g.edges[1].a == 0u && g.edges[1].b == 2u
+         && g.edges[1].kind == r::ConflictKind::Net
+         && g.edges[2].a == 0u && g.edges[2].b == 3u
+         && g.edges[2].kind == r::ConflictKind::ReadWrite;
+}
+
+bool TestProposerSetsProposalNetId()
+{
+  // Verify MazeSearchProposer propagates Input.net_id to
+  // ProposedDelta.proposal_net_id (V2.4.b extension).
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 4242;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{100, 5}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{1, 0, 0};
+  auto pd = ro::MazeSearchProposer::Propose(base, in);
+  return pd.proposal_net_id == 4242u;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -2984,6 +3163,22 @@ int main()
        TestConflictGraphCompleteOverlapKEqualsFour},
       {"V2.4.a ConflictGraph deterministic across rebuilds",
        TestConflictGraphDeterministicAcrossRebuilds},
+      {"V2.4.b ConflictGraph same-net different-layer -> Net edge",
+       TestConflictGraphSameNetDifferentBboxNetEdge},
+      {"V2.4.b ConflictGraph different nets -> no Net edge",
+       TestConflictGraphDifferentNetsNoNetEdge},
+      {"V2.4.b ConflictGraph zero net_id never matches",
+       TestConflictGraphZeroNetIdNeverMatches},
+      {"V2.4.b ConflictGraph A reads B's write same layer -> ReadWrite edge",
+       TestConflictGraphReadOverlapsWriteEdge},
+      {"V2.4.b ConflictGraph read different layer -> no edge",
+       TestConflictGraphReadDifferentLayerNoEdge},
+      {"V2.4.b ConflictGraph precedence Geometry > Net",
+       TestConflictGraphPrecedenceGeometryWinsOverNet},
+      {"V2.4.b ConflictGraph mixed three-kind batch",
+       TestConflictGraphMixedThreeKindsInOneBatch},
+      {"V2.4.b MazeSearchProposer propagates net_id to proposal_net_id",
+       TestProposerSetsProposalNetId},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
