@@ -3053,6 +3053,193 @@ bool TestGreedyEndToEndConflictGraphPlusSolver()
          && p.kind() == r::PolicyKind::GreedyPriority;
 }
 
+// ===== V2.4.d — SelectMis (MIS-based multi-Delta selection) =====
+
+bool TestSelectMisEmptyBatchEmptyResult()
+{
+  r::BatchEvalResult batch;
+  r::ProposalSet set;
+  r::ConflictGraph g;
+  r::GreedyPriorityPolicy p;
+  auto sel = r::SelectMis(batch, set, g, p);
+  return sel.selected_ids.empty() && sel.rejected.empty();
+}
+
+bool TestSelectMisAllEligibleNoConflictsAllSelected()
+{
+  // Three disjoint AddWires, all commit_eligible (synthetic
+  // oracle), no conflicts. All three survive MIS.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 3; ++i) {
+    auto pd = MakeProposalAddWireWithFootprint(
+        r::DeltaId{1, 0, i}, 1000 * static_cast<int>(i + 1),
+        0, 1000 * static_cast<int>(i + 1) + 100, 5, 2);
+    set.proposals.push_back(pd);
+  }
+  auto batch = state.batch_eval(base, set, opts);
+  auto graph = r::BuildConflictGraph(set);
+  r::GreedyPriorityPolicy p;
+  auto sel = r::SelectMis(batch, set, graph, p);
+  return sel.selected_ids.size() == 3u && sel.rejected.empty();
+}
+
+bool TestSelectMisCompleteOverlapKEqualsFourOnlyOneSelected()
+{
+  // V2.3.c synthetic K=4: same bbox shrunk on ur.x. All overlap
+  // pairwise → complete K_4. Only the highest-aggregate (widest)
+  // survives; the other 3 are tagged Conflict.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    auto pd = MakeProposalAddWireWithFootprint(
+        r::DeltaId{1, 0, i}, 0, 0,
+        1000 - static_cast<int>(i), 5, 2);
+    set.proposals.push_back(pd);
+  }
+  auto batch = state.batch_eval(base, set, opts);
+  auto graph = r::BuildConflictGraph(set);
+  r::GreedyPriorityPolicy p;
+  auto sel = r::SelectMis(batch, set, graph, p);
+
+  if (sel.selected_ids.size() != 1u) {
+    return false;
+  }
+  if (!(sel.selected_ids[0] == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  if (sel.rejected.size() != 3u) {
+    return false;
+  }
+  for (const auto& rj : sel.rejected) {
+    if (rj.reason != r::RejectionReason::Conflict) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestSelectMisIllegalAndConflictMixedReasons()
+{
+  // Mix:
+  //   P0: legal AddWire far from base, no neighbour conflict      → selected
+  //   P1: legal AddWire overlapping P0 spatially                   → Conflict (loses MIS to P0)
+  //   P2: illegal AddWire (overlaps base shape)                    → Illegal
+  //   P3: MoveCell (UnsupportedDelta)                              → UnsupportedDelta
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 50, 5, 2, 100, 12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  // P0 — long, legal, far from base.
+  auto p0 = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 1000, 0, 2000, 5, 2);
+  set.proposals.push_back(p0);
+  // P1 — long, legal, overlaps P0 spatially → Conflict.
+  auto p1 = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 1}, 1500, 0, 2500, 5, 2);
+  set.proposals.push_back(p1);
+  // P2 — overlaps base (illegal).
+  auto p2 = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 2}, 20, 0, 30, 5, 2);
+  set.proposals.push_back(p2);
+  // P3 — MoveCell, UnsupportedDelta.
+  r::MoveCell mv;
+  r::ProposedDelta p3;
+  p3.delta = mv;
+  p3.id = r::DeltaId{1, 0, 3};
+  p3.write_footprint = r::WriteFootprint::Of(p3.delta);
+  set.proposals.push_back(p3);
+
+  auto batch = state.batch_eval(base, set, opts);
+  auto graph = r::BuildConflictGraph(set);
+  r::GreedyPriorityPolicy p;
+  auto sel = r::SelectMis(batch, set, graph, p);
+
+  // Wait — P0 and P1 score the same (both 1000-wide). Tie-break
+  // by lower DeltaId → P0 wins.
+  if (sel.selected_ids.size() != 1u
+      || !(sel.selected_ids[0] == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  if (sel.rejected.size() != 3u) {
+    return false;
+  }
+  // Expected DeltaId-sorted rejected order:
+  //   {1,0,1} Conflict
+  //   {1,0,2} Illegal
+  //   {1,0,3} UnresolvedFootprint  (P3 is UnsupportedDelta
+  //                                   adapter-side; verdict source
+  //                                   collapses to UnresolvedFootprint
+  //                                   which is one of the "first-tag"
+  //                                   reasons — see ClassifyNonEligible
+  //                                   precedence: adapter_unsupported
+  //                                   wins, so this is UnsupportedDelta)
+  const std::pair<r::DeltaId, r::RejectionReason> expected[] = {
+      {r::DeltaId{1, 0, 1}, r::RejectionReason::Conflict},
+      {r::DeltaId{1, 0, 2}, r::RejectionReason::Illegal},
+      {r::DeltaId{1, 0, 3}, r::RejectionReason::UnsupportedDelta},
+  };
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (!(sel.rejected[i].id == expected[i].first)
+        || sel.rejected[i].reason != expected[i].second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestSelectMisDeterministicAcrossPolicyInstances()
+{
+  // Two GreedyPriorityPolicy instances on the same batch + graph
+  // produce identical results.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    set.proposals.push_back(MakeProposalAddWireWithFootprint(
+        r::DeltaId{1, 0, i}, 0, 0,
+        1000 - static_cast<int>(i), 5, 2));
+  }
+  auto batch = state.batch_eval(base, set, opts);
+  auto graph = r::BuildConflictGraph(set);
+  r::GreedyPriorityPolicy p1, p2;
+  auto s1 = r::SelectMis(batch, set, graph, p1);
+  auto s2 = r::SelectMis(batch, set, graph, p2);
+  if (s1.selected_ids.size() != s2.selected_ids.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < s1.selected_ids.size(); ++i) {
+    if (!(s1.selected_ids[i] == s2.selected_ids[i])) {
+      return false;
+    }
+  }
+  if (s1.rejected.size() != s2.rejected.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < s1.rejected.size(); ++i) {
+    if (!(s1.rejected[i].id == s2.rejected[i].id)
+        || s1.rejected[i].reason != s2.rejected[i].reason) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3362,6 +3549,16 @@ int main()
        TestGreedyMakeEdgeListFromConflictGraph},
       {"V2.4.c End-to-end ConflictGraph + GreedyPriority on K=4 complete",
        TestGreedyEndToEndConflictGraphPlusSolver},
+      {"V2.4.d SelectMis empty batch -> empty result",
+       TestSelectMisEmptyBatchEmptyResult},
+      {"V2.4.d SelectMis all eligible no conflicts -> all selected",
+       TestSelectMisAllEligibleNoConflictsAllSelected},
+      {"V2.4.d SelectMis K=4 complete overlap -> only highest aggregate",
+       TestSelectMisCompleteOverlapKEqualsFourOnlyOneSelected},
+      {"V2.4.d SelectMis mixed Conflict/Illegal/UnsupportedDelta",
+       TestSelectMisIllegalAndConflictMixedReasons},
+      {"V2.4.d SelectMis deterministic across policy instances",
+       TestSelectMisDeterministicAcrossPolicyInstances},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

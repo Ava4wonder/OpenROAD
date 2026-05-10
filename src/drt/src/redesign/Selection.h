@@ -25,6 +25,11 @@
 
 namespace drt::redesign {
 
+class ConflictGraph;     // V2.4.a
+class ConflictPolicy;    // V2.4.c (concrete: GreedyPriorityPolicy)
+struct ProposalSet;      // BatchEval.h
+
+
 // Why a proposal did not become the winner of a batch.
 //
 // V2.3.b classifies all non-winners. The taxonomy is deliberately a
@@ -105,5 +110,50 @@ struct SelectionResult
 // reserved for V2.4. If the input is empty, has_winner is false and
 // rejected is empty.
 SelectionResult SelectBest(const BatchEvalResult& batch);
+
+// V2.4.d — MIS-based selection. Result type for callers that want
+// the full subset (multiple committed Deltas at once), not a single
+// best-of-K winner.
+struct MisSelectionResult
+{
+  // Selected proposals' DeltaIds in canonical (DeltaId-sorted)
+  // order. The MIS subset survived legality filtering AND the
+  // conflict-graph policy's selection. May be empty if no
+  // commit_eligible proposals exist or all of them lost to MIS.
+  std::vector<DeltaId> selected_ids;
+
+  // Non-selected proposals in DeltaId-sorted order, each tagged
+  // with one of the V2.3.b RejectionReason values. The taxonomy
+  // is the SAME as SelectBest's: legality-derived reasons
+  // (Illegal / UnresolvedFootprint / UnsupportedDelta / Unknown)
+  // for non-eligible proposals, plus RejectionReason::Conflict
+  // for eligible proposals that lost MIS. SelectMis is the first
+  // emitter of Conflict; the V2.3.b enum slot was reserved
+  // specifically for this.
+  std::vector<RejectedProposal> rejected;
+};
+
+// V2.4.d — pick a maximum-weight independent set of the
+// commit_eligible proposals via `policy`, using `graph` as the
+// pairwise-incompatibility relation.
+//
+// `set` is needed because ConflictPolicy::select operates on
+// ScoredProposal — it wants the full ProposedDelta plus the score.
+// `set.proposals[i]` MUST correspond to `batch.outcomes[i]` (both
+// in canonical DeltaId-sorted order, which is the contract of
+// PhysicalState::batch_eval). `graph.node_ids[i]` MUST match
+// `batch.outcome_proposal_ids[i]`.
+//
+// Non-eligible proposals are passed to the policy with
+// score.aggregate = -infinity so the policy will never pick them
+// in practice; SelectMis filters them post hoc anyway.
+//
+// Determinism contract: same (batch, set, graph) and a
+// deterministic policy → byte-identical MisSelectionResult. The
+// GreedyPriorityPolicy concrete implementation satisfies this.
+MisSelectionResult SelectMis(const BatchEvalResult& batch,
+                             const ProposalSet& set,
+                             const ConflictGraph& graph,
+                             ConflictPolicy& policy);
 
 }  // namespace drt::redesign

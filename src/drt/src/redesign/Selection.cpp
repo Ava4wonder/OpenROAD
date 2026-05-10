@@ -6,9 +6,13 @@
 #include "Selection.h"
 
 #include <cstddef>
+#include <limits>
 #include <optional>
 
+#include "ConflictGraph.h"
+#include "ConflictPolicy.h"
 #include "EvalOutcome.h"
+#include "GreedyPriorityPolicy.h"  // MakeEdgeList
 #include "LegalityVerdict.h"
 
 namespace drt::redesign {
@@ -117,6 +121,88 @@ SelectionResult SelectBest(const BatchEvalResult& batch)
                                          : RejectionReason::Unknown;
     } else {
       reason = ClassifyNonEligible(outcome, batch.adapter_unsupported[i]);
+    }
+    out.rejected.push_back({batch.outcome_proposal_ids[i], reason});
+  }
+
+  return out;
+}
+
+MisSelectionResult SelectMis(const BatchEvalResult& batch,
+                             const ProposalSet& set,
+                             const ConflictGraph& graph,
+                             ConflictPolicy& policy)
+{
+  MisSelectionResult out;
+
+  const std::size_t n = batch.outcomes.size();
+  if (n == 0) {
+    return out;
+  }
+
+  // Defensive parallel-vector check (matches SelectBest pattern).
+  // If any of the parallel vectors are out of sync, refuse to
+  // select anything and tag everything Unknown — this is a
+  // programming-error-detection path that should never trip in
+  // practice.
+  if (batch.outcome_proposal_ids.size() != n
+      || batch.adapter_unsupported.size() != n
+      || set.proposals.size() != n
+      || graph.node_ids.size() != n) {
+    for (std::size_t i = 0; i < batch.outcome_proposal_ids.size(); ++i) {
+      out.rejected.push_back(
+          {batch.outcome_proposal_ids[i], RejectionReason::Unknown});
+    }
+    return out;
+  }
+
+  // Build the ScoredProposal vector for the policy. Non-eligible
+  // proposals get aggregate=-infinity so the policy never picks
+  // them; the post-filter catches any edge cases.
+  std::vector<ScoredProposal> scored;
+  scored.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    ScoredProposal sp;
+    sp.proposal = set.proposals[i];
+    sp.legality = batch.outcomes[i].legality;
+    if (batch.outcomes[i].score.has_value()) {
+      sp.score = *batch.outcomes[i].score;
+    }
+    if (!batch.outcomes[i].legality.commit_eligible) {
+      sp.score.aggregate = -std::numeric_limits<double>::infinity();
+    }
+    scored.push_back(sp);
+  }
+
+  // Run the policy with the ConflictGraph flattened to pair edges.
+  const auto edges = MakeEdgeList(graph);
+  const auto selected_indices = policy.select(scored, edges);
+
+  // Membership lookup for the post-filter walk.
+  std::vector<bool> in_selected(n, false);
+  for (std::size_t s : selected_indices) {
+    if (s < n) {
+      in_selected[s] = true;
+    }
+  }
+
+  out.selected_ids.reserve(selected_indices.size());
+  out.rejected.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const bool eligible = batch.outcomes[i].legality.commit_eligible;
+    if (in_selected[i] && eligible) {
+      out.selected_ids.push_back(batch.outcome_proposal_ids[i]);
+      continue;
+    }
+
+    RejectionReason reason;
+    if (!eligible) {
+      reason = ClassifyNonEligible(batch.outcomes[i],
+                                   batch.adapter_unsupported[i]);
+    } else {
+      // Eligible but lost MIS — emit Conflict, the V2.3.b enum
+      // slot reserved exactly for this.
+      reason = RejectionReason::Conflict;
     }
     out.rejected.push_back({batch.outcome_proposal_ids[i], reason});
   }
