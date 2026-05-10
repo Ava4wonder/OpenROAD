@@ -16,6 +16,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "legality/CpuDrcOracle.h"
 #include "overlay/MutableGeometryStore.h"
 #include "overlay/OracleCandidate.h"
 #include "overlay/OverlayGeometryView.h"
@@ -34,6 +35,13 @@ class PhysicalStateImpl
   // V2.2.d single-Delta scope: one commit at a time. V2.4's MIS
   // commit path takes this lock around the whole batch.
   mutable std::mutex commit_mu;
+  // V2.5.b — caller-attached CPU DRC oracle + materialised rule
+  // entries. Both are non-owning from the impl's perspective:
+  // PhysicalState::SetCpuDrcOracle accepts a raw pointer + a
+  // rule-entry vector and stores both. Lifetime is the caller's
+  // responsibility (see PhysicalState.h doc).
+  legality::CpuDrcOracle* cpu_drc_oracle = nullptr;
+  std::vector<legality::RuleEntry> cpu_drc_rules;
 };
 
 struct PhysicalState::Impl
@@ -197,15 +205,113 @@ EvalOutcome PhysicalState::eval(
       outcome.legality = verdict;
       break;
     }
-    case LegalityMode::CpuDrcOracleRealDeck:
-      // V2.2.c.legality.realpdk lands later. For V2.2.c.legality.
-      // synthetic, falling through to the stub path keeps the
-      // behaviour predictable: a caller that requested real-PDK
-      // before it's wired gets a clearly non-committable verdict.
-      outcome.legality.legal = true;
-      outcome.legality.source = LegalitySource::StubAssumeLegal;
-      outcome.legality.commit_eligible = false;
+    case LegalityMode::CpuDrcOracleRealDeck: {
+      // V2.5.b — wire the real CpuDrcOracle when one is attached.
+      // No-oracle case keeps V2.2.c.proj behaviour (legal but
+      // non-committable stub) so callers that requested real-PDK
+      // before SetCpuDrcOracle was called still get a predictable
+      // verdict.
+      if (impl_->state->cpu_drc_oracle == nullptr
+          || impl_->state->cpu_drc_rules.empty()) {
+        outcome.legality.legal = true;
+        outcome.legality.source = LegalitySource::StubAssumeLegal;
+        outcome.legality.commit_eligible = false;
+        break;
+      }
+
+      // Build the candidate Shape from the delta's write
+      // footprint. V2.5.b minimum: single-shape footprints only
+      // (AddWire / AddVia / InsertShield / resolved Delete*).
+      // Multi-shape footprints fall through to a UnresolvedFootprint
+      // verdict — the oracle expects per-rectangle granularity and
+      // V2.5.b keeps the adapter narrow.
+      const auto& wf = delta.write_footprint;
+      if (wf.unknown || wf.shapes.size() != 1
+          || wf.layers.size() != 1) {
+        outcome.legality.legal = false;
+        outcome.legality.source = LegalitySource::UnresolvedFootprint;
+        outcome.legality.commit_eligible = false;
+        break;
+      }
+
+      legality::Shape candidate;
+      candidate.x1 = wf.shapes[0].ll.x;
+      candidate.y1 = wf.shapes[0].ll.y;
+      candidate.x2 = wf.shapes[0].ur.x;
+      candidate.y2 = wf.shapes[0].ur.y;
+      candidate.layer = static_cast<std::int16_t>(wf.layers[0]);
+      candidate.net_id = delta.proposal_net_id;
+
+      // Determine the per-rule-deck max halo so we query a wide
+      // enough context. Halo of zero is fine for MetalShort-only
+      // decks (overlap-only checks).
+      std::int32_t max_halo = 0;
+      for (const auto& re : impl_->state->cpu_drc_rules) {
+        if (re.halo > max_halo) {
+          max_halo = re.halo;
+        }
+      }
+
+      // Query nearby route shapes from base_geometry, expanded by
+      // max_halo on each side, on the same layer.
+      Rect query_box;
+      query_box.ll.x = candidate.x1 - max_halo;
+      query_box.ll.y = candidate.y1 - max_halo;
+      query_box.ur.x = candidate.x2 + max_halo;
+      query_box.ur.y = candidate.y2 + max_halo;
+      const auto neighbors
+          = base_geometry.QueryRouteShapes(query_box, wf.layers[0]);
+
+      std::vector<legality::Shape> context;
+      context.reserve(neighbors.size());
+      for (const auto& nref : neighbors) {
+        // Skip same-net same-bbox self matches: a candidate that
+        // overlaps its own existing footprint is a re-route of the
+        // same net, not a violation. The oracle doesn't know about
+        // net identity for this purpose; we filter here.
+        if (nref.net_id.has_value()
+            && delta.proposal_net_id != 0
+            && *nref.net_id == delta.proposal_net_id
+            && nref.bbox.ll.x == candidate.x1
+            && nref.bbox.ll.y == candidate.y1
+            && nref.bbox.ur.x == candidate.x2
+            && nref.bbox.ur.y == candidate.y2) {
+          continue;
+        }
+        legality::Shape s;
+        s.x1 = nref.bbox.ll.x;
+        s.y1 = nref.bbox.ll.y;
+        s.x2 = nref.bbox.ur.x;
+        s.y2 = nref.bbox.ur.y;
+        s.layer = nref.layer.has_value()
+                      ? static_cast<std::int16_t>(*nref.layer)
+                      : candidate.layer;
+        s.net_id = nref.net_id.has_value() ? *nref.net_id : 0;
+        context.push_back(s);
+      }
+
+      // Sort by x1 ascending — CpuDrcOracle::Evaluate's
+      // sweep-line requires this.
+      std::sort(context.begin(), context.end(),
+                [](const legality::Shape& a, const legality::Shape& b) {
+                  return a.x1 < b.x1;
+                });
+
+      legality::Verdict verdict;
+      impl_->state->cpu_drc_oracle->SetRules(
+          impl_->state->cpu_drc_rules.data(),
+          impl_->state->cpu_drc_rules.size());
+      impl_->state->cpu_drc_oracle->Evaluate(
+          &candidate, /*candidates_count=*/1,
+          context.data(), context.size(), &verdict);
+
+      outcome.legality.legal = verdict.legal;
+      outcome.legality.source = LegalitySource::CpuDrcOracle;
+      outcome.legality.commit_eligible
+          = verdict.legal
+            && IsTrustedLegalitySource(outcome.legality.source);
       break;
+    }
     case LegalityMode::StubAssumeLegal:
     default:
       // V2.2.c.proj behaviour preserved. The V2.1.b hard-gate
@@ -432,6 +538,15 @@ CommitResult PhysicalState::try_commit_with_opts(
   result.new_version = impl_->state->version.load(
       std::memory_order_acquire);
   return result;
+}
+
+// V2.5.b — attach a CPU DRC oracle + materialised rules. Lifetime
+// of both is the caller's responsibility (see header).
+void PhysicalState::SetCpuDrcOracle(legality::CpuDrcOracle* oracle,
+                                    std::vector<legality::RuleEntry> rules)
+{
+  impl_->state->cpu_drc_oracle = oracle;
+  impl_->state->cpu_drc_rules = std::move(rules);
 }
 
 // V2.2.d test-only inspection of the writable store. PhysicalState

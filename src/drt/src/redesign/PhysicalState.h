@@ -27,6 +27,11 @@ class GeometryView;
 class MutableGeometryStore;
 }
 
+namespace drt::redesign::legality {
+class CpuDrcOracle;
+struct RuleEntry;
+}
+
 namespace drt::redesign {
 
 class PhysicalState
@@ -104,6 +109,19 @@ class PhysicalState
   // V2.2.d test-only inspection of the writable backing.
   const overlay::GeometryView& geometry_view_for_test() const noexcept;
   overlay::MutableGeometryStore& mutable_store_for_test() noexcept;
+
+  // V2.5.b — attach a CPU DRC oracle + rule list. When
+  // EvalOptions::legality_mode == CpuDrcOracleRealDeck, eval()
+  // routes to this oracle instead of the V2.2.c stub fallthrough.
+  // Lifetime: the caller owns both `oracle` and the storage backing
+  // each RuleEntry's `opaque` pointer; both must outlive the next
+  // eval()/batch_eval()/try_commit() call. Pass nullptr to detach.
+  //
+  // V2.5.b SCOPE — minimum viable wiring. `rules` is expected to be
+  // a small deck (e.g., MetalShort-only) so the architectural seam
+  // can be exercised. Full PDK rule translation is V2.5.b.deck.
+  void SetCpuDrcOracle(legality::CpuDrcOracle* oracle,
+                       std::vector<legality::RuleEntry> rules);
 
   uint64_t current_version() const noexcept;
 

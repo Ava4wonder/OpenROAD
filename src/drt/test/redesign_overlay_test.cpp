@@ -20,6 +20,8 @@
 #include "redesign/ProposalStaging.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
+#include "redesign/legality/CpuDrcOracle.h"
+#include "redesign/legality/Predicates.h"
 #include "redesign/overlay/GeometryView.h"
 #include "redesign/overlay/Hashing.h"
 #include "redesign/overlay/MazeSearchProposer.h"
@@ -3607,6 +3609,155 @@ bool TestCostWeightsCarriedThroughBatchEval()
          && batch_biased.outcomes[0].score->aggregate == 500.0;
 }
 
+// ===== V2.5.b — CpuDrcOracleRealDeck dispatch =====
+
+namespace lg = drt::redesign::legality;
+
+namespace {
+
+// Helper: construct a MetalShort-only RuleEntry vector backed by
+// stable storage owned by the test (config + rules vectors).
+struct MetalShortDeckOwning
+{
+  lg::MetalShortConfig config;
+  std::vector<lg::RuleEntry> rules;
+
+  MetalShortDeckOwning()
+  {
+    lg::RuleEntry e;
+    e.type = lg::RuleType::MetalShort;
+    e.halo = 0;
+    e.predicate = &lg::MetalShortReference;
+    e.opaque = &config;
+    rules.push_back(e);
+  }
+};
+
+}  // namespace
+
+bool TestCpuDrcOracleRealDeckNoOracleAttachedFallsToStub()
+{
+  // No SetCpuDrcOracle call → request CpuDrcOracleRealDeck →
+  // current behaviour preserved (legal=true, source=Stub,
+  // !commit_eligible).
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+
+  auto pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  auto out = state.eval(base, pd, opts);
+
+  return out.legality.legal
+         && out.legality.source == r::LegalitySource::StubAssumeLegal
+         && !out.legality.commit_eligible;
+}
+
+bool TestCpuDrcOracleRealDeckLegalAddWireIsCommitEligible()
+{
+  // Empty base, MetalShort deck attached → AddWire has no
+  // overlapping context → verdict legal, source CpuDrcOracle,
+  // commit_eligible TRUE (CpuDrcOracle is trusted).
+  ro::MemoryBackedGeometryView base({}, {});
+  lg::CpuDrcOracle oracle;
+  MetalShortDeckOwning deck;
+
+  r::PhysicalState state;
+  state.SetCpuDrcOracle(&oracle, deck.rules);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+
+  auto pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  auto out = state.eval(base, pd, opts);
+
+  return out.legality.legal
+         && out.legality.source == r::LegalitySource::CpuDrcOracle
+         && out.legality.commit_eligible;
+}
+
+bool TestCpuDrcOracleRealDeckOverlappingShapeIsIllegal()
+{
+  // Base contains a shape on layer 2; AddWire overlaps it →
+  // MetalShort rule fires → verdict illegal, source CpuDrcOracle,
+  // !commit_eligible.
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 100, 5, 2, /*net_id=*/100,
+                    /*shape_kind=*/12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  lg::CpuDrcOracle oracle;
+  MetalShortDeckOwning deck;
+
+  r::PhysicalState state;
+  state.SetCpuDrcOracle(&oracle, deck.rules);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+
+  // Candidate at (50,0)-(150,5) overlaps base shape (0,0)-(100,5).
+  auto pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 50, 0, 150, 5, 2);
+  // Candidate is on a different net → MetalShort fires.
+  pd.proposal_net_id = 200;
+  auto out = state.eval(base, pd, opts);
+
+  return !out.legality.legal
+         && out.legality.source == r::LegalitySource::CpuDrcOracle
+         && !out.legality.commit_eligible;
+}
+
+bool TestCpuDrcOracleRealDeckSameNetSelfOverlapIsLegal()
+{
+  // Same-net same-bbox self-overlap is filtered by the adapter
+  // (re-route of the same net, not a violation).
+  std::vector<ro::ShapeRef> base_shapes{
+      MakeFullShape(0, 0, 100, 5, 2, /*net_id=*/200,
+                    /*shape_kind=*/12)};
+  ro::MemoryBackedGeometryView base({}, base_shapes);
+  lg::CpuDrcOracle oracle;
+  MetalShortDeckOwning deck;
+
+  r::PhysicalState state;
+  state.SetCpuDrcOracle(&oracle, deck.rules);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+
+  // Identical-bbox candidate on the SAME net.
+  auto pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{1, 0, 0}, 0, 0, 100, 5, 2);
+  pd.proposal_net_id = 200;
+  auto out = state.eval(base, pd, opts);
+
+  return out.legality.legal
+         && out.legality.source == r::LegalitySource::CpuDrcOracle
+         && out.legality.commit_eligible;
+}
+
+bool TestCpuDrcOracleRealDeckUnknownFootprintIsUnresolved()
+{
+  // MoveCell yields write_footprint.unknown=true → adapter rejects
+  // before invoking the oracle, returns UnresolvedFootprint.
+  ro::MemoryBackedGeometryView base({}, {});
+  lg::CpuDrcOracle oracle;
+  MetalShortDeckOwning deck;
+
+  r::PhysicalState state;
+  state.SetCpuDrcOracle(&oracle, deck.rules);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::CpuDrcOracleRealDeck;
+
+  r::MoveCell mv;
+  r::ProposedDelta pd;
+  pd.delta = mv;
+  pd.id = r::DeltaId{1, 0, 0};
+  pd.write_footprint = r::WriteFootprint::Of(pd.delta);
+  auto out = state.eval(base, pd, opts);
+
+  return !out.legality.legal
+         && out.legality.source == r::LegalitySource::UnresolvedFootprint
+         && !out.legality.commit_eligible;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3954,6 +4105,16 @@ int main()
        TestCostWeightsFixedShapeBiasesViaTerm},
       {"V2.5.a CostWeights carried through batch_eval",
        TestCostWeightsCarriedThroughBatchEval},
+      {"V2.5.b RealDeck no oracle attached -> stub fallthrough",
+       TestCpuDrcOracleRealDeckNoOracleAttachedFallsToStub},
+      {"V2.5.b RealDeck legal AddWire -> CpuDrcOracle source, commit_eligible",
+       TestCpuDrcOracleRealDeckLegalAddWireIsCommitEligible},
+      {"V2.5.b RealDeck overlapping shape (diff net) -> illegal",
+       TestCpuDrcOracleRealDeckOverlappingShapeIsIllegal},
+      {"V2.5.b RealDeck same-net self-overlap -> legal (filtered)",
+       TestCpuDrcOracleRealDeckSameNetSelfOverlapIsLegal},
+      {"V2.5.b RealDeck unknown footprint -> UnresolvedFootprint",
+       TestCpuDrcOracleRealDeckUnknownFootprintIsUnresolved},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
