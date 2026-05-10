@@ -31,12 +31,38 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "../Delta.h"
 #include "../Footprint.h"
 #include "GeometryView.h"
 
 namespace drt::redesign::overlay {
+
+// V2.2.e.real — one captured shape from upstream's drNet routes.
+// The caller (V2.6.b's FlexDR_maze.cpp wiring) walks
+// drNet::getRouteConnFigs() and projects each drConnFig into one
+// of these. Keeping CapturedConnFig free of upstream types
+// (drPathSeg / drVia / drPatchWire) lets the proposer be
+// unit-tested without dragging in the drt namespace.
+struct CapturedConnFig
+{
+  enum class Kind : std::uint8_t {
+    PathSeg = 0,    // drPathSeg → AddWire
+    Via = 1,        // drVia → AddVia
+    PatchWire = 2,  // drPatchWire → InsertShield (nearest V2 analog
+                    // — V2 has no first-class patch-wire variant
+                    // today; InsertShield carries a coverage rect +
+                    // layer which is enough to round-trip the
+                    // upstream geometry).
+  };
+  Kind kind;
+  Rect bbox{};
+  LayerNum layer = 0;
+  // Via origin point. Ignored for PathSeg / PatchWire. Maps to
+  // drVia::getOrigin() on the wiring side.
+  Point via_origin{};
+};
 
 class MazeSearchProposer
 {
@@ -58,11 +84,40 @@ class MazeSearchProposer
   // architecturally correct so V2.4's OCC check has the right
   // read-set).
   //
-  // V2.2.e.real (later): replaces with actual FlexDR maze search
-  // invocation that produces a real route path, possibly composed
-  // of multiple AddWire / AddVia deltas.
+  // V2.2.e.real lives in ProposeFromCaptured below; this synthetic
+  // overload is preserved for tests and for the V2.3.c top-of-
+  // routeNet shadow path.
   static ProposedDelta Propose(const GeometryView& base,
                                const Input& in);
+
+  // V2.2.e.real — emit one ProposedDelta per CapturedConnFig.
+  //
+  // Mapping:
+  //   Kind::PathSeg   → AddWire(bbox, layer)
+  //   Kind::Via       → AddVia(via_origin)        (via_def=nullptr)
+  //   Kind::PatchWire → InsertShield(bbox, layer)
+  //
+  // DeltaId discipline: each emitted Delta gets
+  //   DeltaId{ in.delta_id.region_id,
+  //            in.delta_id.proposer_id,
+  //            attempt_index = i }
+  // where i is the captured-shape index. proposal_net_id is
+  // copied from in.net_id; that lets V2.4.b's Net-conflict
+  // detector group all of these as one logical net.
+  //
+  // Read-footprint discipline: each emitted Delta records its
+  // own bbox + layer in the geometry domain (matches
+  // CpuDrcOracleRealDeck's expectations from V2.5.b). The
+  // route_box is also queried via `base` for OCC context, mirroring
+  // synthetic Propose.
+  //
+  // SCOPE — pure conversion. The drNet → CapturedConnFig
+  // extraction (which needs upstream drNet headers) is the
+  // caller's job; lives in V2.6.b's FlexDR_maze.cpp wiring.
+  static std::vector<ProposedDelta> ProposeFromCaptured(
+      const GeometryView& base,
+      const std::vector<CapturedConnFig>& captured,
+      const Input& in);
 };
 
 }  // namespace drt::redesign::overlay

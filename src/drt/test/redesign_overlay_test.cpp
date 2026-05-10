@@ -4052,6 +4052,207 @@ bool TestDriveGateResetForTestClearsCounter()
   }
 }
 
+// ===== V2.2.e.real — ProposeFromCaptured =====
+
+bool TestProposeFromCapturedEmptyReturnsEmpty()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 42;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{100, 100}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{42, 0, 0};
+  auto out = ro::MazeSearchProposer::ProposeFromCaptured(base, {}, in);
+  return out.empty();
+}
+
+bool TestProposeFromCapturedSinglePathSegIsAddWire()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 42;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{1000, 1000}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{42, 0, 0};
+
+  std::vector<ro::CapturedConnFig> captured;
+  ro::CapturedConnFig c;
+  c.kind = ro::CapturedConnFig::Kind::PathSeg;
+  c.bbox = r::Rect{r::Point{100, 50}, r::Point{900, 55}};
+  c.layer = 2;
+  captured.push_back(c);
+
+  auto out = ro::MazeSearchProposer::ProposeFromCaptured(base, captured, in);
+  if (out.size() != 1u) {
+    return false;
+  }
+  if (out[0].proposal_net_id != 42u) {
+    return false;
+  }
+  if (!(out[0].id == r::DeltaId{42, 0, 0})) {
+    return false;
+  }
+  // Delta variant must be AddWire with the captured bbox + layer.
+  const r::AddWire* add = std::get_if<r::AddWire>(&out[0].delta);
+  if (add == nullptr) {
+    return false;
+  }
+  return add->bbox.ll.x == 100 && add->bbox.ur.x == 900
+         && add->layer == 2 && !out[0].write_footprint.unknown;
+}
+
+bool TestProposeFromCapturedViaIsAddVia()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 7;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{1000, 1000}};
+  in.layer = 3;
+  in.delta_id = r::DeltaId{7, 0, 0};
+
+  std::vector<ro::CapturedConnFig> captured;
+  ro::CapturedConnFig v;
+  v.kind = ro::CapturedConnFig::Kind::Via;
+  v.bbox = r::Rect{r::Point{490, 490}, r::Point{510, 510}};
+  v.layer = 3;
+  v.via_origin = r::Point{500, 500};
+  captured.push_back(v);
+
+  auto out = ro::MazeSearchProposer::ProposeFromCaptured(base, captured, in);
+  if (out.size() != 1u) {
+    return false;
+  }
+  const r::AddVia* av = std::get_if<r::AddVia>(&out[0].delta);
+  if (av == nullptr) {
+    return false;
+  }
+  return av->location.x == 500 && av->location.y == 500
+         && out[0].proposal_net_id == 7u;
+}
+
+bool TestProposeFromCapturedPatchWireIsInsertShield()
+{
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 99;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{1000, 1000}};
+  in.layer = 4;
+  in.delta_id = r::DeltaId{99, 0, 0};
+
+  std::vector<ro::CapturedConnFig> captured;
+  ro::CapturedConnFig pw;
+  pw.kind = ro::CapturedConnFig::Kind::PatchWire;
+  pw.bbox = r::Rect{r::Point{200, 200}, r::Point{220, 250}};
+  pw.layer = 4;
+  captured.push_back(pw);
+
+  auto out = ro::MazeSearchProposer::ProposeFromCaptured(base, captured, in);
+  if (out.size() != 1u) {
+    return false;
+  }
+  const r::InsertShield* is = std::get_if<r::InsertShield>(&out[0].delta);
+  if (is == nullptr) {
+    return false;
+  }
+  return is->coverage.ll.x == 200 && is->coverage.ur.x == 220
+         && is->layer == 4 && out[0].proposal_net_id == 99u;
+}
+
+bool TestProposeFromCapturedMultiShapeMonotonicAttemptIds()
+{
+  // 3 shapes (PathSeg + Via + PatchWire) → 3 Deltas with
+  // attempt_index 0, 1, 2 and same region_id/proposer_id.
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 17;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{1000, 1000}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{17, 0, 99};  // proposer_id is preserved
+
+  std::vector<ro::CapturedConnFig> captured;
+
+  ro::CapturedConnFig seg;
+  seg.kind = ro::CapturedConnFig::Kind::PathSeg;
+  seg.bbox = r::Rect{r::Point{0, 0}, r::Point{500, 5}};
+  seg.layer = 2;
+  captured.push_back(seg);
+
+  ro::CapturedConnFig via;
+  via.kind = ro::CapturedConnFig::Kind::Via;
+  via.bbox = r::Rect{r::Point{490, 0}, r::Point{510, 5}};
+  via.layer = 2;
+  via.via_origin = r::Point{500, 2};
+  captured.push_back(via);
+
+  ro::CapturedConnFig pw;
+  pw.kind = ro::CapturedConnFig::Kind::PatchWire;
+  pw.bbox = r::Rect{r::Point{500, 0}, r::Point{1000, 5}};
+  pw.layer = 3;
+  captured.push_back(pw);
+
+  auto out = ro::MazeSearchProposer::ProposeFromCaptured(base, captured, in);
+  if (out.size() != 3u) {
+    return false;
+  }
+  // attempt_index walks 0..2; region_id/proposer_id stable.
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (out[i].id.region_id != 17u) return false;
+    if (out[i].id.proposer_id != 0u) return false;
+    if (out[i].id.attempt_index != static_cast<std::uint32_t>(i))
+      return false;
+    if (out[i].proposal_net_id != 17u) return false;
+  }
+  // Delta variants in order.
+  return std::holds_alternative<r::AddWire>(out[0].delta)
+         && std::holds_alternative<r::AddVia>(out[1].delta)
+         && std::holds_alternative<r::InsertShield>(out[2].delta);
+}
+
+bool TestProposeFromCapturedDeltasAreEvaluable()
+{
+  // End-to-end: captured shapes → ProposedDeltas → batch_eval
+  // under SyntheticOracle. Each Delta should yield a sound score
+  // (not throw, returns optional<Score>).
+  ro::MemoryBackedGeometryView base({}, {});
+  ro::MazeSearchProposer::Input in;
+  in.net_id = 1;
+  in.route_box = r::Rect{r::Point{0, 0}, r::Point{1000, 100}};
+  in.layer = 2;
+  in.delta_id = r::DeltaId{1, 0, 0};
+
+  std::vector<ro::CapturedConnFig> captured;
+  ro::CapturedConnFig seg;
+  seg.kind = ro::CapturedConnFig::Kind::PathSeg;
+  seg.bbox = r::Rect{r::Point{100, 10}, r::Point{500, 15}};
+  seg.layer = 2;
+  captured.push_back(seg);
+  ro::CapturedConnFig via;
+  via.kind = ro::CapturedConnFig::Kind::Via;
+  via.bbox = r::Rect{r::Point{490, 10}, r::Point{510, 15}};
+  via.layer = 2;
+  via.via_origin = r::Point{500, 12};
+  captured.push_back(via);
+
+  auto deltas = ro::MazeSearchProposer::ProposeFromCaptured(
+      base, captured, in);
+
+  r::PhysicalState state;
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+
+  r::ProposalSet set;
+  set.proposals = deltas;
+  auto batch = state.batch_eval(base, set, opts);
+  if (batch.outcomes.size() != 2u) {
+    return false;
+  }
+  // Both must have a score (legal under SyntheticOracle on empty
+  // base for AddWire; AddVia is also legal — synthetic oracle
+  // checks overlap on the same layer).
+  return batch.outcomes[0].score.has_value()
+         && batch.outcomes[1].score.has_value();
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -4433,6 +4634,18 @@ int main()
        TestDriveGateWorkerCountReflectsAdmits},
       {"V2.6.a DriveGate: ResetForTest clears counter",
        TestDriveGateResetForTestClearsCounter},
+      {"V2.2.e.real ProposeFromCaptured empty -> empty",
+       TestProposeFromCapturedEmptyReturnsEmpty},
+      {"V2.2.e.real PathSeg -> AddWire",
+       TestProposeFromCapturedSinglePathSegIsAddWire},
+      {"V2.2.e.real Via -> AddVia",
+       TestProposeFromCapturedViaIsAddVia},
+      {"V2.2.e.real PatchWire -> InsertShield",
+       TestProposeFromCapturedPatchWireIsInsertShield},
+      {"V2.2.e.real multi-shape -> monotonic attempt_index",
+       TestProposeFromCapturedMultiShapeMonotonicAttemptIds},
+      {"V2.2.e.real captured Deltas evaluate cleanly through batch_eval",
+       TestProposeFromCapturedDeltasAreEvaluable},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
