@@ -167,6 +167,7 @@ if(ENABLE_DRT_REDESIGN)
         src/redesign/overlay/OracleCandidate.cpp
         src/redesign/overlay/OverlayGeometryView.cpp
         src/redesign/overlay/RegionQueryGeometryView.cpp
+        src/redesign/overlay/RoutePerturbation.cpp
         src/redesign/overlay/ShadowDump.cpp
         src/redesign/overlay/SyntheticOracle.cpp
     )

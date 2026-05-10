@@ -32,6 +32,7 @@
 #include "redesign/overlay/OracleCandidate.h"
 #include "redesign/overlay/OverlayGeometryView.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
+#include "redesign/overlay/RoutePerturbation.h"
 #include "redesign/overlay/ShadowDump.h"
 #include "redesign/overlay/SnapshotHandle.h"
 #include "redesign/overlay/SyntheticOracle.h"
@@ -4253,6 +4254,155 @@ bool TestProposeFromCapturedDeltasAreEvaluable()
          && batch.outcomes[1].score.has_value();
 }
 
+// ===== V2.6.d.a — RoutePerturbation =====
+
+namespace {
+
+// Build a synthetic 2-segment route for perturbation testing.
+std::vector<ro::CapturedConnFig> SyntheticTwoSegRoute()
+{
+  std::vector<ro::CapturedConnFig> out;
+  ro::CapturedConnFig seg;
+  seg.kind = ro::CapturedConnFig::Kind::PathSeg;
+  seg.bbox = r::Rect{r::Point{100, 200}, r::Point{500, 205}};
+  seg.layer = 2;
+  out.push_back(seg);
+
+  ro::CapturedConnFig via;
+  via.kind = ro::CapturedConnFig::Kind::Via;
+  via.bbox = r::Rect{r::Point{490, 200}, r::Point{510, 205}};
+  via.layer = 2;
+  via.via_origin = r::Point{500, 202};
+  out.push_back(via);
+  return out;
+}
+
+}  // namespace
+
+bool TestPerturbationIdentityIsBitwiseCopy()
+{
+  auto orig = SyntheticTwoSegRoute();
+  ro::PerturbationParams id{};  // (0, 0)
+  auto cp = ro::ApplyPerturbation(orig, id);
+  if (cp.size() != orig.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < orig.size(); ++i) {
+    if (cp[i].kind != orig[i].kind
+        || cp[i].layer != orig[i].layer
+        || cp[i].bbox.ll.x != orig[i].bbox.ll.x
+        || cp[i].bbox.ur.x != orig[i].bbox.ur.x
+        || cp[i].bbox.ll.y != orig[i].bbox.ll.y
+        || cp[i].bbox.ur.y != orig[i].bbox.ur.y
+        || cp[i].via_origin.x != orig[i].via_origin.x
+        || cp[i].via_origin.y != orig[i].via_origin.y) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestPerturbationShiftAppliesToAllShapes()
+{
+  auto orig = SyntheticTwoSegRoute();
+  ro::PerturbationParams p;
+  p.shift_x_dbu = 50;
+  p.shift_y_dbu = -30;
+  auto out = ro::ApplyPerturbation(orig, p);
+
+  // Both shapes should shift by (+50, -30). Layers/kinds preserved.
+  return out[0].bbox.ll.x == 150 && out[0].bbox.ll.y == 170
+         && out[0].bbox.ur.x == 550 && out[0].bbox.ur.y == 175
+         && out[0].layer == 2
+         && out[1].bbox.ll.x == 540 && out[1].bbox.ur.x == 560
+         && out[1].via_origin.x == 550
+         && out[1].via_origin.y == 172;
+}
+
+bool TestGenerateKPerturbationsKZeroIsEmpty()
+{
+  auto orig = SyntheticTwoSegRoute();
+  auto out = ro::GenerateKPerturbations(orig, /*k=*/0);
+  return out.empty();
+}
+
+bool TestGenerateKPerturbationsVariantZeroIsIdentity()
+{
+  auto orig = SyntheticTwoSegRoute();
+  auto out = ro::GenerateKPerturbations(orig, /*k=*/4);
+  if (out.size() != 4u) {
+    return false;
+  }
+  // Variant 0 must be identity (bit-for-bit).
+  if (out[0].size() != orig.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < orig.size(); ++i) {
+    if (out[0][i].bbox.ll.x != orig[i].bbox.ll.x
+        || out[0][i].bbox.ur.x != orig[i].bbox.ur.x) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TestGenerateKPerturbationsAllVariantsDistinct()
+{
+  // K=4 produces 4 variants (identity + 3 shifted). All four
+  // routes' first PathSeg should have distinct bbox.ll.x values
+  // because the schedule rotates through ±x and ±y shifts.
+  auto orig = SyntheticTwoSegRoute();
+  auto out = ro::GenerateKPerturbations(orig, /*k=*/4,
+                                        /*track_pitch=*/100);
+  if (out.size() != 4u) {
+    return false;
+  }
+  // Variant 0: identity (ll.x = 100)
+  // Variant 1: +x → ll.x = 200
+  // Variant 2: -x → ll.x = 0
+  // Variant 3: +y → ll.x stays = 100, ll.y = 300
+  if (out[0][0].bbox.ll.x != 100) return false;
+  if (out[1][0].bbox.ll.x != 200) return false;
+  if (out[2][0].bbox.ll.x != 0) return false;
+  if (out[3][0].bbox.ll.x != 100) return false;
+  if (out[3][0].bbox.ll.y != 300) return false;
+  return true;
+}
+
+bool TestGenerateKPerturbationsTrackPitchHintScales()
+{
+  auto orig = SyntheticTwoSegRoute();
+  auto out_default = ro::GenerateKPerturbations(orig, /*k=*/2,
+                                                /*track_pitch=*/100);
+  auto out_doubled = ro::GenerateKPerturbations(orig, /*k=*/2,
+                                                /*track_pitch=*/200);
+  // Variant 1 = +x shift; with pitch=100 it's +100, with 200 it's +200.
+  return out_default[1][0].bbox.ll.x == 200
+         && out_doubled[1][0].bbox.ll.x == 300;
+}
+
+bool TestGenerateKPerturbationsK1IsIdentityOnly()
+{
+  auto orig = SyntheticTwoSegRoute();
+  auto out = ro::GenerateKPerturbations(orig, /*k=*/1);
+  return out.size() == 1u
+         && out[0][0].bbox.ll.x == orig[0].bbox.ll.x;
+}
+
+bool TestPerturbationWithEmptyRoute()
+{
+  std::vector<ro::CapturedConnFig> empty;
+  ro::PerturbationParams p;
+  p.shift_x_dbu = 50;
+  auto out = ro::ApplyPerturbation(empty, p);
+  if (!out.empty()) {
+    return false;
+  }
+  auto kvars = ro::GenerateKPerturbations(empty, /*k=*/3);
+  return kvars.size() == 3u && kvars[0].empty()
+         && kvars[1].empty() && kvars[2].empty();
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -4646,6 +4796,22 @@ int main()
        TestProposeFromCapturedMultiShapeMonotonicAttemptIds},
       {"V2.2.e.real captured Deltas evaluate cleanly through batch_eval",
        TestProposeFromCapturedDeltasAreEvaluable},
+      {"V2.6.d.a Perturbation identity is bitwise copy",
+       TestPerturbationIdentityIsBitwiseCopy},
+      {"V2.6.d.a Perturbation shift applies to all shapes (incl via_origin)",
+       TestPerturbationShiftAppliesToAllShapes},
+      {"V2.6.d.a GenerateKPerturbations K=0 -> empty",
+       TestGenerateKPerturbationsKZeroIsEmpty},
+      {"V2.6.d.a GenerateKPerturbations variant 0 is identity",
+       TestGenerateKPerturbationsVariantZeroIsIdentity},
+      {"V2.6.d.a GenerateKPerturbations all 4 variants distinct",
+       TestGenerateKPerturbationsAllVariantsDistinct},
+      {"V2.6.d.a GenerateKPerturbations track_pitch_hint scales",
+       TestGenerateKPerturbationsTrackPitchHintScales},
+      {"V2.6.d.a GenerateKPerturbations K=1 -> identity only",
+       TestGenerateKPerturbationsK1IsIdentityOnly},
+      {"V2.6.d.a Perturbation handles empty input route",
+       TestPerturbationWithEmptyRoute},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
