@@ -26,16 +26,14 @@ std::vector<CapturedConnFig> ApplyPerturbation(
   return out;
 }
 
-namespace {
-
-// Deterministic schedule of (shift_x, shift_y) pairs for K-1
-// non-identity perturbations. All shifts are multiples of T (the
-// caller's track_pitch_hint).
-PerturbationParams ShiftScheduleAt(std::size_t variant_index,
-                                   std::int32_t T)
+PerturbationParams PerturbationScheduleAt(std::size_t variant_index,
+                                          std::int32_t T)
 {
-  // variant_index is 1..K-1 (0 is identity, handled elsewhere).
-  // Schedule of 8 directions, then 2T radius, etc.
+  // variant_index 0 → identity. 1+ → schedule of 8 cardinal +
+  // diagonal directions at radius T, then 2T, etc.
+  if (variant_index == 0) {
+    return PerturbationParams{};
+  }
   static const int dx[] = {+1, -1,  0,  0, +1, -1, +1, -1};
   static const int dy[] = { 0,  0, +1, -1, +1, +1, -1, -1};
   const std::size_t cycle_len = sizeof(dx) / sizeof(dx[0]);
@@ -49,8 +47,6 @@ PerturbationParams ShiftScheduleAt(std::size_t variant_index,
   p.shift_y_dbu = dy[step] * radius;
   return p;
 }
-
-}  // namespace
 
 std::vector<std::vector<CapturedConnFig>> GenerateKPerturbations(
     const std::vector<CapturedConnFig>& original,
@@ -68,7 +64,8 @@ std::vector<std::vector<CapturedConnFig>> GenerateKPerturbations(
   // identity wins).
   out.push_back(original);
   for (std::size_t i = 1; i < k; ++i) {
-    const auto params = ShiftScheduleAt(i, track_pitch_hint_dbu);
+    const auto params
+        = PerturbationScheduleAt(i, track_pitch_hint_dbu);
     out.push_back(ApplyPerturbation(original, params));
   }
   return out;

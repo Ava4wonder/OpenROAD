@@ -49,6 +49,16 @@ std::vector<CapturedConnFig> ApplyPerturbation(
     const std::vector<CapturedConnFig>& original,
     const PerturbationParams& params);
 
+// V2.6.d.a — params for a given variant index in
+// GenerateKPerturbations's deterministic schedule. variant_index 0
+// returns (0, 0) (identity); 1+ returns shifts on the schedule
+// described in the .cpp. Exposed publicly so callers (e.g.,
+// V2.6.d.b's FlexDR hook) that select a winning variant can
+// recover its shift params for downstream mutation.
+PerturbationParams PerturbationScheduleAt(
+    std::size_t variant_index,
+    std::int32_t track_pitch_hint_dbu = 100);
+
 // V2.6.d.a — generate K alternative routes for one net, indexed
 // 0..K-1:
 //   0:        identity (no shift) — guarantees upstream's route is

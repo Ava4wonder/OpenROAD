@@ -30,6 +30,7 @@
 #include "redesign/Selection.h"
 #include "redesign/overlay/MazeSearchProposer.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
+#include "redesign/overlay/RoutePerturbation.h"
 #include "redesign/overlay/ShadowDump.h"
 #endif
 #include "db/drObj/drFig.h"
@@ -3631,6 +3632,83 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           = replace_env != nullptr && replace_env[0] != '\0'
             && replace_env[0] != '0';
       if (replace_enabled) {
+        // V2.6.d.b — multi-candidate selection by perturbation.
+        // Read DRIVE_K (default 1 → V2.6.c identity-only behavior
+        // preserved). For K > 1: generate K perturbations of the
+        // captured route, score each via batch_eval, pick the
+        // highest-aggregate-score legal variant. The winning
+        // variant's shift params are then applied to the cloned
+        // drConnFigs before α-replace.
+        const char* k_env
+            = std::getenv("OPENROAD_DRT_REDESIGN_DRIVE_K");
+        std::size_t drive_k = 1;
+        if (k_env != nullptr && k_env[0] != '\0') {
+          try {
+            const long parsed = std::stol(std::string(k_env));
+            if (parsed > 0 && parsed <= 64) {
+              drive_k = static_cast<std::size_t>(parsed);
+            }
+          } catch (...) {
+            // keep drive_k = 1 on parse failure
+          }
+        }
+
+        // Pick the winning variant's perturbation. variant 0 =
+        // identity by construction; if drive_k > 1 we may pick a
+        // non-identity variant.
+        dr_overlay::PerturbationParams winning_shift{};
+        if (drive_k > 1 && !captured.empty()) {
+          // V2.6.d.b — local PhysicalState + EvalOptions for the
+          // multi-candidate scoring loop. v2_state from the
+          // V2.3.c block at the top of routeNet is out of scope
+          // here; this hook ran after upstream's full route is
+          // computed, so we need a fresh per-call eval context.
+          dr_re::PhysicalState v2_eval_state;
+          dr_re::EvalOptions v2_eval_opts;
+          v2_eval_opts.legality_mode
+              = dr_re::LegalityMode::SyntheticOracle;
+
+          const auto k_variants = dr_overlay::GenerateKPerturbations(
+              captured, drive_k, /*track_pitch_hint=*/100);
+          double best_score
+              = -std::numeric_limits<double>::infinity();
+          std::size_t best_k_idx = 0;  // identity by default
+          for (std::size_t kk = 0; kk < k_variants.size(); ++kk) {
+            const auto& perturbed = k_variants[kk];
+            dr_overlay::MazeSearchProposer::Input in_kk = in;
+            in_kk.delta_id.proposer_id = static_cast<std::uint32_t>(kk);
+            const auto deltas
+                = dr_overlay::MazeSearchProposer::ProposeFromCaptured(
+                    v2_view, perturbed, in_kk);
+            dr_re::ProposalSet pset;
+            pset.proposals = deltas;
+            const auto batch = v2_eval_state.batch_eval(
+                v2_view, pset, v2_eval_opts);
+            // Aggregate score: sum over per-shape eval outcomes.
+            // If ANY shape is illegal, treat the whole variant as
+            // -inf (the route as a whole is not committable).
+            double total = 0.0;
+            bool legal = true;
+            for (const auto& outcome : batch.outcomes) {
+              if (!outcome.legality.legal) {
+                legal = false;
+                break;
+              }
+              if (outcome.score.has_value()) {
+                total += outcome.score->aggregate;
+              }
+            }
+            if (legal && total > best_score) {
+              best_score = total;
+              best_k_idx = kk;
+            }
+          }
+          winning_shift = dr_overlay::PerturbationScheduleAt(
+              best_k_idx, /*track_pitch=*/100);
+        }
+        // (else: drive_k == 1 → winning_shift stays identity; the
+        // mutation below clones with no shift, V2.6.c behavior.)
+
         std::vector<std::unique_ptr<drt::drConnFig>> clones;
         clones.reserve(conn_figs.size());
         for (const auto& cf_uptr : conn_figs) {
@@ -3642,13 +3720,42 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           std::unique_ptr<drt::drConnFig> clone;
           if (kind == drt::drcPathSeg) {
             const auto* seg = static_cast<const drt::drPathSeg*>(cf);
-            clone = std::make_unique<drt::drPathSeg>(*seg);
+            auto cloned_seg = std::make_unique<drt::drPathSeg>(*seg);
+            // V2.6.d.b — apply winning shift to the clone's
+            // begin/end points.
+            if (winning_shift.shift_x_dbu != 0
+                || winning_shift.shift_y_dbu != 0) {
+              const odb::Point begin = cloned_seg->getBeginPoint();
+              const odb::Point end = cloned_seg->getEndPoint();
+              cloned_seg->setPoints(
+                  odb::Point(begin.x() + winning_shift.shift_x_dbu,
+                             begin.y() + winning_shift.shift_y_dbu),
+                  odb::Point(end.x() + winning_shift.shift_x_dbu,
+                             end.y() + winning_shift.shift_y_dbu));
+            }
+            clone = std::move(cloned_seg);
           } else if (kind == drt::drcVia) {
             const auto* via = static_cast<const drt::drVia*>(cf);
-            clone = std::make_unique<drt::drVia>(*via);
+            auto cloned_via = std::make_unique<drt::drVia>(*via);
+            if (winning_shift.shift_x_dbu != 0
+                || winning_shift.shift_y_dbu != 0) {
+              const odb::Point orig = cloned_via->getOrigin();
+              cloned_via->setOrigin(odb::Point(
+                  orig.x() + winning_shift.shift_x_dbu,
+                  orig.y() + winning_shift.shift_y_dbu));
+            }
+            clone = std::move(cloned_via);
           } else if (kind == drt::drcPatchWire) {
             const auto* pw = static_cast<const drt::drPatchWire*>(cf);
-            clone = std::make_unique<drt::drPatchWire>(*pw);
+            auto cloned_pw = std::make_unique<drt::drPatchWire>(*pw);
+            if (winning_shift.shift_x_dbu != 0
+                || winning_shift.shift_y_dbu != 0) {
+              const odb::Point orig = cloned_pw->getOrigin();
+              cloned_pw->setOrigin(odb::Point(
+                  orig.x() + winning_shift.shift_x_dbu,
+                  orig.y() + winning_shift.shift_y_dbu));
+            }
+            clone = std::move(cloned_pw);
           } else {
             continue;
           }
