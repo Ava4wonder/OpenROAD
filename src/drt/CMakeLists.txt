@@ -130,6 +130,7 @@ if(ENABLE_DRT_REDESIGN)
       src/redesign/Footprint.cpp
       src/redesign/GreedyPriorityPolicy.cpp
       src/redesign/PhysicalState.cpp
+      src/redesign/ProposalStaging.cpp
       src/redesign/Selection.cpp
       src/redesign/simd/Geom.cpp
       src/redesign/legality/CpuDrcOracle.cpp

@@ -17,6 +17,7 @@
 #include "redesign/ConflictGraph.h"
 #include "redesign/GreedyPriorityPolicy.h"
 #include "redesign/PhysicalState.h"
+#include "redesign/ProposalStaging.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
 #include "redesign/overlay/GeometryView.h"
@@ -3240,6 +3241,203 @@ bool TestSelectMisDeterministicAcrossPolicyInstances()
   return true;
 }
 
+// ===== V2.4.e — ProposalStaging cross-worker barrier =====
+
+namespace {
+
+// Helper: build a StagedProposal from a synthetic AddWire +
+// commit_eligible SyntheticOracle outcome. region_id varies per
+// "worker" so DeltaIds are globally unique.
+r::StagedProposal MakeStagedAddWire(std::uint32_t region_id,
+                                    std::uint32_t attempt_index,
+                                    int x1, int y1, int x2, int y2,
+                                    r::LayerNum layer,
+                                    bool commit_eligible)
+{
+  r::ProposedDelta pd = MakeProposalAddWireWithFootprint(
+      r::DeltaId{region_id, 0, attempt_index}, x1, y1, x2, y2, layer);
+  r::StagedProposal sp;
+  sp.proposal = pd;
+  sp.outcome.legality.legal = commit_eligible;
+  sp.outcome.legality.commit_eligible = commit_eligible;
+  sp.outcome.legality.source = commit_eligible
+                                   ? r::LegalitySource::SyntheticOracle
+                                   : r::LegalitySource::SyntheticOracle;
+  r::Score s;
+  s.aggregate = static_cast<double>(x2 - x1);  // wirelength proxy
+  sp.outcome.score = s;
+  sp.adapter_unsupported = false;
+  return sp;
+}
+
+}  // namespace
+
+bool TestStagingDrainEmpty()
+{
+  r::ProposalStaging::Instance().ResetForTest();
+  auto drained = r::ProposalStaging::Instance().Drain();
+  return drained.empty()
+         && r::ProposalStaging::Instance().size() == 0u;
+}
+
+bool TestStagingPushDrainSize()
+{
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 100, 5, 2, /*commit_eligible=*/true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 1000, 0, 1100, 5, 2, /*commit_eligible=*/true));
+  if (r::ProposalStaging::Instance().size() != 2u) {
+    return false;
+  }
+  auto drained = r::ProposalStaging::Instance().Drain();
+  if (r::ProposalStaging::Instance().size() != 0u) {
+    return false;
+  }
+  return drained.size() == 2u;
+}
+
+bool TestStagingDrainSortsByDeltaId()
+{
+  // Push out of DeltaId order; Drain must DeltaId-sort.
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      3, 0, 0, 0, 100, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 100, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 0, 0, 100, 5, 2, true));
+  auto drained = r::ProposalStaging::Instance().Drain();
+  if (drained.size() != 3u) {
+    return false;
+  }
+  return drained[0].proposal.id == r::DeltaId{1, 0, 0}
+         && drained[1].proposal.id == r::DeltaId{2, 0, 0}
+         && drained[2].proposal.id == r::DeltaId{3, 0, 0};
+}
+
+bool TestResolveStagedAllDisjointAllSelected()
+{
+  // Three workers each stage one disjoint proposal. No conflicts.
+  // All three survive the cross-worker MIS.
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 100, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 1000, 0, 1100, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      3, 0, 2000, 0, 2100, 5, 2, true));
+
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+  return resolve.batch.summary.batch_size == 3u
+         && resolve.selection.selected_ids.size() == 3u
+         && resolve.selection.rejected.empty();
+}
+
+bool TestResolveStagedCrossWorkerOverlapEmitsConflict()
+{
+  // Worker A stages a long wire at (0..1000) layer 2.
+  // Worker B stages a wire at (500..1500) layer 2 — overlaps A.
+  // Cross-worker MIS picks the higher-aggregate (longer wirelength
+  // = wider bbox); the loser is tagged Conflict.
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      /*worker=*/1, 0, 0, 0, 1000, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      /*worker=*/2, 0, 500, 0, 1500, 5, 2, true));
+  // Both have wirelength 1000 → tie → lower DeltaId wins.
+
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+
+  if (resolve.selection.selected_ids.size() != 1u) {
+    return false;
+  }
+  if (!(resolve.selection.selected_ids[0] == r::DeltaId{1, 0, 0})) {
+    return false;
+  }
+  if (resolve.selection.rejected.size() != 1u) {
+    return false;
+  }
+  return resolve.selection.rejected[0].id == r::DeltaId{2, 0, 0}
+         && resolve.selection.rejected[0].reason
+                == r::RejectionReason::Conflict;
+}
+
+bool TestResolveStagedDrainsTheStagingArea()
+{
+  // After ResolveStagedProposals, the staging area must be empty.
+  r::ProposalStaging::Instance().ResetForTest();
+  for (std::uint32_t w = 1; w <= 4; ++w) {
+    r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+        w, 0, static_cast<int>(w) * 1000, 0,
+        static_cast<int>(w) * 1000 + 100, 5, 2, true));
+  }
+  if (r::ProposalStaging::Instance().size() != 4u) {
+    return false;
+  }
+  r::GreedyPriorityPolicy p;
+  (void) r::ResolveStagedProposals(p);
+  return r::ProposalStaging::Instance().size() == 0u;
+}
+
+bool TestResolveStagedSyntheticBatchSummaryFieldsCorrect()
+{
+  // 4 staged proposals: 2 commit_eligible disjoint, 1
+  // commit_eligible overlapping one of the first two, 1
+  // non-eligible. Resolve should populate batch_size=4,
+  // legal_count=3, commit_eligible_count=3,
+  // unresolved_count = (the non-eligible one if its source is
+  // UnresolvedFootprint).
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 100, 5, 2, /*commit_eligible=*/true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 1000, 0, 1100, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      3, 0, 50, 0, 150, 5, 2, true));  // overlaps proposal 1
+  // Non-eligible: synthetic proposal whose outcome we hand-craft
+  // with commit_eligible=false.
+  r::StagedProposal nono = MakeStagedAddWire(
+      4, 0, 5000, 0, 5100, 5, 2, /*commit_eligible=*/false);
+  nono.outcome.legality.legal = false;
+  nono.outcome.legality.source = r::LegalitySource::UnresolvedFootprint;
+  r::ProposalStaging::Instance().Stage(nono);
+
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+
+  if (resolve.batch.summary.batch_size != 4u) {
+    return false;
+  }
+  if (resolve.batch.summary.legal_count != 3u
+      || resolve.batch.summary.commit_eligible_count != 3u
+      || resolve.batch.summary.unresolved_count != 1u) {
+    return false;
+  }
+  // Cross-worker MIS: workers 1 and 3 conflict (overlap), worker
+  // 1 wins (lower DeltaId, equal scores). 2 also selected
+  // (disjoint). 4 was non-eligible (UnresolvedFootprint).
+  // selected = {1, 2}; rejected = {3:Conflict, 4:Unresolved}.
+  if (resolve.selection.selected_ids.size() != 2u) {
+    return false;
+  }
+  if (!(resolve.selection.selected_ids[0] == r::DeltaId{1, 0, 0})
+      || !(resolve.selection.selected_ids[1] == r::DeltaId{2, 0, 0})) {
+    return false;
+  }
+  if (resolve.selection.rejected.size() != 2u) {
+    return false;
+  }
+  return resolve.selection.rejected[0].id == r::DeltaId{3, 0, 0}
+         && resolve.selection.rejected[0].reason
+                == r::RejectionReason::Conflict
+         && resolve.selection.rejected[1].id == r::DeltaId{4, 0, 0}
+         && resolve.selection.rejected[1].reason
+                == r::RejectionReason::UnresolvedFootprint;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3559,6 +3757,20 @@ int main()
        TestSelectMisIllegalAndConflictMixedReasons},
       {"V2.4.d SelectMis deterministic across policy instances",
        TestSelectMisDeterministicAcrossPolicyInstances},
+      {"V2.4.e ProposalStaging drain empty",
+       TestStagingDrainEmpty},
+      {"V2.4.e ProposalStaging push then drain returns N",
+       TestStagingPushDrainSize},
+      {"V2.4.e ProposalStaging Drain DeltaId-sorts the output",
+       TestStagingDrainSortsByDeltaId},
+      {"V2.4.e Resolve cross-worker disjoint -> all selected",
+       TestResolveStagedAllDisjointAllSelected},
+      {"V2.4.e Resolve cross-worker overlap -> Conflict reason emitted",
+       TestResolveStagedCrossWorkerOverlapEmitsConflict},
+      {"V2.4.e Resolve drains the staging area",
+       TestResolveStagedDrainsTheStagingArea},
+      {"V2.4.e Resolve synthetic batch summary fields are correct",
+       TestResolveStagedSyntheticBatchSummaryFieldsCorrect},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
