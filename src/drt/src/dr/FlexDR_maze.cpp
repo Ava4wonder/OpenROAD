@@ -24,6 +24,7 @@
 #include "redesign/BatchEval.h"
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/ConflictPolicy.h"
+#include "redesign/DriveGate.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/ProposalStaging.h"
 #include "redesign/Selection.h"
@@ -3472,6 +3473,141 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
       cleanUnneededPatches_poly(gcWorker_->getTargetNet(), net);
     }
     routeNet_postRouteAddPathCost(net);
+
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+    // V2.6.b — bottom-of-routeNet capture hook. When DriveGate
+    // admits, walk drNet::getRouteConnFigs() (= upstream's just-
+    // computed route), project into V2 CapturedConnFigs, convert
+    // to ProposedDeltas via V2.2.e.real, and stage them for the
+    // V2.4.f cross-worker resolve at endWorkersBatch.
+    //
+    // V2.6.b SCOPE — capture + stage only. No production routing
+    // mutation; the worker's normal commit path at worker->end()
+    // still writes upstream's route to frBlock unchanged. The
+    // staged Deltas mutate ONLY the cross-worker barrier's
+    // synthetic BatchEvalResult and the BatchSummaryDump CSV.
+    // Hash-equality vs V2.4.f baseline is preserved by
+    // construction.
+    //
+    // Tagging: each staged proposal gets worker_id=99 as the
+    // sentinel for "V2.6.b real-route capture" so a CSV consumer
+    // can distinguish them from V2.3.c synthetic K=4 captures
+    // (which leave worker_id at the default -1).
+    if (drt::redesign::DriveGate::ShouldDriveAndCount(getDRIter())) {
+      namespace dr_re = drt::redesign;
+      namespace dr_overlay = drt::redesign::overlay;
+
+      // Build CapturedConnFig vector from drNet::getRouteConnFigs.
+      std::vector<dr_overlay::CapturedConnFig> captured;
+      const auto& conn_figs = net->getRouteConnFigs();
+      captured.reserve(conn_figs.size());
+      for (const auto& cf_uptr : conn_figs) {
+        const drt::drBlockObject* cf = cf_uptr.get();
+        if (cf == nullptr) {
+          continue;
+        }
+        const auto kind = cf->typeId();
+        dr_overlay::CapturedConnFig cap;
+        if (kind == drt::drcPathSeg) {
+          const auto* seg = static_cast<const drt::drPathSeg*>(cf);
+          cap.kind = dr_overlay::CapturedConnFig::Kind::PathSeg;
+          const odb::Rect bb = seg->getBBox();
+          cap.bbox.ll.x = bb.xMin();
+          cap.bbox.ll.y = bb.yMin();
+          cap.bbox.ur.x = bb.xMax();
+          cap.bbox.ur.y = bb.yMax();
+          cap.layer = static_cast<dr_re::LayerNum>(seg->getLayerNum());
+        } else if (kind == drt::drcVia) {
+          const auto* via = static_cast<const drt::drVia*>(cf);
+          cap.kind = dr_overlay::CapturedConnFig::Kind::Via;
+          const odb::Rect bb = via->getBBox();
+          cap.bbox.ll.x = bb.xMin();
+          cap.bbox.ll.y = bb.yMin();
+          cap.bbox.ur.x = bb.xMax();
+          cap.bbox.ur.y = bb.yMax();
+          const odb::Point org = via->getOrigin();
+          cap.via_origin.x = org.x();
+          cap.via_origin.y = org.y();
+          // Layer = cut layer when via_def is available; else 0.
+          cap.layer = (via->getViaDef() != nullptr)
+                          ? static_cast<dr_re::LayerNum>(
+                                via->getViaDef()->getCutLayerNum())
+                          : 0;
+        } else if (kind == drt::drcPatchWire) {
+          const auto* pw = static_cast<const drt::drPatchWire*>(cf);
+          cap.kind = dr_overlay::CapturedConnFig::Kind::PatchWire;
+          const odb::Rect bb = pw->getBBox();
+          cap.bbox.ll.x = bb.xMin();
+          cap.bbox.ll.y = bb.yMin();
+          cap.bbox.ur.x = bb.xMax();
+          cap.bbox.ur.y = bb.yMax();
+          cap.layer = static_cast<dr_re::LayerNum>(pw->getLayerNum());
+        } else {
+          // Unknown drConnFig kind. Skip silently — V2.6.b's job
+          // is observation, not error reporting.
+          continue;
+        }
+        captured.push_back(cap);
+      }
+
+      // Convert to V2 ProposedDeltas via V2.2.e.real.
+      dr_overlay::RegionQueryGeometryView v2_view(getDesign());
+      dr_overlay::MazeSearchProposer::Input in;
+      in.net_id = (net->getFrNet() != nullptr)
+                      ? static_cast<dr_re::NetId>(
+                            net->getFrNet()->getId())
+                      : 0;
+      const odb::Rect rb = getRouteBox();
+      in.route_box.ll.x = rb.xMin();
+      in.route_box.ll.y = rb.yMin();
+      in.route_box.ur.x = rb.xMax();
+      in.route_box.ur.y = rb.yMax();
+      // Layer is multi-shape; use the first PathSeg / PatchWire's
+      // layer or 0 as the OCC read-context layer (heuristic — the
+      // route_box's OCC read-set is the worker's full clip on
+      // every layer in practice; per-shape read footprints are
+      // populated separately inside ProposeFromCaptured).
+      in.layer = !captured.empty()
+                     ? captured.front().layer
+                     : static_cast<dr_re::LayerNum>(0);
+      in.delta_id.region_id = static_cast<std::uint32_t>(in.net_id);
+      // proposer_id = 1 distinguishes V2.6.b real-route captures
+      // from V2.3.c synthetic K=4 captures (which use
+      // proposer_id=0).
+      in.delta_id.proposer_id = 1;
+      in.delta_id.attempt_index = 0;
+      in.snapshot_version = 0;
+
+      auto deltas = dr_overlay::MazeSearchProposer::ProposeFromCaptured(
+          v2_view, captured, in);
+
+      // Stage each. Synthetic eval outcome — V2.6.b is shadow-on-
+      // real-routes; we don't actually re-eval here (the route is
+      // already in the design and was upstream-validated).
+      // commit_eligible=true with source=UpstreamExact so
+      // BatchSummaryDump distinguishes these from synthetic
+      // proposals.
+      for (auto& pd : deltas) {
+        // worker_id=99 — sentinel for V2.6.b real-route capture.
+        pd.worker_id = 99;
+        dr_re::StagedProposal sp;
+        sp.proposal = std::move(pd);
+        sp.outcome.legality.legal = true;
+        sp.outcome.legality.source = dr_re::LegalitySource::UpstreamExact;
+        sp.outcome.legality.commit_eligible = true;
+        // Score: minimal — wirelength proxy from the bbox. The
+        // cross-worker MIS at endWorkersBatch will rank these
+        // among the V2.3.c synthetic captures.
+        dr_re::Score s;
+        s.delta_wirelength_proxy = 0.0;  // populated by V2.5.c provider
+                                          // when wired; left zero here
+        s.aggregate = 0.0;
+        sp.outcome.score = s;
+        sp.adapter_unsupported = false;
+        dr_re::ProposalStaging::Instance().Stage(std::move(sp));
+      }
+    }
+#endif
   }
   return searchSuccess;
 }
