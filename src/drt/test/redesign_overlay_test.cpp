@@ -20,6 +20,7 @@
 #include "redesign/ProposalStaging.h"
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
+#include "redesign/CongestionTimingProvider.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/Predicates.h"
 #include "redesign/overlay/GeometryView.h"
@@ -3758,6 +3759,117 @@ bool TestCpuDrcOracleRealDeckUnknownFootprintIsUnresolved()
          && !out.legality.commit_eligible;
 }
 
+// ===== V2.5.c — CongestionTimingProvider seam =====
+
+namespace {
+
+// Test stub: returns fixed (congestion, timing) deltas regardless
+// of input. Used to verify that the seam plumbs values through
+// to Score::aggregate. A real provider would inspect base
+// congestion estimates + STA criticality.
+class StubCtProvider : public r::CongestionTimingProvider
+{
+ public:
+  StubCtProvider(double c, double t) : c_(c), t_(t) {}
+  r::CongestionTimingDelta Query(
+      const ro::GeometryView& base,
+      const r::ProposedDelta& delta) const override
+  {
+    (void) base;
+    (void) delta;
+    return r::CongestionTimingDelta{c_, t_};
+  }
+
+ private:
+  double c_;
+  double t_;
+};
+
+}  // namespace
+
+bool TestCtProviderDefaultsAreUnityForBackwardCompat()
+{
+  // V2.5.a TestCostWeightsDefaultsAreUnity covers drc/marker/
+  // fixed_shape/marker_decay; this verifies congestion/timing also
+  // default to 1.0 so V2.5.c is backward-compat at the seam level.
+  r::EvalOptions opts;
+  return opts.cost_weights.congestion == 1.0
+         && opts.cost_weights.timing == 1.0;
+}
+
+bool TestCtProviderAbsentLeavesScoreAtV24Behavior()
+{
+  // No provider attached → delta_congestion + delta_timing stay 0
+  // → aggregate matches V2.5.a's V2.4-equivalent behavior.
+  ro::MemoryBackedGeometryView base({}, {});
+  r::PhysicalState state;
+  // Note: NOT calling SetCongestionTimingProvider.
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 1000, 5, 2);
+  auto out = state.eval(base, pd, opts);
+  return out.score.has_value() && out.score->aggregate == 1000.0
+         && out.score->delta_congestion == 0.0
+         && out.score->delta_timing == 0.0;
+}
+
+bool TestCtProviderPopulatesScoreFields()
+{
+  // Provider returns fixed (congestion=2.5, timing=3.5). Verify
+  // the values land in Score::delta_congestion + delta_timing,
+  // and aggregate reflects them with default weights (1.0 each).
+  ro::MemoryBackedGeometryView base({}, {});
+  StubCtProvider provider(2.5, 3.5);
+  r::PhysicalState state;
+  state.SetCongestionTimingProvider(&provider);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 1000, 5, 2);
+  auto out = state.eval(base, pd, opts);
+  if (!out.score.has_value()) {
+    return false;
+  }
+  // Aggregate = 1000 (wirelength) + 2.5 (congestion) + 3.5 (timing) = 1006.0
+  return out.score->delta_congestion == 2.5
+         && out.score->delta_timing == 3.5
+         && out.score->aggregate == 1006.0;
+}
+
+bool TestCtProviderCostWeightsBiasCongestionAndTiming()
+{
+  // Same provider, different weights: congestion=10, timing=20 →
+  // aggregate = 1000 + 10*2.5 + 20*3.5 = 1000 + 25 + 70 = 1095.
+  ro::MemoryBackedGeometryView base({}, {});
+  StubCtProvider provider(2.5, 3.5);
+  r::PhysicalState state;
+  state.SetCongestionTimingProvider(&provider);
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  opts.cost_weights.congestion = 10.0;
+  opts.cost_weights.timing = 20.0;
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 1000, 5, 2);
+  auto out = state.eval(base, pd, opts);
+  return out.score.has_value() && out.score->aggregate == 1095.0;
+}
+
+bool TestCtProviderDetachReturnsToZero()
+{
+  // Attach then detach → delta_congestion + delta_timing back to 0.
+  ro::MemoryBackedGeometryView base({}, {});
+  StubCtProvider provider(7.0, 11.0);
+  r::PhysicalState state;
+  state.SetCongestionTimingProvider(&provider);
+  state.SetCongestionTimingProvider(nullptr);  // detach
+  r::EvalOptions opts;
+  opts.legality_mode = r::LegalityMode::SyntheticOracle;
+  auto pd = MakeProposalAddWire(r::DeltaId{1, 0, 0}, 0, 0, 1000, 5, 2);
+  auto out = state.eval(base, pd, opts);
+  return out.score.has_value()
+         && out.score->delta_congestion == 0.0
+         && out.score->delta_timing == 0.0
+         && out.score->aggregate == 1000.0;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -4115,6 +4227,16 @@ int main()
        TestCpuDrcOracleRealDeckSameNetSelfOverlapIsLegal},
       {"V2.5.b RealDeck unknown footprint -> UnresolvedFootprint",
        TestCpuDrcOracleRealDeckUnknownFootprintIsUnresolved},
+      {"V2.5.c CostWeights congestion + timing default to 1.0",
+       TestCtProviderDefaultsAreUnityForBackwardCompat},
+      {"V2.5.c No CT provider -> score matches V2.4 behavior",
+       TestCtProviderAbsentLeavesScoreAtV24Behavior},
+      {"V2.5.c CT provider populates Score::delta_{congestion,timing}",
+       TestCtProviderPopulatesScoreFields},
+      {"V2.5.c CostWeights bias congestion + timing terms",
+       TestCtProviderCostWeightsBiasCongestionAndTiming},
+      {"V2.5.c Detach CT provider returns deltas to zero",
+       TestCtProviderDetachReturnsToZero},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

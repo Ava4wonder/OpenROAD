@@ -63,6 +63,16 @@ struct CostWeights
   double marker_decay = 1.0; // exponential decay applied per iteration
                              // by the future RL policy; eval treats
                              // it as a passthrough today.
+  // V2.5.c — congestion + timing weights for the aggregate's
+  // delta_congestion + delta_timing terms. Khan-Rovinski's
+  // 4-vector does not include these (their policy is maze-search
+  // cost weights only); congestion/timing weights are an
+  // additional, separate per-iteration knob a different policy
+  // would set. Default 1.0 preserves V2.5.a backward-compat
+  // (delta_congestion + delta_timing are zero today unless a
+  // CongestionTimingProvider is attached).
+  double congestion = 1.0;
+  double timing = 1.0;
 };
 
 struct EvalOptions

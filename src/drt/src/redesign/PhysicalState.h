@@ -34,6 +34,8 @@ struct RuleEntry;
 
 namespace drt::redesign {
 
+class CongestionTimingProvider;
+
 class PhysicalState
 {
  public:
@@ -122,6 +124,16 @@ class PhysicalState
   // can be exercised. Full PDK rule translation is V2.5.b.deck.
   void SetCpuDrcOracle(legality::CpuDrcOracle* oracle,
                        std::vector<legality::RuleEntry> rules);
+
+  // V2.5.c — attach a per-net congestion + timing data provider.
+  // When set, eval() populates Score::delta_congestion +
+  // Score::delta_timing from the provider for every successful
+  // candidate; aggregate then weights them via
+  // CostWeights::congestion + CostWeights::timing. Pass nullptr
+  // to detach. Lifetime: caller-owned. The provider MUST be
+  // re-entrant (eval() runs inside V2.4.f's OMP-parallel region).
+  void SetCongestionTimingProvider(
+      const CongestionTimingProvider* provider);
 
   uint64_t current_version() const noexcept;
 

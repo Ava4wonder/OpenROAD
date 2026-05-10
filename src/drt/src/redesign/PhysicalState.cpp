@@ -16,6 +16,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "CongestionTimingProvider.h"
 #include "legality/CpuDrcOracle.h"
 #include "overlay/MutableGeometryStore.h"
 #include "overlay/OracleCandidate.h"
@@ -42,6 +43,10 @@ class PhysicalStateImpl
   // responsibility (see PhysicalState.h doc).
   legality::CpuDrcOracle* cpu_drc_oracle = nullptr;
   std::vector<legality::RuleEntry> cpu_drc_rules;
+  // V2.5.c — caller-attached congestion+timing data source.
+  // Non-owning. Lifetime is the caller's responsibility (see
+  // PhysicalState.h doc).
+  const CongestionTimingProvider* ct_provider = nullptr;
 };
 
 struct PhysicalState::Impl
@@ -352,19 +357,34 @@ EvalOutcome PhysicalState::eval(
       },
       delta.delta);
 
-  // V2.5.a aggregate: cost-weighted sum with Khan-Rovinski-style
-  // 4-vector applied. Defaults of CostWeights{1,1,1,1} reduce this
-  // to V2.4's `wirelength + 100*via_count` because delta_history_cost
-  // and delta_marker_reduction are zero for today's synthetic
-  // proposals. V2.5.c will populate the congestion/timing terms;
-  // a future commit feeds CostWeights from the RL policy.
+  // V2.5.c — populate delta_congestion + delta_timing from the
+  // attached provider, if any. Without a provider, both stay 0.0
+  // and the V2.5.a default-weights backward-compat property
+  // (aggregate == V2.4's wirelength + 100*via_count) is preserved.
+  if (impl_->state->ct_provider != nullptr) {
+    const auto ct
+        = impl_->state->ct_provider->Query(base_geometry, delta);
+    score.delta_congestion = ct.delta_congestion;
+    score.delta_timing = ct.delta_timing;
+  }
+
+  // V2.5.a/c aggregate: cost-weighted sum with Khan-Rovinski-style
+  // 4-vector + V2.5.c congestion/timing weights applied. Defaults
+  // of CostWeights{drc=1, marker=1, fixed_shape=1, marker_decay=1,
+  // congestion=1, timing=1} reduce this to V2.4's
+  // `wirelength + 100*via_count` when (a) no CongestionTiming
+  // Provider is attached AND (b) Score::delta_history_cost +
+  // delta_marker_reduction stay zero (their value today on
+  // synthetic proposals).
   score.aggregate
       = score.delta_wirelength_proxy
         + 100.0 * score.delta_via_count
               * opts.cost_weights.fixed_shape
         + opts.cost_weights.drc * score.delta_history_cost
         - opts.cost_weights.marker
-              * static_cast<double>(score.delta_marker_reduction);
+              * static_cast<double>(score.delta_marker_reduction)
+        + opts.cost_weights.congestion * score.delta_congestion
+        + opts.cost_weights.timing * score.delta_timing;
 
   outcome.score = score;
   return outcome;
@@ -547,6 +567,13 @@ void PhysicalState::SetCpuDrcOracle(legality::CpuDrcOracle* oracle,
 {
   impl_->state->cpu_drc_oracle = oracle;
   impl_->state->cpu_drc_rules = std::move(rules);
+}
+
+// V2.5.c — attach a per-net congestion + timing data provider.
+void PhysicalState::SetCongestionTimingProvider(
+    const CongestionTimingProvider* provider)
+{
+  impl_->state->ct_provider = provider;
 }
 
 // V2.2.d test-only inspection of the writable store. PhysicalState
