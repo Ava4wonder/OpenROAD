@@ -25,6 +25,7 @@
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/ConflictPolicy.h"
 #include "redesign/PhysicalState.h"
+#include "redesign/ProposalStaging.h"
 #include "redesign/Selection.h"
 #include "redesign/overlay/MazeSearchProposer.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
@@ -3354,6 +3355,41 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
     auto v2_row = dr_re::MakeBatchSummaryRow(
         v2_batch, v2_sel, v2_net_id, /*seqno=*/0);
     dr_re::BatchSummaryDump::Record(v2_row);
+
+    // V2.4.f — stage the SelectBest winner (if any) into the
+    // process-wide ProposalStaging singleton for the
+    // cross-worker barrier to resolve later in
+    // FlexDR::endWorkersBatch. Workers run inside an OMP
+    // parallel region; ProposalStaging::Stage takes an internal
+    // mutex.
+    if (v2_sel.has_winner) {
+      // Find the winner's index in v2_batch (parallel vectors
+      // outcome_proposal_ids[i] ↔ outcomes[i] ↔
+      // adapter_unsupported[i]).
+      std::size_t widx = 0;
+      bool found = false;
+      for (std::size_t k = 0; k < v2_batch.outcome_proposal_ids.size();
+           ++k) {
+        if (v2_batch.outcome_proposal_ids[k] == v2_sel.winner_id) {
+          widx = k;
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        // Find the matching ProposedDelta in the set.
+        for (const auto& pd : v2_set.proposals) {
+          if (pd.id == v2_sel.winner_id) {
+            dr_re::StagedProposal sp;
+            sp.proposal = pd;
+            sp.outcome = v2_batch.outcomes[widx];
+            sp.adapter_unsupported = v2_batch.adapter_unsupported[widx];
+            dr_re::ProposalStaging::Instance().Stage(std::move(sp));
+            break;
+          }
+        }
+      }
+    }
   }
 #endif
   frOrderedIdSet<drPin*> unConnPins;

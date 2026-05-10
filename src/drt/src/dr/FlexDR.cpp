@@ -3,6 +3,12 @@
 
 #include "dr/FlexDR.h"
 
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+#include "redesign/BatchSummaryDump.h"
+#include "redesign/GreedyPriorityPolicy.h"
+#include "redesign/ProposalStaging.h"
+#endif
+
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -806,6 +812,34 @@ void FlexDR::endWorkersBatch(
     }
   }
   workers_batch.clear();
+
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+  // V2.4.f — cross-worker barrier. Each worker's V2.3.c shadow
+  // hook staged its SelectBest winner into the process-wide
+  // ProposalStaging singleton. After this batch's omp parallel
+  // region completes (we are now single-threaded), drain the
+  // staging area, run the cross-worker MIS via
+  // GreedyPriorityPolicy, and emit one BatchSummaryDump row
+  // tagged with net_id=0 (cross-worker sentinel) carrying the
+  // num_conflict count — the new V2.4 signal.
+  //
+  // Shadow only per the V2.4 gating decision: no PhysicalState
+  // is committed against, no production routing changes.
+  {
+    namespace dr_re = drt::redesign;
+    if (dr_re::ProposalStaging::Instance().size() > 0) {
+      dr_re::GreedyPriorityPolicy v24_policy;
+      auto v24_resolve
+          = dr_re::ResolveStagedProposals(v24_policy);
+      if (v24_resolve.batch.summary.batch_size > 0) {
+        auto v24_row = dr_re::MakeCrossWorkerSummaryRow(
+            v24_resolve.batch, v24_resolve.selection,
+            /*seqno=*/0);
+        dr_re::BatchSummaryDump::Record(v24_row);
+      }
+    }
+  }
+#endif
 }
 
 odb::Rect FlexDR::getDRVBBox(const odb::Rect& drv_rect) const

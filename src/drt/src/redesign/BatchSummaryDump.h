@@ -82,6 +82,27 @@ BatchSummaryRow MakeBatchSummaryRow(const BatchEvalResult& batch,
                                     std::uint64_t net_id,
                                     std::uint64_t seqno);
 
+// V2.4.f — build a BatchSummaryRow from the cross-worker resolve
+// path (synthetic BatchEvalResult + MisSelectionResult). Convention:
+//   * net_id = 0 (sentinel for "cross-worker batch"; per-net rows
+//     always have a real net_id, so 0 is unambiguous).
+//   * has_winner = 0 and winner_delta_id/winner_score empty —
+//     MIS produces multiple winners and the schema does not encode
+//     that. Consumers needing the committed-subset size compute it
+//     as batch_size - num_conflict (other rejection-reason buckets
+//     are 0 by construction because workers only stage their own
+//     commit_eligible winners).
+//   * num_conflict is the cross-worker signal that did not exist
+//     before V2.4: counts proposals that lost the cross-worker
+//     MIS to a higher-priority sibling.
+//
+// Forward-declared in Selection.h; the .cpp consumes the full
+// MisSelectionResult definition.
+struct MisSelectionResult;
+BatchSummaryRow MakeCrossWorkerSummaryRow(const BatchEvalResult& batch,
+                                          const MisSelectionResult& sel,
+                                          std::uint64_t seqno);
+
 class BatchSummaryDump
 {
  public:

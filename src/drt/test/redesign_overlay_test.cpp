@@ -3438,6 +3438,77 @@ bool TestResolveStagedSyntheticBatchSummaryFieldsCorrect()
                 == r::RejectionReason::UnresolvedFootprint;
 }
 
+// ===== V2.4.f — MakeCrossWorkerSummaryRow + integration =====
+
+bool TestCrossWorkerRowSentinelNetIdAndNoSingleWinner()
+{
+  // Two staged proposals, one wins MIS (lower DeltaId on tie),
+  // one rejected as Conflict. Cross-worker row should have
+  // net_id=0, has_winner=false, num_conflict=1.
+  r::ProposalStaging::Instance().ResetForTest();
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 1000, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 500, 0, 1500, 5, 2, true));
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+  auto row = r::MakeCrossWorkerSummaryRow(
+      resolve.batch, resolve.selection, /*seqno=*/77);
+
+  return row.seqno == 77u && row.net_id == 0u
+         && row.batch_size == 2u && !row.has_winner
+         && row.num_commit_eligible == 2u
+         && row.num_conflict == 1u && row.num_illegal == 0u
+         && row.num_unresolved == 0u && row.num_unsupported == 0u
+         && row.num_lower_score == 0u
+         && row.EncodeWinnerDeltaId().empty();
+}
+
+bool TestCrossWorkerRowAllDisjointZeroConflict()
+{
+  // Three disjoint staged proposals → all selected, num_conflict=0.
+  r::ProposalStaging::Instance().ResetForTest();
+  for (std::uint32_t w = 1; w <= 3; ++w) {
+    r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+        w, 0, static_cast<int>(w) * 1000, 0,
+        static_cast<int>(w) * 1000 + 100, 5, 2, true));
+  }
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+  auto row = r::MakeCrossWorkerSummaryRow(
+      resolve.batch, resolve.selection, /*seqno=*/0);
+
+  return row.batch_size == 3u && row.num_commit_eligible == 3u
+         && row.num_conflict == 0u && !row.has_winner;
+}
+
+bool TestCrossWorkerRowFeedsBatchSummaryDumpCorrectly()
+{
+  // End-to-end: cross-worker resolve → MakeCrossWorkerSummaryRow
+  // → BatchSummaryDump::Record. Verify the dump's process-wide
+  // counters reflect this. (Reset both first.)
+  r::BatchSummaryDump::ResetForTest();
+  r::ProposalStaging::Instance().ResetForTest();
+
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      1, 0, 0, 0, 1000, 5, 2, true));
+  r::ProposalStaging::Instance().Stage(MakeStagedAddWire(
+      2, 0, 500, 0, 1500, 5, 2, true));
+
+  r::GreedyPriorityPolicy p;
+  auto resolve = r::ResolveStagedProposals(p);
+  auto row = r::MakeCrossWorkerSummaryRow(
+      resolve.batch, resolve.selection, /*seqno=*/0);
+  r::BatchSummaryDump::Record(row);
+
+  return r::BatchSummaryDump::batch_count() == 1u
+         && r::BatchSummaryDump::batches_with_winner() == 0u
+         && r::BatchSummaryDump::total_proposals() == 2u
+         && r::BatchSummaryDump::total_rejection_count_for(
+                r::RejectionReason::Conflict)
+                == 1u;
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -3771,6 +3842,12 @@ int main()
        TestResolveStagedDrainsTheStagingArea},
       {"V2.4.e Resolve synthetic batch summary fields are correct",
        TestResolveStagedSyntheticBatchSummaryFieldsCorrect},
+      {"V2.4.f cross-worker row uses sentinel net_id=0, no single winner",
+       TestCrossWorkerRowSentinelNetIdAndNoSingleWinner},
+      {"V2.4.f cross-worker row all-disjoint -> num_conflict=0",
+       TestCrossWorkerRowAllDisjointZeroConflict},
+      {"V2.4.f cross-worker row feeds BatchSummaryDump correctly",
+       TestCrossWorkerRowFeedsBatchSummaryDumpCorrectly},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",

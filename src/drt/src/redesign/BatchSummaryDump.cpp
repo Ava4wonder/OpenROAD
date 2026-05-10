@@ -18,6 +18,8 @@
 #include <thread>
 #include <unistd.h>
 
+#include "Selection.h"  // V2.4.f — MisSelectionResult definition
+
 namespace drt::redesign {
 
 namespace {
@@ -261,6 +263,48 @@ BatchSummaryRow MakeBatchSummaryRow(const BatchEvalResult& batch,
         // a column today; intentionally not surfaced — the
         // batch_size minus the named buckets minus winner gives the
         // residue.
+        break;
+    }
+  }
+  return row;
+}
+
+BatchSummaryRow MakeCrossWorkerSummaryRow(const BatchEvalResult& batch,
+                                          const MisSelectionResult& sel,
+                                          std::uint64_t seqno)
+{
+  BatchSummaryRow row;
+  row.seqno = seqno;
+  row.net_id = 0;  // sentinel for cross-worker rows (see header).
+  row.batch_size = batch.summary.batch_size;
+  // has_winner stays false — MIS yields multiple winners and the
+  // schema does not encode that. Consumers compute the committed
+  // count as batch_size - num_conflict.
+  row.has_winner = false;
+  row.num_commit_eligible = batch.summary.commit_eligible_count;
+
+  for (const auto& rj : sel.rejected) {
+    switch (rj.reason) {
+      case RejectionReason::Illegal:
+        row.num_illegal += 1;
+        break;
+      case RejectionReason::UnresolvedFootprint:
+        row.num_unresolved += 1;
+        break;
+      case RejectionReason::UnsupportedDelta:
+        row.num_unsupported += 1;
+        break;
+      case RejectionReason::LowerScore:
+        // V2.4.f cross-worker resolve does not produce LowerScore
+        // (per-worker SelectBest already filtered). If it ever
+        // does, count it.
+        row.num_lower_score += 1;
+        break;
+      case RejectionReason::Conflict:
+        row.num_conflict += 1;
+        break;
+      case RejectionReason::Unknown:
+      case RejectionReason::None:
         break;
     }
   }
