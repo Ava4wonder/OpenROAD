@@ -12,10 +12,21 @@ option(ENABLE_DRT_REDESIGN_OVERLAY
   "Build the V2 transactional read/write overlay around drt. Requires \
 ENABLE_DRT_REDESIGN. See topics/.../v2_drt_redesign_plan.md."
   OFF)
+option(ENABLE_DRT_REDESIGN_DRIVE
+  "V2.6.a — physically allow the V2 path to drive (mutate) production \
+routing for a controlled subset of nets. When OFF (default), DriveGate:: \
+ShouldDriveAndCount() ALWAYS returns false regardless of env vars. \
+Production builds without this flag CANNOT enter drive mode. Requires \
+ENABLE_DRT_REDESIGN_OVERLAY. See topics/.../integration_reference_map.md."
+  OFF)
 
 if(ENABLE_DRT_REDESIGN_OVERLAY AND NOT ENABLE_DRT_REDESIGN)
   message(FATAL_ERROR
     "ENABLE_DRT_REDESIGN_OVERLAY requires ENABLE_DRT_REDESIGN=ON.")
+endif()
+if(ENABLE_DRT_REDESIGN_DRIVE AND NOT ENABLE_DRT_REDESIGN_OVERLAY)
+  message(FATAL_ERROR
+    "ENABLE_DRT_REDESIGN_DRIVE requires ENABLE_DRT_REDESIGN_OVERLAY=ON.")
 endif()
 
 project(drt
@@ -127,6 +138,7 @@ if(ENABLE_DRT_REDESIGN)
     PRIVATE
       src/redesign/BatchSummaryDump.cpp
       src/redesign/ConflictGraph.cpp
+      src/redesign/DriveGate.cpp
       src/redesign/Footprint.cpp
       src/redesign/GreedyPriorityPolicy.cpp
       src/redesign/PhysicalState.cpp
@@ -159,6 +171,10 @@ if(ENABLE_DRT_REDESIGN)
         src/redesign/overlay/SyntheticOracle.cpp
     )
     target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_OVERLAY=1)
+  endif()
+
+  if(ENABLE_DRT_REDESIGN_DRIVE)
+    target_compile_definitions(drt_lib PRIVATE ENABLE_DRT_REDESIGN_DRIVE=1)
   endif()
 
   add_executable(redesign_simd_test test/redesign_simd_test.cpp)

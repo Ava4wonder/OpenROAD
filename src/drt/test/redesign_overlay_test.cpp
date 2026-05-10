@@ -21,6 +21,7 @@
 #include "redesign/Score.h"
 #include "redesign/Selection.h"
 #include "redesign/CongestionTimingProvider.h"
+#include "redesign/DriveGate.h"
 #include "redesign/legality/CpuDrcOracle.h"
 #include "redesign/legality/Predicates.h"
 #include "redesign/overlay/GeometryView.h"
@@ -3870,6 +3871,187 @@ bool TestCtProviderDetachReturnsToZero()
          && out.score->aggregate == 1000.0;
 }
 
+// ===== V2.6.a — DriveGate =====
+
+bool TestDriveGateBuildFlagOffAlwaysReturnsFalse()
+{
+  // The build flag governs all behavior. When OFF, no env var
+  // setting can flip ShouldDriveAndCount to true. Below we set
+  // env vars that WOULD admit (N=10, ITER_LIMIT=10) but expect
+  // false because the binary was built without
+  // ENABLE_DRT_REDESIGN_DRIVE.
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "10", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "10", 1);
+  r::DriveGate::ResetForTest();
+
+  bool any_admit = false;
+  for (int i = 0; i < 5; ++i) {
+    if (r::DriveGate::ShouldDriveAndCount(/*iter=*/0)) {
+      any_admit = true;
+      break;
+    }
+  }
+
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  r::DriveGate::ResetForTest();
+
+  if (r::DriveGate::BuildFlagEnabled()) {
+    // Build flag ON: with N=10/ITER_LIMIT=10 the gate admits;
+    // any_admit must be true.
+    return any_admit;
+  }
+  // Build flag OFF: gate ALWAYS returns false; counter stays 0
+  // regardless of env vars.
+  return !any_admit && r::DriveGate::worker_count() == 0;
+}
+
+bool TestDriveGateDefaultEnvNoAdmits()
+{
+  // No env vars set → defaults (N=0, ITER_LIMIT=0). Even iter 0
+  // is excluded because N=0 means no drive at all.
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE");
+  r::DriveGate::ResetForTest();
+
+  bool any_admit = false;
+  for (int i = 0; i < 10; ++i) {
+    if (r::DriveGate::ShouldDriveAndCount(/*iter=*/0)) {
+      any_admit = true;
+      break;
+    }
+  }
+  r::DriveGate::ResetForTest();
+  return !any_admit;
+}
+
+bool TestDriveGateNFirstCallsAdmit()
+{
+  if (!r::DriveGate::BuildFlagEnabled()) {
+    // Build flag off → cannot exercise admit-path. Skip-as-pass.
+    return true;
+  }
+  {
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "3", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "0", 1);
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE");
+  r::DriveGate::ResetForTest();
+
+  // First 3 calls at iter 0 admit; subsequent at iter 0 do not.
+  bool admits[6];
+  for (int i = 0; i < 6; ++i) {
+    admits[i] = r::DriveGate::ShouldDriveAndCount(/*iter=*/0);
+  }
+
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  r::DriveGate::ResetForTest();
+
+  return admits[0] && admits[1] && admits[2]
+         && !admits[3] && !admits[4] && !admits[5];
+  }
+}
+
+bool TestDriveGateIterLimitGatesIterIndex()
+{
+  if (!r::DriveGate::BuildFlagEnabled()) {
+    return true;
+  }
+  {
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "100", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "0", 1);
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE");
+  r::DriveGate::ResetForTest();
+
+  bool iter0_admit = r::DriveGate::ShouldDriveAndCount(/*iter=*/0);
+  bool iter1_reject = !r::DriveGate::ShouldDriveAndCount(/*iter=*/1);
+  bool iter5_reject = !r::DriveGate::ShouldDriveAndCount(/*iter=*/5);
+
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  r::DriveGate::ResetForTest();
+  return iter0_admit && iter1_reject && iter5_reject;
+  }
+}
+
+bool TestDriveGateKillSwitchOverridesEverything()
+{
+  if (!r::DriveGate::BuildFlagEnabled()) {
+    return true;
+  }
+  {
+  // N=100, ITER_LIMIT=10 (very permissive) — kill switch must
+  // still suppress all admits.
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "100", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "10", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE", "1", 1);
+  r::DriveGate::ResetForTest();
+
+  bool any_admit = false;
+  for (int iter = 0; iter <= 5; ++iter) {
+    for (int i = 0; i < 5; ++i) {
+      if (r::DriveGate::ShouldDriveAndCount(iter)) {
+        any_admit = true;
+        break;
+      }
+    }
+  }
+
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE");
+  r::DriveGate::ResetForTest();
+  return !any_admit;
+  }
+}
+
+bool TestDriveGateWorkerCountReflectsAdmits()
+{
+  if (!r::DriveGate::BuildFlagEnabled()) {
+    return true;
+  }
+  {
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "5", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "0", 1);
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_DISABLE");
+  r::DriveGate::ResetForTest();
+  for (int i = 0; i < 8; ++i) {
+    (void) r::DriveGate::ShouldDriveAndCount(/*iter=*/0);
+  }
+  // Exactly 5 admits → counter == 5.
+  std::int64_t got = r::DriveGate::worker_count();
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  r::DriveGate::ResetForTest();
+  return got == 5;
+  }
+}
+
+bool TestDriveGateResetForTestClearsCounter()
+{
+  if (!r::DriveGate::BuildFlagEnabled()) {
+    return true;
+  }
+  {
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_N", "10", 1);
+  ::setenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT", "0", 1);
+  r::DriveGate::ResetForTest();
+  for (int i = 0; i < 3; ++i) {
+    (void) r::DriveGate::ShouldDriveAndCount(/*iter=*/0);
+  }
+  if (r::DriveGate::worker_count() != 3) {
+    return false;
+  }
+  r::DriveGate::ResetForTest();
+  bool cleared = r::DriveGate::worker_count() == 0;
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_N");
+  ::unsetenv("OPENROAD_DRT_REDESIGN_DRIVE_ITER_LIMIT");
+  r::DriveGate::ResetForTest();
+  return cleared;
+  }
+}
+
 // V2.4.a — Net and ReadWrite enum slots are reserved for V2.4.b.
 // Lock in the encoding now so consumers (the BatchSummaryDump
 // num_conflict column, the future GreedyPriority MIS solver) don't
@@ -4237,6 +4419,20 @@ int main()
        TestCtProviderCostWeightsBiasCongestionAndTiming},
       {"V2.5.c Detach CT provider returns deltas to zero",
        TestCtProviderDetachReturnsToZero},
+      {"V2.6.a DriveGate: build flag OFF -> always false",
+       TestDriveGateBuildFlagOffAlwaysReturnsFalse},
+      {"V2.6.a DriveGate: default env -> no admits",
+       TestDriveGateDefaultEnvNoAdmits},
+      {"V2.6.a DriveGate: N first calls admit, rest reject",
+       TestDriveGateNFirstCallsAdmit},
+      {"V2.6.a DriveGate: ITER_LIMIT gates iter index",
+       TestDriveGateIterLimitGatesIterIndex},
+      {"V2.6.a DriveGate: kill switch overrides everything",
+       TestDriveGateKillSwitchOverridesEverything},
+      {"V2.6.a DriveGate: worker_count() reflects admits",
+       TestDriveGateWorkerCountReflectsAdmits},
+      {"V2.6.a DriveGate: ResetForTest clears counter",
+       TestDriveGateResetForTestClearsCounter},
       {"SnapshotHandle holds GeometryView via shared_ptr",
        TestSnapshotHandleHoldsViewByShared},
       {"HashCanonicalRange order-insensitive",
