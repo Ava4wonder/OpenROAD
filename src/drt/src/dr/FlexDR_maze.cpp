@@ -3706,9 +3706,60 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                 }
               };
 
+        // V2.6.f.8 — predict_drv: sum the per-edge marker cost
+        // flags from gridGraph_ over a candidate's footprint cells.
+        // gridGraph_ already accumulates marker costs from
+        // upstream's `route_queue_addMarkerCost` at the end of each
+        // iter, so this lookup answers "how much of this
+        // candidate's footprint overlaps regions that had DRC
+        // markers in prior iters?" — a direct DRV proxy.
+        //
+        // Only path segs and patch wires contribute. Via marker
+        // cost lives on cut-layer edges that markerCostAdj does
+        // not cover; vias are a small fraction of DRV anyway.
+        auto predict_drv
+            = [&](const std::vector<dr_overlay::CapturedConnFig>& cs)
+            -> std::uint64_t {
+              std::uint64_t total = 0;
+              drt::frMIdx xdim, ydim, zdim;
+              gridGraph_.getDim(xdim, ydim, zdim);
+              for (const auto& cap : cs) {
+                if (cap.kind
+                        != dr_overlay::CapturedConnFig::Kind::PathSeg
+                    && cap.kind
+                        != dr_overlay::CapturedConnFig::Kind::PatchWire) {
+                  continue;
+                }
+                const drt::frLayerNum lnum
+                    = static_cast<drt::frLayerNum>(cap.layer);
+                const drt::frMIdx mz = gridGraph_.getMazeZIdx(lnum);
+                if (mz >= zdim) continue;
+                const drt::frMIdx mx_lo
+                    = gridGraph_.getMazeXIdx(cap.bbox.ll.x);
+                const drt::frMIdx my_lo
+                    = gridGraph_.getMazeYIdx(cap.bbox.ll.y);
+                const drt::frMIdx mx_hi
+                    = std::min(static_cast<drt::frMIdx>(xdim - 1),
+                               gridGraph_.getMazeXIdx(cap.bbox.ur.x));
+                const drt::frMIdx my_hi
+                    = std::min(static_cast<drt::frMIdx>(ydim - 1),
+                               gridGraph_.getMazeYIdx(cap.bbox.ur.y));
+                if (mx_lo > mx_hi || my_lo > my_hi) continue;
+                for (drt::frMIdx x = mx_lo; x <= mx_hi; ++x) {
+                  for (drt::frMIdx y = my_lo; y <= my_hi; ++y) {
+                    total += gridGraph_.getMarkerCostAdj(
+                        x, y, mz, drt::frDirEnum::E);
+                    total += gridGraph_.getMarkerCostAdj(
+                        x, y, mz, drt::frDirEnum::N);
+                  }
+                }
+              }
+              return total;
+            };
+
         // Per-variant accumulators. Index 0 = identity, 1..K-1 =
         // bias variants. Each variant has its clones, captures,
-        // hash, score.
+        // hash, score, and (V2.6.f.8) predicted DRV.
         std::vector<std::vector<std::unique_ptr<drt::drConnFig>>>
             kvariant_clones(real_k);
         std::vector<std::vector<dr_overlay::CapturedConnFig>>
@@ -3716,12 +3767,15 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         std::vector<std::uint64_t> kvariant_hash(real_k, 0);
         std::vector<double> kvariant_score(
             real_k, -std::numeric_limits<double>::infinity());
+        std::vector<std::uint64_t> kvariant_drv(
+            real_k, std::numeric_limits<std::uint64_t>::max());
         std::vector<bool> kvariant_ok(real_k, false);
 
         // (1) snapshot + score variant 0 (drNet's current state)
         snapshot_drnet(kvariant_clones[0], kvariant_captured[0]);
         kvariant_hash[0] = hash_captured(kvariant_captured[0]);
         kvariant_score[0] = score_captured(kvariant_captured[0]);
+        kvariant_drv[0] = predict_drv(kvariant_captured[0]);
         kvariant_ok[0] = !kvariant_clones[0].empty();
         const std::size_t variant0_size = kvariant_clones[0].size();
 
@@ -3771,10 +3825,11 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             kvariant_ok[k] = kok;
             if (kok) {
               // Capture variant k's drConnFigs as both clones AND
-              // CapturedConnFig (for restore + score).
+              // CapturedConnFig (for restore + score + V2.6.f.8 DRV).
               snapshot_drnet(kvariant_clones[k], kvariant_captured[k]);
               kvariant_hash[k] = hash_captured(kvariant_captured[k]);
               kvariant_score[k] = score_captured(kvariant_captured[k]);
+              kvariant_drv[k] = predict_drv(kvariant_captured[k]);
             }
           }
           // Bias scope exited → cost weights restored to base.
@@ -3799,14 +3854,46 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         }
         net->clearRouteConnFigs();
 
-        // (5) WINNER SELECTION — argmax score across variants
-        // 0..K-1. Variant 0 (identity) is always in the candidate
-        // set, so a winner that fails (or whose score is -inf
-        // from illegal shapes) falls back to variant 0 naturally.
+        // (5) V2.6.f.8 WINNER SELECTION — argmin predict_drv,
+        // tie-break argmin score (= argmin WL + 100·via). Only
+        // legal variants (kvariant_ok && score > -inf) participate.
+        // Variant 0 is in the candidate set with its score and DRV;
+        // if no later variant strictly improves on it (lower DRV
+        // or same-DRV-lower-score), variant 0 stays the winner.
+        //
+        // Rationale (vs V2.6.f.5.c's argmax score):
+        //   * argmax-score picked routes with more wire/vias, which
+        //     is the detour-heavy variant. Detours dodge current
+        //     congestion (small iter-0 win on asap7_ibex N=∞: 5800
+        //     < 5841) but consume more area, making iters 1-2
+        //     harder (markers go UP).
+        //   * argmin-DRV picks the variant whose footprint overlaps
+        //     LEAST with prior-iter markers — a direct DRV proxy
+        //     rather than a resource-consumption proxy.
         std::size_t winner_idx = 0;
+        const bool v0_legal
+            = kvariant_ok[0]
+              && kvariant_score[0]
+                     > -std::numeric_limits<double>::infinity();
         for (std::size_t k = 1; k < real_k; ++k) {
-          if (kvariant_ok[k]
-              && kvariant_score[k] > kvariant_score[winner_idx]) {
+          const bool vk_legal
+              = kvariant_ok[k]
+                && kvariant_score[k]
+                       > -std::numeric_limits<double>::infinity();
+          if (!vk_legal) continue;
+          if (!v0_legal && winner_idx == 0) {
+            // v0 was illegal; first legal variant becomes winner.
+            winner_idx = k;
+            continue;
+          }
+          // Primary: lower DRV wins.
+          if (kvariant_drv[k] < kvariant_drv[winner_idx]) {
+            winner_idx = k;
+            continue;
+          }
+          // Tiebreak: same DRV → lower score (WL+100·via) wins.
+          if (kvariant_drv[k] == kvariant_drv[winner_idx]
+              && kvariant_score[k] < kvariant_score[winner_idx]) {
             winner_idx = k;
           }
         }
@@ -3839,21 +3926,24 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // content (most common case for K-bias under modest
         // multipliers).
         std::fprintf(stderr,
-                     "[v2.6.f.5.c] net_id=%lu winner=%zu "
-                     "v0_size=%zu v0_score=%.1f v0_hash=%016lx",
+                     "[v2.6.f.8] net_id=%lu winner=%zu "
+                     "v0_size=%zu v0_score=%.1f v0_drv=%lu "
+                     "v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
                                         ? net->getFrNet()->getId() : 0),
                      winner_idx,
                      variant0_size,
                      kvariant_score[0],
+                     (unsigned long) kvariant_drv[0],
                      (unsigned long) kvariant_hash[0]);
         for (std::size_t k = 1; k < real_k; ++k) {
           std::fprintf(stderr,
                        " v%zu_ok=%d v%zu_size=%zu v%zu_score=%.1f "
-                       "v%zu_hash=%016lx",
+                       "v%zu_drv=%lu v%zu_hash=%016lx",
                        k, kvariant_ok[k] ? 1 : 0,
                        k, kvariant_clones[k].size(),
                        k, kvariant_score[k],
+                       k, (unsigned long) kvariant_drv[k],
                        k, (unsigned long) kvariant_hash[k]);
         }
         std::fprintf(stderr, "\n");
