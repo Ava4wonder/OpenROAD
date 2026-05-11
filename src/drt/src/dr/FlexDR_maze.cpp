@@ -3551,52 +3551,184 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
       }
 
       if (real_k > 1) {
-        // V2.6.f.5.b shadow exploration. The block:
-        //   1. Save variant 0 as drConnFig clones
-        //   2. TEARDOWN drNet
-        //   3. For each k in 1..real_k-1:
-        //      MazeBiasOverride → resetStatus → recursive routeNet
-        //      → capture variant k count → TEARDOWN
-        //   4. REBUILD variant 0 from clones
-        //   5. gcWorker refresh (V2.6.e pattern)
+        // V2.6.f.5.c — score-driven K-bias commit. Differs from
+        // V2.6.f.5.b shadow:
+        //   * each variant gets its content captured AND its drConnFig
+        //     clones saved (variant 0 always; variants 1..K-1 inside
+        //     the loop)
+        //   * each variant gets its aggregate score via batch_eval
+        //   * pick winner = argmax score across variants 0..K-1
+        //   * REBUILD with winner's drConnFig clones (not variant 0
+        //     unconditionally as in V2.6.f.5.b)
+        //   * per-variant content hash logged for diff analysis
+        // When the winner is variant 0, hash stays byte-identical;
+        // when a non-identity wins, hash diverges intentionally.
         auto& worker_rq = getWorkerRegionQuery();
         drt::gcNet* gc_net = (gcWorker_ != nullptr)
             ? gcWorker_->getNet(net->getFrNet())
             : nullptr;
 
-        // (1) clone variant 0
-        std::vector<std::unique_ptr<drt::drConnFig>> variant0_clones;
-        {
-          const auto& v0_conn_figs = net->getRouteConnFigs();
-          variant0_clones.reserve(v0_conn_figs.size());
-          for (const auto& orig : v0_conn_figs) {
-            if (orig == nullptr) continue;
-            const auto kind = orig->typeId();
-            std::unique_ptr<drt::drConnFig> clone;
-            if (kind == drt::drcPathSeg) {
-              clone = std::make_unique<drt::drPathSeg>(
-                  *static_cast<const drt::drPathSeg*>(orig.get()));
-            } else if (kind == drt::drcVia) {
-              clone = std::make_unique<drt::drVia>(
-                  *static_cast<const drt::drVia*>(orig.get()));
-            } else if (kind == drt::drcPatchWire) {
-              clone = std::make_unique<drt::drPatchWire>(
-                  *static_cast<const drt::drPatchWire*>(orig.get()));
-            } else {
-              continue;
-            }
-            variant0_clones.push_back(std::move(clone));
-          }
-        }
-        const std::size_t variant0_size = variant0_clones.size();
+        // FNV-1a 64-bit content hash over a CapturedConnFig vector.
+        // Used to detect content-equal variants that just have the
+        // same drConnFig count.
+        auto hash_captured
+            = [](const std::vector<dr_overlay::CapturedConnFig>& cs) {
+                std::uint64_t h = 0xcbf29ce484222325ULL;
+                constexpr std::uint64_t kPrime = 0x100000001b3ULL;
+                for (const auto& c : cs) {
+                  h = (h ^ static_cast<std::uint64_t>(c.kind))
+                      * kPrime;
+                  h = (h ^ static_cast<std::uint64_t>(c.bbox.ll.x))
+                      * kPrime;
+                  h = (h ^ static_cast<std::uint64_t>(c.bbox.ll.y))
+                      * kPrime;
+                  h = (h ^ static_cast<std::uint64_t>(c.bbox.ur.x))
+                      * kPrime;
+                  h = (h ^ static_cast<std::uint64_t>(c.bbox.ur.y))
+                      * kPrime;
+                  h = (h ^ static_cast<std::uint64_t>(c.layer))
+                      * kPrime;
+                }
+                return h;
+              };
+
+        // Score a CapturedConnFig vector via batch_eval against a
+        // RegionQueryGeometryView. Returns total aggregate
+        // (wirelength_proxy + 100×via_count) across all shapes, or
+        // -inf if any shape is illegal under SyntheticOracle.
+        auto score_captured
+            = [&](const std::vector<dr_overlay::CapturedConnFig>& cs)
+            -> double {
+              dr_overlay::RegionQueryGeometryView v2_view(getDesign());
+              const dr_re::NetId net_id_for_score
+                  = net->getFrNet() != nullptr
+                        ? static_cast<dr_re::NetId>(
+                              net->getFrNet()->getId())
+                        : 0;
+              const odb::Rect rb_for_score = getRouteBox();
+              dr_overlay::MazeSearchProposer::Input in_score;
+              in_score.net_id = net_id_for_score;
+              in_score.route_box.ll.x = rb_for_score.xMin();
+              in_score.route_box.ll.y = rb_for_score.yMin();
+              in_score.route_box.ur.x = rb_for_score.xMax();
+              in_score.route_box.ur.y = rb_for_score.yMax();
+              in_score.layer = cs.empty() ? 0 : cs.front().layer;
+              in_score.delta_id.region_id
+                  = static_cast<std::uint32_t>(net_id_for_score);
+              in_score.delta_id.proposer_id = 5;
+              in_score.delta_id.attempt_index = 0;
+              in_score.snapshot_version = 0;
+              const auto deltas
+                  = dr_overlay::MazeSearchProposer::ProposeFromCaptured(
+                      v2_view, cs, in_score);
+              dr_re::PhysicalState ps;
+              dr_re::EvalOptions opts;
+              opts.legality_mode
+                  = dr_re::LegalityMode::SyntheticOracle;
+              dr_re::ProposalSet pset;
+              pset.proposals = deltas;
+              const auto batch = ps.batch_eval(v2_view, pset, opts);
+              double total = 0.0;
+              for (const auto& outcome : batch.outcomes) {
+                if (!outcome.legality.legal) {
+                  return -std::numeric_limits<double>::infinity();
+                }
+                if (outcome.score.has_value()) {
+                  total += outcome.score->aggregate;
+                }
+              }
+              return total;
+            };
+
+        // Helper: clone drNet's current routeConnFigs into a vector
+        // of drConnFig unique_ptrs AND a parallel CapturedConnFig
+        // vector. The clones survive subsequent clearRouteConnFigs;
+        // the captures are score+hash inputs.
+        auto snapshot_drnet
+            = [&](std::vector<std::unique_ptr<drt::drConnFig>>& clones,
+                  std::vector<dr_overlay::CapturedConnFig>& captures) {
+                const auto& cfs = net->getRouteConnFigs();
+                clones.reserve(cfs.size());
+                captures.reserve(cfs.size());
+                for (const auto& orig : cfs) {
+                  if (orig == nullptr) continue;
+                  const auto kind = orig->typeId();
+                  std::unique_ptr<drt::drConnFig> clone;
+                  dr_overlay::CapturedConnFig cap;
+                  if (kind == drt::drcPathSeg) {
+                    const auto* seg
+                        = static_cast<const drt::drPathSeg*>(orig.get());
+                    clone = std::make_unique<drt::drPathSeg>(*seg);
+                    cap.kind = dr_overlay::CapturedConnFig::Kind::PathSeg;
+                    const odb::Rect bb = seg->getBBox();
+                    cap.bbox.ll.x = bb.xMin();
+                    cap.bbox.ll.y = bb.yMin();
+                    cap.bbox.ur.x = bb.xMax();
+                    cap.bbox.ur.y = bb.yMax();
+                    cap.layer = static_cast<dr_re::LayerNum>(
+                        seg->getLayerNum());
+                  } else if (kind == drt::drcVia) {
+                    const auto* via
+                        = static_cast<const drt::drVia*>(orig.get());
+                    clone = std::make_unique<drt::drVia>(*via);
+                    cap.kind = dr_overlay::CapturedConnFig::Kind::Via;
+                    const odb::Rect bb = via->getBBox();
+                    cap.bbox.ll.x = bb.xMin();
+                    cap.bbox.ll.y = bb.yMin();
+                    cap.bbox.ur.x = bb.xMax();
+                    cap.bbox.ur.y = bb.yMax();
+                    const odb::Point org = via->getOrigin();
+                    cap.via_origin.x = org.x();
+                    cap.via_origin.y = org.y();
+                    cap.layer = (via->getViaDef() != nullptr)
+                                    ? static_cast<dr_re::LayerNum>(
+                                          via->getViaDef()
+                                              ->getCutLayerNum())
+                                    : 0;
+                  } else if (kind == drt::drcPatchWire) {
+                    const auto* pw
+                        = static_cast<const drt::drPatchWire*>(orig.get());
+                    clone = std::make_unique<drt::drPatchWire>(*pw);
+                    cap.kind
+                        = dr_overlay::CapturedConnFig::Kind::PatchWire;
+                    const odb::Rect bb = pw->getBBox();
+                    cap.bbox.ll.x = bb.xMin();
+                    cap.bbox.ll.y = bb.yMin();
+                    cap.bbox.ur.x = bb.xMax();
+                    cap.bbox.ur.y = bb.yMax();
+                    cap.layer = static_cast<dr_re::LayerNum>(
+                        pw->getLayerNum());
+                  } else {
+                    continue;
+                  }
+                  clones.push_back(std::move(clone));
+                  captures.push_back(cap);
+                }
+              };
+
+        // Per-variant accumulators. Index 0 = identity, 1..K-1 =
+        // bias variants. Each variant has its clones, captures,
+        // hash, score.
+        std::vector<std::vector<std::unique_ptr<drt::drConnFig>>>
+            kvariant_clones(real_k);
+        std::vector<std::vector<dr_overlay::CapturedConnFig>>
+            kvariant_captured(real_k);
+        std::vector<std::uint64_t> kvariant_hash(real_k, 0);
+        std::vector<double> kvariant_score(
+            real_k, -std::numeric_limits<double>::infinity());
+        std::vector<bool> kvariant_ok(real_k, false);
+
+        // (1) snapshot + score variant 0 (drNet's current state)
+        snapshot_drnet(kvariant_clones[0], kvariant_captured[0]);
+        kvariant_hash[0] = hash_captured(kvariant_captured[0]);
+        kvariant_score[0] = score_captured(kvariant_captured[0]);
+        kvariant_ok[0] = !kvariant_clones[0].empty();
+        const std::size_t variant0_size = kvariant_clones[0].size();
 
         // Bias schedule lookup. K=2 → just variant 1 (4× DRC).
         // K=3 → + (1×, 4×, 1×). K=4 → + (1×, 1×, 4×).
         const std::array<std::array<int, 3>, 3> kbias_schedule = {
             {{4, 1, 1}, {1, 4, 1}, {1, 1, 4}}};
-
-        std::size_t variant1_routed_size = 0;
-        bool variant1_routed_ok = false;
 
         for (std::size_t k = 1; k < real_k; ++k) {
           // (2) TEARDOWN current drNet state
@@ -3636,9 +3768,13 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             const bool kok = routeNet(net, kpaths);
             drt::g_v26f5_in_kbias_inner_ = false;
 
-            if (k == 1) {
-              variant1_routed_ok = kok;
-              variant1_routed_size = net->getRouteConnFigs().size();
+            kvariant_ok[k] = kok;
+            if (kok) {
+              // Capture variant k's drConnFigs as both clones AND
+              // CapturedConnFig (for restore + score).
+              snapshot_drnet(kvariant_clones[k], kvariant_captured[k]);
+              kvariant_hash[k] = hash_captured(kvariant_captured[k]);
+              kvariant_score[k] = score_captured(kvariant_captured[k]);
             }
           }
           // Bias scope exited → cost weights restored to base.
@@ -3663,8 +3799,23 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         }
         net->clearRouteConnFigs();
 
-        // (5) REBUILD variant 0 from saved clones
-        for (auto& c : variant0_clones) {
+        // (5) WINNER SELECTION — argmax score across variants
+        // 0..K-1. Variant 0 (identity) is always in the candidate
+        // set, so a winner that fails (or whose score is -inf
+        // from illegal shapes) falls back to variant 0 naturally.
+        std::size_t winner_idx = 0;
+        for (std::size_t k = 1; k < real_k; ++k) {
+          if (kvariant_ok[k]
+              && kvariant_score[k] > kvariant_score[winner_idx]) {
+            winner_idx = k;
+          }
+        }
+
+        // (6) REBUILD with winner's clones. When winner_idx > 0,
+        // production routing diverges from upstream baseline by
+        // construction.
+        auto& winner_clones = kvariant_clones[winner_idx];
+        for (auto& c : winner_clones) {
           drt::drConnFig* added = c.get();
           net->addRoute(std::move(c), /*isExt=*/false);
           worker_rq.add(added);
@@ -3682,17 +3833,30 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           gcWorker_->resetTargetNet();
         }
 
-        // Log per-net shadow stats via stderr (sparingly). The
-        // BatchSummaryDump CSV doesn't yet have a column for
-        // V2.6.f.5 shadow signal — V2.6.f.5.c will add it.
+        // Log per-net stats. winner_idx > 0 means V2 committed an
+        // alternative route. hash[k] lets the analyzer detect
+        // variants that have same drConnFig count but different
+        // content (most common case for K-bias under modest
+        // multipliers).
         std::fprintf(stderr,
-                     "[v2.6.f.5.b] net_id=%lu variant0_size=%zu "
-                     "variant1_ok=%d variant1_size=%zu\n",
+                     "[v2.6.f.5.c] net_id=%lu winner=%zu "
+                     "v0_size=%zu v0_score=%.1f v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
                                         ? net->getFrNet()->getId() : 0),
+                     winner_idx,
                      variant0_size,
-                     variant1_routed_ok ? 1 : 0,
-                     variant1_routed_size);
+                     kvariant_score[0],
+                     (unsigned long) kvariant_hash[0]);
+        for (std::size_t k = 1; k < real_k; ++k) {
+          std::fprintf(stderr,
+                       " v%zu_ok=%d v%zu_size=%zu v%zu_score=%.1f "
+                       "v%zu_hash=%016lx",
+                       k, kvariant_ok[k] ? 1 : 0,
+                       k, kvariant_clones[k].size(),
+                       k, kvariant_score[k],
+                       k, (unsigned long) kvariant_hash[k]);
+        }
+        std::fprintf(stderr, "\n");
       }
 
       // Build CapturedConnFig vector from drNet::getRouteConnFigs.
