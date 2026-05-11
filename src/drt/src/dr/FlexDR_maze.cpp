@@ -25,6 +25,7 @@
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/ConflictPolicy.h"
 #include "redesign/DriveGate.h"
+#include "redesign/MazeBiasOverride.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/ProposalStaging.h"
 #include "redesign/Selection.h"
@@ -32,6 +33,16 @@
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/RoutePerturbation.h"
 #include "redesign/overlay/ShadowDump.h"
+
+namespace drt {
+// V2.6.f.5 — thread-local recursion guard. The V2.6.b/c/f.5 hook
+// at the bottom of routeNet may recursively call routeNet for K
+// alternative-bias candidates (V2.6.f.5). On the inner re-entry
+// the hook MUST be a no-op, otherwise it would recurse forever.
+// thread_local because routeNet is called from inside an OMP
+// parallel region — each worker thread has its own counter.
+thread_local bool g_v26f5_in_kbias_inner_ = false;
+}  // namespace drt
 #endif
 #include "db/drObj/drFig.h"
 #include "db/drObj/drShape.h"
@@ -3236,6 +3247,13 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
   }
 
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
+  // V2.6.f.5 — recursion guard for the V2.3.c shadow block.
+  // When V2.6.f.5's K-bias driver recursively calls routeNet for
+  // K-1 alternative bias runs, the inner re-entry MUST skip this
+  // entire V2 hook block — otherwise the inner V2.3.c logic
+  // would re-run shadows + V2.6.b/c logic would re-trigger
+  // another K-bias loop, recursing infinitely.
+  if (!drt::g_v26f5_in_kbias_inner_)
   // V2.3.c shadow: K-proposal batch_eval → SelectBest → internal
   // try_commit → BatchSummaryDump. Replaces V2.2.f's single-proposal
   // shadow. Production routing below proceeds unchanged; this block
@@ -3476,6 +3494,13 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
     routeNet_postRouteAddPathCost(net);
 
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
+    // V2.6.f.5 — recursion guard for the V2.6.b/c bottom hook.
+    // Inner re-entries (from V2.6.f.5's K-bias loop) skip the
+    // entire hook. The K-bias loop performs its own teardown +
+    // capture for each re-entry; the existing V2.6.b/c logic
+    // (which assumes the routeNet was the ONE production run)
+    // would corrupt state if it ran during inner calls.
+    if (!drt::g_v26f5_in_kbias_inner_)
     // V2.6.b — bottom-of-routeNet capture hook. When DriveGate
     // admits, walk drNet::getRouteConnFigs() (= upstream's just-
     // computed route), project into V2 CapturedConnFigs, convert
