@@ -3523,7 +3523,182 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
       namespace dr_re = drt::redesign;
       namespace dr_overlay = drt::redesign::overlay;
 
+      // V2.6.f.5.b — Khan-Rovinski-style real K-bias multi-candidate
+      // shadow exploration. When OPENROAD_DRT_REDESIGN_DRIVE_REAL_K
+      // > 1, runs K-1 alternative-bias recursive routeNet calls to
+      // see whether different cost-weight biases produce different
+      // routes. SHADOW only — always rebuilds variant 0 at the end,
+      // so production routing is unaffected and hash stays
+      // byte-identical. V2.6.f.5.c will flip the rebuild to use the
+      // winning variant.
+      //
+      // Bias schedule (Khan-Rovinski-informed): variant 0 is
+      // identity; variant 1 is (4×, 1×, 1×) — higher DRC penalty
+      // is their #1 empirical finding for late-iter convergence.
+      // K=2 first cut; K=4 follow-up adds (1×,4×,1×) + (1×,1×,4×).
+      const char* real_k_env
+          = std::getenv("OPENROAD_DRT_REDESIGN_DRIVE_REAL_K");
+      std::size_t real_k = 1;
+      if (real_k_env != nullptr && real_k_env[0] != '\0') {
+        try {
+          const long parsed = std::stol(std::string(real_k_env));
+          if (parsed > 1 && parsed <= 8) {
+            real_k = static_cast<std::size_t>(parsed);
+          }
+        } catch (...) {
+          // keep real_k = 1
+        }
+      }
+
+      if (real_k > 1) {
+        // V2.6.f.5.b shadow exploration. The block:
+        //   1. Save variant 0 as drConnFig clones
+        //   2. TEARDOWN drNet
+        //   3. For each k in 1..real_k-1:
+        //      MazeBiasOverride → resetStatus → recursive routeNet
+        //      → capture variant k count → TEARDOWN
+        //   4. REBUILD variant 0 from clones
+        //   5. gcWorker refresh (V2.6.e pattern)
+        auto& worker_rq = getWorkerRegionQuery();
+        drt::gcNet* gc_net = (gcWorker_ != nullptr)
+            ? gcWorker_->getNet(net->getFrNet())
+            : nullptr;
+
+        // (1) clone variant 0
+        std::vector<std::unique_ptr<drt::drConnFig>> variant0_clones;
+        {
+          const auto& v0_conn_figs = net->getRouteConnFigs();
+          variant0_clones.reserve(v0_conn_figs.size());
+          for (const auto& orig : v0_conn_figs) {
+            if (orig == nullptr) continue;
+            const auto kind = orig->typeId();
+            std::unique_ptr<drt::drConnFig> clone;
+            if (kind == drt::drcPathSeg) {
+              clone = std::make_unique<drt::drPathSeg>(
+                  *static_cast<const drt::drPathSeg*>(orig.get()));
+            } else if (kind == drt::drcVia) {
+              clone = std::make_unique<drt::drVia>(
+                  *static_cast<const drt::drVia*>(orig.get()));
+            } else if (kind == drt::drcPatchWire) {
+              clone = std::make_unique<drt::drPatchWire>(
+                  *static_cast<const drt::drPatchWire*>(orig.get()));
+            } else {
+              continue;
+            }
+            variant0_clones.push_back(std::move(clone));
+          }
+        }
+        const std::size_t variant0_size = variant0_clones.size();
+
+        // Bias schedule lookup. K=2 → just variant 1 (4× DRC).
+        // K=3 → + (1×, 4×, 1×). K=4 → + (1×, 1×, 4×).
+        const std::array<std::array<int, 3>, 3> kbias_schedule = {
+            {{4, 1, 1}, {1, 4, 1}, {1, 1, 4}}};
+
+        std::size_t variant1_routed_size = 0;
+        bool variant1_routed_ok = false;
+
+        for (std::size_t k = 1; k < real_k; ++k) {
+          // (2) TEARDOWN current drNet state
+          for (const auto& cf : net->getRouteConnFigs()) {
+            if (cf == nullptr) continue;
+            subPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+            worker_rq.remove(cf.get());
+          }
+          if (gc_net != nullptr) {
+            modEolCosts_poly(gc_net, ModCostType::subRouteShape);
+          }
+          net->clearRouteConnFigs();
+
+          // (3) Apply bias via MazeBiasOverride RAII
+          const auto& sched
+              = kbias_schedule[std::min(k - 1, kbias_schedule.size() - 1)];
+          const drt::frUInt4 base_drc
+              = router_cfg_->ROUTESHAPECOST;
+          const drt::frUInt4 base_marker
+              = router_cfg_->MARKERCOST;
+          const drt::frUInt4 base_fixed
+              = router_cfg_->BLOCKCOST;
+          {
+            dr_re::MazeBiasOverride<drt::FlexGridGraph> bias_scope(
+                gridGraph_,
+                static_cast<dr_re::GridGraphCost>(base_drc * sched[0]),
+                static_cast<dr_re::GridGraphCost>(base_marker * sched[1]),
+                static_cast<dr_re::GridGraphCost>(base_fixed * sched[2]));
+
+            // Reset gridGraph per-search state (srcs, dsts, prevDirs)
+            gridGraph_.resetStatus();
+
+            // Recursive routeNet — the guard prevents the inner
+            // hook from re-entering V2.6 logic.
+            drt::g_v26f5_in_kbias_inner_ = true;
+            std::vector<FlexMazeIdx> kpaths;
+            const bool kok = routeNet(net, kpaths);
+            drt::g_v26f5_in_kbias_inner_ = false;
+
+            if (k == 1) {
+              variant1_routed_ok = kok;
+              variant1_routed_size = net->getRouteConnFigs().size();
+            }
+          }
+          // Bias scope exited → cost weights restored to base.
+
+          // gcWorker pWires from the recursive routeNet's
+          // CLEAN_PATCHES — discard so they don't pollute the
+          // outer net's processing.
+          if (gcWorker_ != nullptr) {
+            gcWorker_->clearPWires();
+          }
+        }
+
+        // (4) TEARDOWN whatever drNet has now (variant K-1's
+        // routes or possibly empty if recursive routeNet failed)
+        for (const auto& cf : net->getRouteConnFigs()) {
+          if (cf == nullptr) continue;
+          subPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+          worker_rq.remove(cf.get());
+        }
+        if (gc_net != nullptr) {
+          modEolCosts_poly(gc_net, ModCostType::subRouteShape);
+        }
+        net->clearRouteConnFigs();
+
+        // (5) REBUILD variant 0 from saved clones
+        for (auto& c : variant0_clones) {
+          drt::drConnFig* added = c.get();
+          net->addRoute(std::move(c), /*isExt=*/false);
+          worker_rq.add(added);
+        }
+        for (const auto& cf : net->getRouteConnFigs()) {
+          if (cf == nullptr) continue;
+          addPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+        }
+        if (gc_net != nullptr) {
+          modEolCosts_poly(gc_net, ModCostType::addRouteShape);
+        }
+        if (gcWorker_ != nullptr) {
+          gcWorker_->setTargetNet(net->getFrNet());
+          gcWorker_->updateDRNet(net);
+          gcWorker_->resetTargetNet();
+        }
+
+        // Log per-net shadow stats via stderr (sparingly). The
+        // BatchSummaryDump CSV doesn't yet have a column for
+        // V2.6.f.5 shadow signal — V2.6.f.5.c will add it.
+        std::fprintf(stderr,
+                     "[v2.6.f.5.b] net_id=%lu variant0_size=%zu "
+                     "variant1_ok=%d variant1_size=%zu\n",
+                     (unsigned long) (net->getFrNet() != nullptr
+                                        ? net->getFrNet()->getId() : 0),
+                     variant0_size,
+                     variant1_routed_ok ? 1 : 0,
+                     variant1_routed_size);
+      }
+
       // Build CapturedConnFig vector from drNet::getRouteConnFigs.
+      // (After V2.6.f.5.b shadow exploration, drNet is back at
+      // variant 0 — upstream's original route. The rest of the
+      // V2.6.b/c hook proceeds normally.)
       std::vector<dr_overlay::CapturedConnFig> captured;
       const auto& conn_figs = net->getRouteConnFigs();
       captured.reserve(conn_figs.size());
