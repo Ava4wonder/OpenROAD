@@ -3784,6 +3784,23 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         const std::array<std::array<int, 3>, 3> kbias_schedule = {
             {{4, 1, 1}, {1, 4, 1}, {1, 1, 4}}};
 
+        // V2.6.f.9 — iter-aware bias amplifier. Reuses
+        // kvariant_drv[0] as the local marker-density signal: it's
+        // the sum of upstream's per-cell marker-cost flags over
+        // variant 0's footprint. At iter 0 the marker map is
+        // mostly empty so amplifier ≈ 1 (variant 1 = 4× drcCost,
+        // same as V2.6.f.8). At iters 1-4 where prior markers are
+        // accumulated, high-density regions get amplifier 2-4 so
+        // variant 1 routes with sharply higher cost weights and
+        // explores more aggressive detours.
+        //
+        // Thresholds are coarse (powers of 10ish); finer tuning
+        // is a learned-policy concern (V2.7+ scope).
+        int bias_amplifier = 1;
+        if (kvariant_drv[0] > 50)   bias_amplifier = 2;
+        if (kvariant_drv[0] > 500)  bias_amplifier = 3;
+        if (kvariant_drv[0] > 5000) bias_amplifier = 4;
+
         for (std::size_t k = 1; k < real_k; ++k) {
           // (2) TEARDOWN current drNet state
           for (const auto& cf : net->getRouteConnFigs()) {
@@ -3806,11 +3823,17 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           const drt::frUInt4 base_fixed
               = router_cfg_->BLOCKCOST;
           {
+            // V2.6.f.9 — amplify the bias schedule by the local
+            // marker-density-derived amplifier (1× in iter-0 / clean
+            // regions, up to 4× in dense-marker regions).
             dr_re::MazeBiasOverride<drt::FlexGridGraph> bias_scope(
                 gridGraph_,
-                static_cast<dr_re::GridGraphCost>(base_drc * sched[0]),
-                static_cast<dr_re::GridGraphCost>(base_marker * sched[1]),
-                static_cast<dr_re::GridGraphCost>(base_fixed * sched[2]));
+                static_cast<dr_re::GridGraphCost>(
+                    base_drc * sched[0] * bias_amplifier),
+                static_cast<dr_re::GridGraphCost>(
+                    base_marker * sched[1] * bias_amplifier),
+                static_cast<dr_re::GridGraphCost>(
+                    base_fixed * sched[2] * bias_amplifier));
 
             // Reset gridGraph per-search state (srcs, dsts, prevDirs)
             gridGraph_.resetStatus();
@@ -3926,12 +3949,13 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // content (most common case for K-bias under modest
         // multipliers).
         std::fprintf(stderr,
-                     "[v2.6.f.8] net_id=%lu winner=%zu "
+                     "[v2.6.f.9] net_id=%lu winner=%zu amp=%d "
                      "v0_size=%zu v0_score=%.1f v0_drv=%lu "
                      "v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
                                         ? net->getFrNet()->getId() : 0),
                      winner_idx,
+                     bias_amplifier,
                      variant0_size,
                      kvariant_score[0],
                      (unsigned long) kvariant_drv[0],
