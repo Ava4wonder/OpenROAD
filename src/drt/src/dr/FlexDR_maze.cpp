@@ -1853,6 +1853,23 @@ void FlexDRWorker::route_queue()
 
   setMarkers(gcWorker_->getMarkers());
 
+  // V2.6.h — post-batch coordinate-descent inner loop. After
+  // route_queue's natural ripup+reroute converges (limited by
+  // per-net reroute caps), do an additional N inner passes:
+  // collect marker-touching nets, ripup, re-route them via the
+  // route_queue_main pipeline (each re-route goes through the
+  // V2.6.f.5.c K-bias hook), refresh markers. This shifts work
+  // that would otherwise land in outer iter 1+ into the tail of
+  // outer iter 0, plausibly reducing total outer-iter count from
+  // 5 to 3-4 on asap7_ibex.
+  //
+  // Gated by env: OPENROAD_DRT_REDESIGN_V26H_ENABLE=1. The cap
+  // (3 inner iters) bounds wall-time worst-case at ≈ 1+3 × the
+  // baseline per-worker route_queue cost.
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+  v26hInnerLoop();
+#endif
+
   for (auto& net : nets_) {
     net->setBestRouteConnFigs();
   }
@@ -5078,8 +5095,86 @@ void FlexDRWorker::v26gFlushPending()
 
   pending.clear();
 }
+
+// V2.6.h — post-batch coordinate-descent inner loop. Read from
+// markers_ (populated by route_queue's final gcWorker_->main()
+// call), collect marker-touching nets via getRipUpNetsFromMarker
+// (upstream's existing API), queue them for re-route, and call
+// route_queue_main. After each pass, re-run gcWorker_->main() to
+// refresh markers_. Repeat up to kMaxInner times or until no
+// marker-touching nets remain.
+//
+// Re-routes go through routeNet which fires the V2.6.f.5.c K-bias
+// hook — so re-routes get multi-candidate selection automatically.
+// The mechanism shifts work that would otherwise belong to outer
+// iter 1+ into the tail of outer iter 0, plausibly collapsing
+// the outer iter count.
+//
+// Env gate: OPENROAD_DRT_REDESIGN_V26H_ENABLE=1.
+void FlexDRWorker::v26hInnerLoop()
+{
+  static const bool kEnabled = [] {
+    const char* v = std::getenv("OPENROAD_DRT_REDESIGN_V26H_ENABLE");
+    return v != nullptr && v[0] == '1';
+  }();
+  if (!kEnabled) return;
+  if (markers_.empty()) return;
+
+  constexpr int kMaxInner = 3;
+  const int initial_markers = static_cast<int>(markers_.size());
+
+  for (int inner = 0; inner < kMaxInner; ++inner) {
+    if (markers_.empty()) break;
+
+    // Collect marker-touching nets using upstream's existing API.
+    frOrderedIdSet<drNet*> ripupNets;
+    for (auto& marker : markers_) {
+      const auto bloatDist
+          = getTech()->getLayer(marker.getLayerNum())->getWidth() * 2;
+      getRipUpNetsFromMarker(&marker, ripupNets, bloatDist);
+    }
+    if (ripupNets.empty()) break;
+
+    // Queue them for re-routing. route_queue_main handles the
+    // ripup (subPathCost + worker_rq.remove + clearRouteConnFigs)
+    // and then re-routes via routeNet.
+    std::queue<RouteQueueEntry> rerouteQueue;
+    for (drNet* net : ripupNets) {
+      net->setRipup();
+      rerouteQueue.push(
+          RouteQueueEntry(net, net->getNumReroutes(), true, nullptr));
+    }
+
+    const std::size_t batch_size = ripupNets.size();
+    route_queue_main(rerouteQueue);
+
+    // Refresh markers from gcWorker after the re-route pass.
+    gcWorker_->resetTargetNet();
+    gcWorker_->setEnableSurgicalFix(true);
+    gcWorker_->main();
+    writeGCPatchesToDRWorker();
+    setMarkers(gcWorker_->getMarkers());
+
+    std::fprintf(
+        stderr,
+        "[v2.6.h.inner] worker_id=%d inner_iter=%d ripup_nets=%zu "
+        "markers_before=%d markers_after=%zu\n",
+        getWorkerId(),
+        inner,
+        batch_size,
+        initial_markers,
+        markers_.size());
+
+    // If no progress (markers count didn't drop), stop — further
+    // passes would be wasted work.
+    if (static_cast<int>(markers_.size()) >= initial_markers) {
+      break;
+    }
+  }
+}
 #else  // !ENABLE_DRT_REDESIGN_OVERLAY
 void FlexDRWorker::v26gFlushPending() {}
+void FlexDRWorker::v26hInnerLoop() {}
 #endif  // ENABLE_DRT_REDESIGN_OVERLAY
 
 }  // namespace drt

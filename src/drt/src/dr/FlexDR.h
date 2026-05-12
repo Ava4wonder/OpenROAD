@@ -479,6 +479,16 @@ class FlexDRWorker
   // alternatives are staged. Defined in FlexDR_maze.cpp because
   // it reuses the V2.6.f.5 teardown/rebuild pattern.
   void v26gFlushPending();
+
+  // V2.6.h — post-batch coordinate-descent inner loop. Called
+  // from inside route_queue() after the natural ripup+reroute
+  // settles. Collects marker-touching nets, ripups, re-routes
+  // them via route_queue_main (which goes through routeNet and
+  // the V2.6.f.5.c K-bias hook), and refreshes markers. Up to 3
+  // inner iterations. Goal: collapse outer-iter work into outer
+  // iter 0 to reduce total outer iter count. Gated by env
+  // OPENROAD_DRT_REDESIGN_V26H_ENABLE=1.
+  void v26hInnerLoop();
   std::string reloadedMain();
   bool end(frDesign* design);
 
