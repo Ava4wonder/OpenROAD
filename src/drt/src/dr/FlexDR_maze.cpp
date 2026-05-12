@@ -29,6 +29,7 @@
 #include "redesign/PhysicalState.h"
 #include "redesign/ProposalStaging.h"
 #include "redesign/Selection.h"
+#include "redesign/V26gBatch.h"
 #include "redesign/overlay/MazeSearchProposer.h"
 #include "redesign/overlay/RegionQueryGeometryView.h"
 #include "redesign/overlay/RoutePerturbation.h"
@@ -42,6 +43,65 @@ namespace drt {
 // thread_local because routeNet is called from inside an OMP
 // parallel region — each worker thread has its own counter.
 thread_local bool g_v26f5_in_kbias_inner_ = false;
+}  // namespace drt
+
+// V2.6.g — pending-alternatives buffer for batch-MIS resolution at
+// end of FlexDRWorker::main(). Defined here (same TU as the V2.6.f.5
+// hook that pushes into it AND the V26gFlush function that drains
+// it). Per-thread state — each OMP worker thread maintains its own
+// vector; cleared after each flush.
+//
+// Placed inside drt::redesign so the V2.6.f.5 hook (which uses
+// the local alias `namespace dr_re = drt::redesign;`) can reach
+// these symbols as `dr_re::v26gEnabled()` etc. The free-function
+// `V26gFlushPendingAlternatives` declared in V26gBatch.h lives in
+// the `dr_re` top-level namespace below at end-of-file.
+// Forward declarations so the V26gPendingAlt struct below can be
+// declared before FlexDR.h / db/drObj/*.h / overlay/*.h have been
+// included by this TU. (The full includes happen at line ~89, after
+// the #endif that closes this first ENABLE_DRT_REDESIGN_OVERLAY
+// block.) Without these, the compiler silently elides struct members
+// whose types it cannot resolve, producing baffling "no member"
+// errors at the eventual use sites.
+namespace drt {
+class drNet;
+class drConnFig;
+class FlexDRWorker;
+namespace redesign {
+namespace overlay {
+struct CapturedConnFig;
+}  // namespace overlay
+}  // namespace redesign
+}  // namespace drt
+
+namespace drt {
+namespace redesign {
+
+struct V26gPendingAlt
+{
+  drt::drNet* net = nullptr;
+  drt::FlexDRWorker* worker = nullptr;  // for sanity check at flush
+  std::vector<std::unique_ptr<drt::drConnFig>> v1_clones;
+  std::vector<drt::redesign::overlay::CapturedConnFig> v1_captures;
+  std::uint64_t v0_drv = 0;
+  std::uint64_t v1_drv = 0;
+  double v0_score = 0.0;
+  double v1_score = 0.0;
+};
+
+thread_local std::vector<V26gPendingAlt> g_v26g_pending_;
+
+// Read once per process. OPENROAD_DRT_REDESIGN_V26G_ENABLE=1 → on.
+inline bool v26gEnabled()
+{
+  static const bool enabled = [] {
+    const char* v = std::getenv("OPENROAD_DRT_REDESIGN_V26G_ENABLE");
+    return v != nullptr && v[0] == '1';
+  }();
+  return enabled;
+}
+
+}  // namespace redesign
 }  // namespace drt
 #endif
 #include "db/drObj/drFig.h"
@@ -3970,6 +4030,31 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           winner_idx = 0;
         }
 
+        // V2.6.g — stash, don't commit. If V2.6.g is enabled AND
+        // the V2.6.f.10-vetted winner was v1, stash v1's clones +
+        // captures + DRV/score into the per-thread pending buffer
+        // and force winner_idx = 0 so the rebuild below applies
+        // v0. The batch-MIS at end-of-FlexDRWorker::main() decides
+        // which staged alternatives to actually swap in.
+        bool v26g_staged = false;
+        const std::size_t v26g_original_winner = winner_idx;
+        if (dr_re::v26gEnabled() && winner_idx > 0) {
+          dr_re::V26gPendingAlt alt;
+          alt.net = net;
+          alt.worker = this;
+          alt.v1_clones = std::move(kvariant_clones[winner_idx]);
+          alt.v1_captures = std::move(kvariant_captured[winner_idx]);
+          alt.v0_drv = kvariant_drv[0];
+          alt.v1_drv = kvariant_drv[winner_idx];
+          alt.v0_score = kvariant_score[0];
+          alt.v1_score = kvariant_score[winner_idx];
+          dr_re::g_v26g_pending_.push_back(std::move(alt));
+          v26g_staged = true;
+          winner_idx = 0;
+        }
+        (void) v26g_staged;
+        (void) v26g_original_winner;
+
         // (6) REBUILD with winner's clones. When winner_idx > 0,
         // production routing diverges from upstream baseline by
         // construction.
@@ -3998,14 +4083,17 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // content (most common case for K-bias under modest
         // multipliers).
         std::fprintf(stderr,
-                     "[v2.6.f.10] net_id=%lu winner=%zu amp=%d "
-                     "xnet_conflict=%d v0_size=%zu v0_score=%.1f "
-                     "v0_drv=%lu v0_hash=%016lx",
+                     "[v2.6.g] net_id=%lu winner=%zu orig_winner=%zu "
+                     "amp=%d xnet_conflict=%d v26g_staged=%d "
+                     "v0_size=%zu v0_score=%.1f v0_drv=%lu "
+                     "v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
                                         ? net->getFrNet()->getId() : 0),
                      winner_idx,
+                     v26g_original_winner,
                      bias_amplifier,
                      v26f10_cross_net_conflict ? 1 : 0,
+                     v26g_staged ? 1 : 0,
                      variant0_size,
                      kvariant_score[0],
                      (unsigned long) kvariant_drv[0],
@@ -4774,4 +4862,239 @@ void FlexDRWorker::routeNet_postAstarAddPatchMetal(drNet* net,
   }
 }
 
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+// V2.6.g — drain the thread-local pending-alternatives buffer
+// (filled by the V2.6.f.5 hook in routeNet when V2.6.g is enabled),
+// run greedy MIS over the alternatives, and swap drNet states for
+// the selected winners. See redesign/V26gBatch.h for the design
+// narrative.
+//
+// Algorithm (worker-local):
+//   1. Filter to alts belonging to THIS worker (sanity — pending
+//      should only have this worker's alts, but defensive).
+//   2. Sort by improvement priority: (v0_drv - v1_drv) descending.
+//      Ties broken by (v0_score - v1_score) descending. (Larger
+//      DRV win first; same DRV → larger score reduction first.)
+//   3. Greedy MIS pass:
+//        a. For each alternative in priority order:
+//        b. Compute its v1 footprint bbox set.
+//        c. Check overlap with worker_rq baseline at v1 layers,
+//           excluding the alt's own drNet (these are conflicts
+//           with OTHER nets' current routes — same check as
+//           V2.6.f.10 but applied at flush time, after all
+//           routeNet calls complete).
+//        d. Check overlap with previously-selected alts' v1
+//           footprints (pairwise conflict among staged
+//           alternatives in the same batch).
+//        e. If no conflict, MARK selected; else SKIP.
+//   4. For each selected alternative: teardown drNet's current v0
+//      routes, apply v1 clones, rebuild via subPathCost/addPathCost
+//      cycle (V2.6.f.5.c teardown/rebuild pattern).
+//
+// Logged: one line per worker batch with size, sel count, conflict
+// counts. Buffer is cleared at end (so next batch starts empty).
+void FlexDRWorker::v26gFlushPending()
+{
+  if (!drt::redesign::v26gEnabled()) {
+    drt::redesign::g_v26g_pending_.clear();
+    return;
+  }
+  if (drt::redesign::g_v26g_pending_.empty()) {
+    return;
+  }
+
+  auto& pending = drt::redesign::g_v26g_pending_;
+  const std::size_t batch_size = pending.size();
+
+  // Step 1 — partition by worker (defensive); only this worker's
+  // alts get processed here. Others stay in the buffer if any.
+  std::vector<std::size_t> our_indices;
+  our_indices.reserve(batch_size);
+  for (std::size_t i = 0; i < pending.size(); ++i) {
+    if (pending[i].worker == this) our_indices.push_back(i);
+  }
+  if (our_indices.empty()) {
+    return;
+  }
+
+  // Step 2 — priority sort: larger (v0_drv - v1_drv) first.
+  std::ranges::sort(
+      our_indices,
+      [&pending](std::size_t a, std::size_t b) {
+        const std::int64_t imp_a
+            = static_cast<std::int64_t>(pending[a].v0_drv)
+              - static_cast<std::int64_t>(pending[a].v1_drv);
+        const std::int64_t imp_b
+            = static_cast<std::int64_t>(pending[b].v0_drv)
+              - static_cast<std::int64_t>(pending[b].v1_drv);
+        if (imp_a != imp_b) return imp_a > imp_b;
+        return (pending[a].v0_score - pending[a].v1_score)
+               > (pending[b].v0_score - pending[b].v1_score);
+      });
+
+  // Step 3 — greedy MIS. For each candidate in priority order,
+  // accept if no conflict; skip otherwise.
+  std::vector<std::size_t> selected;
+  std::size_t conflict_with_baseline = 0;
+  std::size_t conflict_with_peer = 0;
+  auto& worker_rq = getWorkerRegionQuery();
+  for (std::size_t idx : our_indices) {
+    const auto& alt = pending[idx];
+    if (alt.v1_clones.empty() || alt.v1_captures.empty()) continue;
+    drt::frNet* alt_fr = alt.net->getFrNet();
+    if (alt_fr == nullptr) continue;
+
+    // Baseline conflict check (same as V2.6.f.10 but at flush time).
+    bool conflict = false;
+    for (const auto& cap : alt.v1_captures) {
+      if (cap.kind
+              != drt::redesign::overlay::CapturedConnFig::Kind::PathSeg
+          && cap.kind
+              != drt::redesign::overlay::CapturedConnFig::Kind::PatchWire) {
+        continue;
+      }
+      const odb::Rect qbox(cap.bbox.ll.x + 1, cap.bbox.ll.y + 1,
+                           cap.bbox.ur.x - 1, cap.bbox.ur.y - 1);
+      if (qbox.xMin() >= qbox.xMax()
+          || qbox.yMin() >= qbox.yMax()) {
+        continue;
+      }
+      std::vector<drt::drConnFig*> hits;
+      worker_rq.query(
+          qbox, static_cast<drt::frLayerNum>(cap.layer), hits);
+      for (drt::drConnFig* other : hits) {
+        if (other == nullptr) continue;
+        drt::drNet* on = other->getNet();
+        if (on != nullptr && on->getFrNet() != nullptr
+            && on->getFrNet() != alt_fr) {
+          conflict = true;
+          break;
+        }
+      }
+      if (conflict) break;
+    }
+    if (conflict) {
+      ++conflict_with_baseline;
+      continue;
+    }
+
+    // Peer conflict — does this alt's v1 footprint overlap any
+    // already-selected alt's v1 footprint at same layer?
+    for (std::size_t sel_idx : selected) {
+      const auto& peer = pending[sel_idx];
+      for (const auto& cap : alt.v1_captures) {
+        if (cap.kind
+                != drt::redesign::overlay::CapturedConnFig::Kind::PathSeg
+            && cap.kind
+                != drt::redesign::overlay::CapturedConnFig::Kind::PatchWire) {
+          continue;
+        }
+        const odb::Rect alt_bbox(cap.bbox.ll.x + 1, cap.bbox.ll.y + 1,
+                                 cap.bbox.ur.x - 1, cap.bbox.ur.y - 1);
+        if (alt_bbox.xMin() >= alt_bbox.xMax()
+            || alt_bbox.yMin() >= alt_bbox.yMax()) {
+          continue;
+        }
+        for (const auto& peer_cap : peer.v1_captures) {
+          if (peer_cap.layer != cap.layer) continue;
+          if (peer_cap.kind
+                  != drt::redesign::overlay::CapturedConnFig::Kind::PathSeg
+              && peer_cap.kind
+                  != drt::redesign::overlay::CapturedConnFig::Kind::PatchWire) {
+            continue;
+          }
+          const odb::Rect peer_bbox(peer_cap.bbox.ll.x + 1,
+                                    peer_cap.bbox.ll.y + 1,
+                                    peer_cap.bbox.ur.x - 1,
+                                    peer_cap.bbox.ur.y - 1);
+          if (peer_bbox.xMin() >= peer_bbox.xMax()
+              || peer_bbox.yMin() >= peer_bbox.yMax()) {
+            continue;
+          }
+          if (alt_bbox.intersects(peer_bbox)) {
+            conflict = true;
+            break;
+          }
+        }
+        if (conflict) break;
+      }
+      if (conflict) break;
+    }
+    if (conflict) {
+      ++conflict_with_peer;
+      continue;
+    }
+
+    selected.push_back(idx);
+  }
+
+  // Step 4 — apply selected alts. Each one's drNet is currently in
+  // v0 state (no routes were torn down yet). Teardown drNet's
+  // current routes and re-apply with v1 clones.
+  for (std::size_t sel_idx : selected) {
+    auto& alt = pending[sel_idx];
+    drt::drNet* net = alt.net;
+    drt::gcNet* gc_net = (gcWorker_ != nullptr)
+                             ? gcWorker_->getNet(net->getFrNet())
+                             : nullptr;
+    // Teardown current v0 state.
+    for (const auto& cf : net->getRouteConnFigs()) {
+      if (cf == nullptr) continue;
+      subPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+      worker_rq.remove(cf.get());
+    }
+    if (gc_net != nullptr) {
+      modEolCosts_poly(gc_net, ModCostType::subRouteShape);
+    }
+    net->clearRouteConnFigs();
+    // Apply v1 clones.
+    for (auto& c : alt.v1_clones) {
+      drt::drConnFig* added = c.get();
+      net->addRoute(std::move(c), /*isExt=*/false);
+      worker_rq.add(added);
+    }
+    for (const auto& cf : net->getRouteConnFigs()) {
+      if (cf == nullptr) continue;
+      addPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+    }
+    if (gc_net != nullptr) {
+      modEolCosts_poly(gc_net, ModCostType::addRouteShape);
+    }
+    if (gcWorker_ != nullptr) {
+      gcWorker_->setTargetNet(net->getFrNet());
+      gcWorker_->updateDRNet(net);
+      gcWorker_->resetTargetNet();
+    }
+  }
+
+  std::fprintf(stderr,
+               "[v2.6.g.flush] worker_id=%d batch_size=%zu selected=%zu "
+               "skip_baseline_conflict=%zu skip_peer_conflict=%zu\n",
+               getWorkerId(),
+               our_indices.size(),
+               selected.size(),
+               conflict_with_baseline,
+               conflict_with_peer);
+
+  pending.clear();
+}
+#else  // !ENABLE_DRT_REDESIGN_OVERLAY
+void FlexDRWorker::v26gFlushPending() {}
+#endif  // ENABLE_DRT_REDESIGN_OVERLAY
+
 }  // namespace drt
+
+// V2.6.g — free-function entry point for FlexDR.cpp to call. No-op
+// when overlay is off; otherwise delegates to the member function.
+namespace dr_re {  // top-level alias for drt::redesign — same name
+                   // as the function-local alias used in the hook,
+                   // but this declaration site sits at file scope
+                   // after all #include lines.
+
+void V26gFlushPendingAlternatives(drt::FlexDRWorker* worker)
+{
+  if (worker == nullptr) return;
+  worker->v26gFlushPending();
+}
+
+}  // namespace dr_re

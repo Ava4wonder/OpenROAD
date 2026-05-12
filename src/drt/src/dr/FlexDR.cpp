@@ -7,6 +7,7 @@
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/GreedyPriorityPolicy.h"
 #include "redesign/ProposalStaging.h"
+#include "redesign/V26gBatch.h"
 #endif
 
 #include <sys/stat.h>
@@ -282,6 +283,9 @@ int FlexDRWorker::main(frDesign* design)
   if (!skipRouting_) {
     route_queue();
   }
+  // V2.6.g — flush staged K-bias alternatives via batch MIS before
+  // cleanup() finalizes worker state. No-op when V2.6.g is disabled.
+  dr_re::V26gFlushPendingAlternatives(this);
   high_resolution_clock::time_point t2 = high_resolution_clock::now();
   const int num_markers = getNumMarkers();
   cleanup();

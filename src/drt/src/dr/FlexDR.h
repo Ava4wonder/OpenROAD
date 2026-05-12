@@ -470,6 +470,15 @@ class FlexDRWorker
   void distributedMain(frDesign* design);
   void writeUpdates(const std::string& file_name);
   void updateDesign(frDesign* design);
+
+  // V2.6.g — drain the thread-local pending-alternatives buffer
+  // (filled by the V2.6.f.5 hook in routeNet when V2.6.g is
+  // enabled), run greedy MIS, and swap drNet states for selected
+  // winners. Called by FlexDRWorker::main() after route_queue()
+  // and before cleanup(). No-op when V2.6.g is disabled or no
+  // alternatives are staged. Defined in FlexDR_maze.cpp because
+  // it reuses the V2.6.f.5 teardown/rebuild pattern.
+  void v26gFlushPending();
   std::string reloadedMain();
   bool end(frDesign* design);
 
