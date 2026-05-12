@@ -3921,6 +3921,55 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           }
         }
 
+        // V2.6.f.10 — cross-net conflict downgrade. Before
+        // applying a non-identity winner, check whether its
+        // path-seg / patch-wire footprint strictly overlaps any
+        // existing drConnFig in worker_rq from a DIFFERENT net.
+        // worker_rq at this point contains:
+        //   * upstream's committed routes from other nets in this
+        //     worker batch, AND
+        //   * earlier V2 K-bias winners from prior admits in this
+        //     same batch (added at apply-time below).
+        // So this query naturally captures the "currently claimed
+        // footprints" set V2.4.f's MIS would build explicitly.
+        // The bbox is shrunk by 1 DBU on each side to filter out
+        // edge-touch false positives (parallel-wire legal cases).
+        bool v26f10_cross_net_conflict = false;
+        if (winner_idx > 0 && net->getFrNet() != nullptr) {
+          for (const auto& cap : kvariant_captured[winner_idx]) {
+            if (cap.kind
+                    != dr_overlay::CapturedConnFig::Kind::PathSeg
+                && cap.kind
+                    != dr_overlay::CapturedConnFig::Kind::PatchWire) {
+              continue;
+            }
+            const odb::Rect qbox(cap.bbox.ll.x + 1, cap.bbox.ll.y + 1,
+                                 cap.bbox.ur.x - 1, cap.bbox.ur.y - 1);
+            if (qbox.xMin() >= qbox.xMax()
+                || qbox.yMin() >= qbox.yMax()) {
+              continue;
+            }
+            std::vector<drt::drConnFig*> hits;
+            worker_rq.query(
+                qbox,
+                static_cast<drt::frLayerNum>(cap.layer),
+                hits);
+            for (drt::drConnFig* other : hits) {
+              if (other == nullptr) continue;
+              drt::drNet* on = other->getNet();
+              if (on != nullptr && on->getFrNet() != nullptr
+                  && on->getFrNet() != net->getFrNet()) {
+                v26f10_cross_net_conflict = true;
+                break;
+              }
+            }
+            if (v26f10_cross_net_conflict) break;
+          }
+        }
+        if (v26f10_cross_net_conflict) {
+          winner_idx = 0;
+        }
+
         // (6) REBUILD with winner's clones. When winner_idx > 0,
         // production routing diverges from upstream baseline by
         // construction.
@@ -3949,13 +3998,14 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         // content (most common case for K-bias under modest
         // multipliers).
         std::fprintf(stderr,
-                     "[v2.6.f.9] net_id=%lu winner=%zu amp=%d "
-                     "v0_size=%zu v0_score=%.1f v0_drv=%lu "
-                     "v0_hash=%016lx",
+                     "[v2.6.f.10] net_id=%lu winner=%zu amp=%d "
+                     "xnet_conflict=%d v0_size=%zu v0_score=%.1f "
+                     "v0_drv=%lu v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
                                         ? net->getFrNet()->getId() : 0),
                      winner_idx,
                      bias_amplifier,
+                     v26f10_cross_net_conflict ? 1 : 0,
                      variant0_size,
                      kvariant_score[0],
                      (unsigned long) kvariant_drv[0],
