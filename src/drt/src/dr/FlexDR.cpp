@@ -6,6 +6,7 @@
 #ifdef ENABLE_DRT_REDESIGN_OVERLAY
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/GreedyPriorityPolicy.h"
+#include "redesign/LeanMode.h"
 #include "redesign/ProposalStaging.h"
 #include "redesign/V26gBatch.h"
 #endif
@@ -829,7 +830,11 @@ void FlexDR::endWorkersBatch(
   //
   // Shadow only per the V2.4 gating decision: no PhysicalState
   // is committed against, no production routing changes.
-  {
+  //
+  // Lean mode (OPENROAD_DRT_REDESIGN_LEAN=1) skips this entirely
+  // since the V2.3.c shadow that feeds it is also skipped — no
+  // staged proposals → nothing to resolve.
+  if (!drt::redesign::DrtRedesignLeanMode()) {
     namespace dr_re = drt::redesign;
     if (dr_re::ProposalStaging::Instance().size() > 0) {
       dr_re::GreedyPriorityPolicy v24_policy;

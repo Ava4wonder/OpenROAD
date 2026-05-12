@@ -14,6 +14,7 @@
 
 #include "Hashing.h"
 #include "ShadowDump.h"
+#include "../LeanMode.h"
 #include "db/obj/frBlockObject.h"
 #include "db/obj/frBlockage.h"
 #include "db/obj/frGuide.h"
@@ -304,6 +305,7 @@ void ShadowCompareRouteShapes(
     const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
         legacy_result)
 {
+  if (::drt::redesign::DrtRedesignLeanMode()) return;
   if (design == nullptr) {
     return;
   }
@@ -361,6 +363,7 @@ void ShadowCompareBlockages(
     const std::vector<std::pair<::odb::Rect, ::drt::frBlockObject*>>&
         legacy_result)
 {
+  if (::drt::redesign::DrtRedesignLeanMode()) return;
   if (design == nullptr) {
     return;
   }
@@ -411,6 +414,7 @@ void ShadowCompareGuides(const ::drt::frDesign* design,
                          const ::odb::Rect& box,
                          const std::vector<::drt::frGuide*>& legacy_result)
 {
+  if (::drt::redesign::DrtRedesignLeanMode()) return;
   if (design == nullptr) {
     return;
   }
@@ -455,6 +459,7 @@ void ShadowCompareMarkers(
     const ::odb::Rect& box,
     const std::vector<::drt::frMarker*>& legacy_result)
 {
+  if (::drt::redesign::DrtRedesignLeanMode()) return;
   if (design == nullptr) {
     return;
   }

@@ -25,6 +25,7 @@
 #include "redesign/BatchSummaryDump.h"
 #include "redesign/ConflictPolicy.h"
 #include "redesign/DriveGate.h"
+#include "redesign/LeanMode.h"
 #include "redesign/MazeBiasOverride.h"
 #include "redesign/PhysicalState.h"
 #include "redesign/ProposalStaging.h"
@@ -3330,7 +3331,14 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
   // entire V2 hook block — otherwise the inner V2.3.c logic
   // would re-run shadows + V2.6.b/c logic would re-trigger
   // another K-bias loop, recursing infinitely.
-  if (!drt::g_v26f5_in_kbias_inner_)
+  //
+  // Lean mode (OPENROAD_DRT_REDESIGN_LEAN=1) also skips this
+  // entire block — V2.3.c synthetic K=4 shadow generates 8.9M
+  // proposals per run with no routing function, only diagnostics.
+  // V2.6.f.5.c K-bias driver below is the production multi-candidate
+  // path and is preserved in lean mode.
+  if (!drt::g_v26f5_in_kbias_inner_
+      && !drt::redesign::DrtRedesignLeanMode())
   // V2.3.c shadow: K-proposal batch_eval → SelectBest → internal
   // try_commit → BatchSummaryDump. Replaces V2.2.f's single-proposal
   // shadow. Production routing below proceeds unchanged; this block
