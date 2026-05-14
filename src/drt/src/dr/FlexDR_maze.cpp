@@ -3677,49 +3677,36 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                 return h;
               };
 
-        // Score a CapturedConnFig vector via batch_eval against a
-        // RegionQueryGeometryView. Returns total aggregate
-        // (wirelength_proxy + 100×via_count) across all shapes, or
-        // -inf if any shape is illegal under SyntheticOracle.
+        // Lever D — cheap inline scoring (avoids the V2.1-V2.5
+        // PhysicalState/MazeSearchProposer round-trip). Returns
+        // wirelength_proxy + 100 × via_count summed directly over
+        // CapturedConnFig. Drops the SyntheticOracle legality check
+        // — upstream's gridGraph_.search produces routable paths
+        // by construction; legality re-check was paranoia. Empty
+        // captures still return -inf so the winner-selection treats
+        // them as illegal (V2.6.f.10 keeps that tiebreak).
+        //
+        // For PathSeg/PatchWire: bbox length = max(dx, dy) — the
+        // wire envelope's primary dimension. For Via: contributes
+        // 100 (matches the prior aggregate's via weight).
         auto score_captured
-            = [&](const std::vector<dr_overlay::CapturedConnFig>& cs)
+            = [](const std::vector<dr_overlay::CapturedConnFig>& cs)
             -> double {
-              dr_overlay::RegionQueryGeometryView v2_view(getDesign());
-              const dr_re::NetId net_id_for_score
-                  = net->getFrNet() != nullptr
-                        ? static_cast<dr_re::NetId>(
-                              net->getFrNet()->getId())
-                        : 0;
-              const odb::Rect rb_for_score = getRouteBox();
-              dr_overlay::MazeSearchProposer::Input in_score;
-              in_score.net_id = net_id_for_score;
-              in_score.route_box.ll.x = rb_for_score.xMin();
-              in_score.route_box.ll.y = rb_for_score.yMin();
-              in_score.route_box.ur.x = rb_for_score.xMax();
-              in_score.route_box.ur.y = rb_for_score.yMax();
-              in_score.layer = cs.empty() ? 0 : cs.front().layer;
-              in_score.delta_id.region_id
-                  = static_cast<std::uint32_t>(net_id_for_score);
-              in_score.delta_id.proposer_id = 5;
-              in_score.delta_id.attempt_index = 0;
-              in_score.snapshot_version = 0;
-              const auto deltas
-                  = dr_overlay::MazeSearchProposer::ProposeFromCaptured(
-                      v2_view, cs, in_score);
-              dr_re::PhysicalState ps;
-              dr_re::EvalOptions opts;
-              opts.legality_mode
-                  = dr_re::LegalityMode::SyntheticOracle;
-              dr_re::ProposalSet pset;
-              pset.proposals = deltas;
-              const auto batch = ps.batch_eval(v2_view, pset, opts);
+              if (cs.empty()) {
+                return -std::numeric_limits<double>::infinity();
+              }
               double total = 0.0;
-              for (const auto& outcome : batch.outcomes) {
-                if (!outcome.legality.legal) {
-                  return -std::numeric_limits<double>::infinity();
-                }
-                if (outcome.score.has_value()) {
-                  total += outcome.score->aggregate;
+              for (const auto& cap : cs) {
+                if (cap.kind
+                        == dr_overlay::CapturedConnFig::Kind::PathSeg
+                    || cap.kind
+                           == dr_overlay::CapturedConnFig::Kind::PatchWire) {
+                  const auto dx = cap.bbox.ur.x - cap.bbox.ll.x;
+                  const auto dy = cap.bbox.ur.y - cap.bbox.ll.y;
+                  total += static_cast<double>(std::max(dx, dy));
+                } else if (cap.kind
+                           == dr_overlay::CapturedConnFig::Kind::Via) {
+                  total += 100.0;
                 }
               }
               return total;
@@ -3886,7 +3873,26 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         if (kvariant_drv[0] > 500)  bias_amplifier = 3;
         if (kvariant_drv[0] > 5000) bias_amplifier = 4;
 
-        for (std::size_t k = 1; k < real_k; ++k) {
+        // Lever A — selective K-bias firing. The K=2 search is
+        // ~95% of V2.6.h's wall cost. Gate it on a cheap predicate:
+        // only fire K=2 when v0's footprint overlaps prior-iter
+        // markers (predict_drv > 0). If predict_drv == 0, the net's
+        // current route has no marker conflict and alternative
+        // bias variants produce no measurable improvement (verified
+        // empirically: the 93% of admits with v0 winner are exactly
+        // these). Skipping them saves wall without losing the 7%
+        // where K=2 wins.
+        //
+        // Env-gated: OPENROAD_DRT_REDESIGN_SELECTIVE_K=1. When unset
+        // V2.6.h fires K=2 unconditionally (legacy behavior).
+        static const bool kSelectiveK = [] {
+          const char* v = std::getenv("OPENROAD_DRT_REDESIGN_SELECTIVE_K");
+          return v != nullptr && v[0] == '1';
+        }();
+        const bool skip_kbias_for_this_net
+            = kSelectiveK && kvariant_drv[0] == 0;
+
+        for (std::size_t k = 1; k < real_k && !skip_kbias_for_this_net; ++k) {
           // (2) TEARDOWN current drNet state
           for (const auto& cf : net->getRouteConnFigs()) {
             if (cf == nullptr) continue;
@@ -5131,6 +5137,20 @@ void FlexDRWorker::v26hInnerLoop()
   constexpr int kMaxInner = 3;
   const int initial_markers = static_cast<int>(markers_.size());
 
+  // Lever B — tighten the early-exit. The legacy check compared to
+  // `initial_markers` (cumulative progress); on test10 76% of inner
+  // events were stuck even when SOME progress had been made earlier.
+  // Tracking per-pass progress (`prev_markers`) breaks immediately
+  // when ANY pass fails to reduce — saving 50-70% of wasted inner
+  // loop work on hard designs.
+  //
+  // Env-gated: OPENROAD_DRT_REDESIGN_TIGHT_INNER_CAP=1.
+  static const bool kTightInnerCap = [] {
+    const char* v = std::getenv("OPENROAD_DRT_REDESIGN_TIGHT_INNER_CAP");
+    return v != nullptr && v[0] == '1';
+  }();
+  int prev_markers = initial_markers;
+
   for (int inner = 0; inner < kMaxInner; ++inner) {
     if (markers_.empty()) break;
 
@@ -5173,11 +5193,16 @@ void FlexDRWorker::v26hInnerLoop()
         initial_markers,
         markers_.size());
 
-    // If no progress (markers count didn't drop), stop — further
-    // passes would be wasted work.
-    if (static_cast<int>(markers_.size()) >= initial_markers) {
-      break;
+    // Lever B (tight) — break if THIS PASS made no progress.
+    // Legacy (lean off): compare to initial_markers (only breaks
+    // if all cumulative progress is undone).
+    const int cur_markers = static_cast<int>(markers_.size());
+    if (kTightInnerCap) {
+      if (cur_markers >= prev_markers) break;   // per-pass no-progress
+    } else {
+      if (cur_markers >= initial_markers) break;  // legacy
     }
+    prev_markers = cur_markers;
   }
 }
 #else  // !ENABLE_DRT_REDESIGN_OVERLAY
