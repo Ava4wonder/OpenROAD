@@ -8,6 +8,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 #include <list>
 #include <map>
 #include <memory>
@@ -3889,8 +3890,53 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           const char* v = std::getenv("OPENROAD_DRT_REDESIGN_SELECTIVE_K");
           return v != nullptr && v[0] == '1';
         }();
+
+        // Lever A+ — per-(worker, net) K=2 budget. Even with
+        // selective-K gating, route_queue's internal ripup loop
+        // calls routeNet many times per net within a single outer
+        // iter. Each retry rebuilds nearby markers, flipping
+        // v0_drv from 0 to >0 → Lever A's gate fires K=2 again.
+        // On test9 8t this caused 225K K=2 fires for 187K-net
+        // design (1.2 K=2 per net). Capping at 1 per (worker, net)
+        // halves that count — fewer redundant searches without
+        // losing the iter-count benefit (the first K=2 fire
+        // captures the winning topology).
+        //
+        // Env-gated: OPENROAD_DRT_REDESIGN_KBIAS_BUDGET=N (default
+        // INT_MAX = unlimited; recommend 1 with SELECTIVE_K=1).
+        static const int kKbiasBudgetPerNet = [] {
+          const char* v
+              = std::getenv("OPENROAD_DRT_REDESIGN_KBIAS_BUDGET");
+          if (v == nullptr || v[0] == '\0') {
+            return std::numeric_limits<int>::max();
+          }
+          try {
+            return std::stoi(std::string(v));
+          } catch (...) {
+            return std::numeric_limits<int>::max();
+          }
+        }();
+        thread_local std::unordered_map<drt::drNet*, int>
+            g_v3_kbias_count_per_net_;
+        thread_local drt::FlexDRWorker* g_v3_last_worker_seen_
+            = nullptr;
+        if (g_v3_last_worker_seen_ != this) {
+          // Worker switch (per-iter, per-OMP-thread) → reset budget.
+          // Each outer DRT iter creates new FlexDRWorkers, so this
+          // also resets across outer iters as designed.
+          g_v3_kbias_count_per_net_.clear();
+          g_v3_last_worker_seen_ = this;
+        }
+        const bool kbias_budget_exhausted
+            = g_v3_kbias_count_per_net_[net] >= kKbiasBudgetPerNet;
+
         const bool skip_kbias_for_this_net
-            = kSelectiveK && kvariant_drv[0] == 0;
+            = (kSelectiveK && kvariant_drv[0] == 0)
+              || kbias_budget_exhausted;
+
+        if (!skip_kbias_for_this_net) {
+          g_v3_kbias_count_per_net_[net]++;
+        }
 
         for (std::size_t k = 1; k < real_k && !skip_kbias_for_this_net; ++k) {
           // (2) TEARDOWN current drNet state
