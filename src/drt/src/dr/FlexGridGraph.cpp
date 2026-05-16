@@ -93,13 +93,13 @@ void FlexGridGraph::initGrids(const frLayerCoordTrackPatternMap& xMap,
   nodes_.clear();
   nodes_.resize(capacity, Node());
   // new
-  primary_scratch_.prevDirs.clear();
-  primary_scratch_.srcs.clear();
-  primary_scratch_.dsts.clear();
+  scratch().prevDirs.clear();
+  scratch().srcs.clear();
+  scratch().dsts.clear();
 
-  primary_scratch_.prevDirs.resize(capacity * 3, false);
-  primary_scratch_.srcs.resize(capacity, false);
-  primary_scratch_.dsts.resize(capacity, false);
+  scratch().prevDirs.resize(capacity * 3, false);
+  scratch().srcs.resize(capacity, false);
+  scratch().dsts.resize(capacity, false);
   guides_.clear();
   if (followGuide) {
     guides_.resize(capacity, false);
@@ -517,17 +517,17 @@ void FlexGridGraph::resetStatus()
 
 void FlexGridGraph::resetSrc()
 {
-  primary_scratch_.srcs.assign(primary_scratch_.srcs.size(), false);
+  scratch().srcs.assign(scratch().srcs.size(), false);
 }
 
 void FlexGridGraph::resetDst()
 {
-  primary_scratch_.dsts.assign(primary_scratch_.dsts.size(), false);
+  scratch().dsts.assign(scratch().dsts.size(), false);
 }
 
 void FlexGridGraph::resetPrevNodeDir()
 {
-  primary_scratch_.prevDirs.assign(primary_scratch_.prevDirs.size(), false);
+  scratch().prevDirs.assign(scratch().prevDirs.size(), false);
 }
 
 // print the grid graph with edge and vertex for debug purpose

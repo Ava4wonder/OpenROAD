@@ -4087,6 +4087,19 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             // (this call removed) caused 100% of K=2 fires to
             // return v1_size=0 / v1_score=-inf on ispd18 test9 8t.
             // Restoring this call is required for correctness.
+            //
+            // V2.6.h.L2c.2 — flip gridGraph_ to its secondary scratch
+            // BEFORE the resetStatus. The outer routeNet's primary
+            // scratch (srcs/dsts/prevDirs from the K=1 search) stays
+            // intact and unread; resetStatus + the inner search
+            // operate exclusively on secondary_scratch_. After the
+            // recursive routeNet returns, flip back so the outer
+            // routeNet's continuation (and the next net's mazeNetInit)
+            // see primary again. Single-threaded today — the toggle is
+            // a bool, not thread_local — so behaviour is bit-identical
+            // to V2.6.h.L2c.1. Future intra-worker parallelism will
+            // swap the toggle for a per-thread pointer.
+            gridGraph_.setUseSecondary(true);
             gridGraph_.resetStatus();
 
             // Recursive routeNet — the guard prevents the inner
@@ -4104,6 +4117,7 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                        std::chrono::steady_clock::now() - _l2c_c0)
                        .count();
             drt::g_v26f5_in_kbias_inner_ = false;
+            gridGraph_.setUseSecondary(false);
 
             kvariant_ok[k] = kok;
             if (kok) {
