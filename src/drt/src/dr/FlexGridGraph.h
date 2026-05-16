@@ -755,13 +755,24 @@ class FlexGridGraph
   // toggle on around its recursive routeNet so the inner search runs
   // against an isolated secondary scratch — primary's state survives
   // unchanged for the outer routeNet's continuation.
+  //
+  // V2.6.h.L2c.2.b — `use_secondary_tls_` is now a static thread_local
+  // bool, so two OMP threads working concurrently on the same
+  // FlexGridGraph instance each have their own toggle. The main
+  // thread keeps its toggle false while the K=2 task thread (when
+  // spawned via std::async, L2c.2.d) sets its own toggle true. Cost
+  // values (ggDRCCost_ etc.) remain shared until L2c.2.c — fine for
+  // L2c.2.d because the main thread blocks on the future, so only
+  // one thread reads costs at a time.
+  static thread_local bool use_secondary_tls_;
+
   MazeSearchScratch& scratch()
   {
-    return use_secondary_ ? secondary_scratch_ : primary_scratch_;
+    return use_secondary_tls_ ? secondary_scratch_ : primary_scratch_;
   }
   const MazeSearchScratch& scratch() const
   {
-    return use_secondary_ ? secondary_scratch_ : primary_scratch_;
+    return use_secondary_tls_ ? secondary_scratch_ : primary_scratch_;
   }
   void setUseSecondary(bool b)
   {
@@ -779,7 +790,7 @@ class FlexGridGraph
             primary_scratch_.prevDirs.size(), false);
       }
     }
-    use_secondary_ = b;
+    use_secondary_tls_ = b;
   }
 
   // unsafe access, no idx check
@@ -1132,7 +1143,6 @@ class FlexGridGraph
   // for a thread_local pointer so two threads can search concurrently.
   MazeSearchScratch primary_scratch_;
   MazeSearchScratch secondary_scratch_;
-  bool use_secondary_ = false;
   std::vector<bool> guides_;
   frVector<frCoord> xCoords_;
   frVector<frCoord> yCoords_;

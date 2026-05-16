@@ -24,6 +24,16 @@ using odb::dbTechLayerDir;
 using odb::dbTechLayerType;
 
 namespace drt {
+
+// V2.6.h.L2c.2.b — static thread_local definition. Each thread has
+// its own toggle slot; default-initialized to false. The main thread
+// (running outer routeNet) keeps it false; threads spawned by
+// std::async inside the K-bias hook set it true for the recursive
+// routeNet, then restore false. Persists across worker-instance
+// switches on the same thread, but the K-bias hook always restores
+// it to false at exit, so the next worker starts clean.
+thread_local bool FlexGridGraph::use_secondary_tls_ = false;
+
 void FlexGridGraph::addAccessPointLocation(frLayerNum layer_num,
                                            frCoord x_coord,
                                            frCoord y_coord)

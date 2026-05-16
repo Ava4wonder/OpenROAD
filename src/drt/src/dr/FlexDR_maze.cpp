@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -4088,36 +4089,43 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             // return v1_size=0 / v1_score=-inf on ispd18 test9 8t.
             // Restoring this call is required for correctness.
             //
-            // V2.6.h.L2c.2 — flip gridGraph_ to its secondary scratch
-            // BEFORE the resetStatus. The outer routeNet's primary
-            // scratch (srcs/dsts/prevDirs from the K=1 search) stays
-            // intact and unread; resetStatus + the inner search
-            // operate exclusively on secondary_scratch_. After the
-            // recursive routeNet returns, flip back so the outer
-            // routeNet's continuation (and the next net's mazeNetInit)
-            // see primary again. Single-threaded today — the toggle is
-            // a bool, not thread_local — so behaviour is bit-identical
-            // to V2.6.h.L2c.1. Future intra-worker parallelism will
-            // swap the toggle for a per-thread pointer.
-            gridGraph_.setUseSecondary(true);
-            gridGraph_.resetStatus();
-
-            // Recursive routeNet — the guard prevents the inner
-            // hook from re-entering V2.6 logic. Note we do NOT
-            // call mazeNetInit here: the outer mazeIterInit already
-            // initialized net costs, and re-running mazeNetInit
-            // would re-reserve via-access and re-clear drNet state
-            // we want to preserve for the recursive search.
+            // V2.6.h.L2c.2.b — toggle is now thread_local. Setting
+            // it on the spawned thread does not affect the main
+            // thread's view.
+            //
+            // V2.6.h.L2c.2.d — recursive routeNet runs on a separate
+            // thread via std::async(launch::async). Main thread blocks
+            // on fut.get(). This delivers no wall speedup today (main
+            // thread has no useful work; cost-bias state is still
+            // shared so even if it had work, addPathCost would read
+            // the override-mid-flight value). Purpose: prove the
+            // threading mechanics work bit-identically before doing
+            // the L2c.2.c (cost-bias per-scratch) + L2c.2.e (deferred
+            // winner / speculation) work that delivers the actual
+            // -5.5 min wall projection.
+            //
+            // The g_v26f5_in_kbias_inner_ guard MUST be set on the
+            // spawned thread, not on main, because it gates the V2
+            // hook re-entry inside routeNet. The guard is currently
+            // a non-thread-local global static; relying on the fact
+            // that on the spawned thread, main thread won't enter
+            // routeNet while we're blocked.
             drt::g_v26f5_in_kbias_inner_ = true;
             std::vector<FlexMazeIdx> kpaths;
             const auto _l2c_c0 = std::chrono::steady_clock::now();
-            const bool kok = routeNet(net, kpaths);
+            auto kfut = std::async(std::launch::async, [&]() -> bool {
+              gridGraph_.setUseSecondary(true);
+              gridGraph_.resetStatus();
+              const bool ok = this->routeNet(net, kpaths);
+              gridGraph_.setUseSecondary(false);
+              return ok;
+            });
+            const bool kok = kfut.get();
             g_l2c_recursive_ns_
                 += std::chrono::duration_cast<std::chrono::nanoseconds>(
                        std::chrono::steady_clock::now() - _l2c_c0)
                        .count();
             drt::g_v26f5_in_kbias_inner_ = false;
-            gridGraph_.setUseSecondary(false);
 
             kvariant_ok[k] = kok;
             if (kok) {
