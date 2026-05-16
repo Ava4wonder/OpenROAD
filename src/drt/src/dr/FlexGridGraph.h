@@ -25,6 +25,10 @@
 #include "db/tech/frTechObject.h"
 #include "dr/FlexMazeTypes.h"
 #include "dr/FlexWavefront.h"
+// grid_state_access (Phase 4): SoA backend members.
+#include "dr/MazeNodeIndex.h"
+#include "dr/MazeSearchStateSoA.h"
+#include "dr/WavefrontBucketedFrontier.h"
 #include "frBaseTypes.h"
 #include "frDesign.h"
 #include "global.h"
@@ -919,6 +923,25 @@ class FlexGridGraph
               const odb::Point& centerPt,
               std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
               bool route_with_jumpers);
+  // grid_state_access (Phase 4): SoA + bucketed-frontier dispatch.
+  // Enabled at runtime by DRT_USE_SOA_BACKEND=1. Falls back to the
+  // existing FlexWavefront priority_queue path when disabled. The
+  // signature mirrors search() so callers can be agnostic.
+  bool searchSoA(std::vector<FlexMazeIdx>& connComps,
+                 drPin* nextPin,
+                 std::vector<FlexMazeIdx>& path,
+                 FlexMazeIdx& ccMazeIdx1,
+                 FlexMazeIdx& ccMazeIdx2,
+                 const odb::Point& centerPt,
+                 std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
+                 bool route_with_jumpers);
+  // Replace direct wavefront_.push() in expand()/search() with this
+  // dispatcher so the SoA backend can intercept pushes.
+  void pushFrontier(const FlexWavefrontGrid& grid);
+  // (Re)size SoA arrays to match current grid dimensions. Idempotent.
+  void syncSoADims();
+  // True iff DRT_USE_SOA_BACKEND env var is set to 1. Cached.
+  bool isSoABackendEnabled() const;
   void setCost(frUInt4 drcCostIn,
                frUInt4 markerCostIn,
                frUInt4 FixedShapeCostIn)
@@ -1071,6 +1094,11 @@ class FlexGridGraph
   frUInt4 ggFixedShapeCost_ = 0;
   // temporary variables
   FlexWavefront wavefront_;
+  // grid_state_access (Phase 4): SoA backend state, lazy-init.
+  MazeNodeIndex node_idx_;
+  MazeSearchStateSoA state_soa_;
+  WavefrontBucketedFrontier soa_frontier_;
+  mutable int soa_backend_enabled_cache_ = -1;  // -1 = not probed yet
   const std::vector<std::pair<frCoord, frCoord>>* halfViaEncArea_
       = nullptr;  // std::pair<layer1area, layer2area>
   // ndr related

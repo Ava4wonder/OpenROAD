@@ -177,7 +177,7 @@ void FlexGridGraph::expand(FlexWavefrontGrid& currGrid,
         nextWavefrontGrid.setParentId(currGrid.getId());
         printExpansion(nextWavefrontGrid, "Pushing");
       }
-      wavefront_.push(nextWavefrontGrid);
+      pushFrontier(nextWavefrontGrid);  // grid_state_access P4 dispatch
     }
   } else {
     // add to wavefront
@@ -186,7 +186,7 @@ void FlexGridGraph::expand(FlexWavefrontGrid& currGrid,
       nextWavefrontGrid.setParentId(currGrid.getId());
       printExpansion(nextWavefrontGrid, "Pushing");
     }
-    wavefront_.push(nextWavefrontGrid);
+    pushFrontier(nextWavefrontGrid);  // grid_state_access P4 dispatch
   }
   if (drWorker_->getDRIter() >= debugMazeIter) {
     std::cout << "Creating " << nextWavefrontGrid.x() << " "
@@ -721,6 +721,14 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
                            std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
                            bool route_with_jumpers)
 {
+  // grid_state_access (Phase 4) -- runtime dispatch. The SoA backend
+  // mirrors the body below but uses WavefrontBucketedFrontier +
+  // MazeSearchStateSoA instead of FlexWavefront and the bit-array
+  // prevDirs_ closed set. Enabled when DRT_USE_SOA_BACKEND=1.
+  if (isSoABackendEnabled()) {
+    return searchSoA(connComps, nextPin, path, ccMazeIdx1, ccMazeIdx2,
+                     centerPt, mazeIdx2TaperBox, route_with_jumpers);
+  }
   if (debug_) {
     dump_file_.open("expansions.dump");
   }
@@ -780,7 +788,7 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
       currGrid.setId(curr_id_++);
       printExpansion(currGrid, "Pushing");
     }
-    wavefront_.push(currGrid);
+    pushFrontier(currGrid);  // grid_state_access P4 dispatch
   }
   while (!wavefront_.empty()) {
     auto currGrid = wavefront_.top();
@@ -808,6 +816,117 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
     // expand and update wavefront
     expandWavefront(
         currGrid, dstMazeIdx1, dstMazeIdx2, centerPt, route_with_jumpers);
+  }
+  return false;
+}
+
+
+// grid_state_access (Phase 4) -- SoA + bucketed-frontier search loop.
+// Mirrors FlexGridGraph::search() above. Tradeoffs:
+//  + replaces O(log N) heap ops with O(1) bucket push.
+//  + Closed-check is one byte load + compare via state_soa_.
+//  + epoch-based reset avoids per-search array zero pass.
+//  - extra per-bucket sort (operator<) preserves A* tie-breaking semantics.
+bool FlexGridGraph::searchSoA(std::vector<FlexMazeIdx>& connComps,
+                              drPin* nextPin,
+                              std::vector<FlexMazeIdx>& path,
+                              FlexMazeIdx& ccMazeIdx1,
+                              FlexMazeIdx& ccMazeIdx2,
+                              const odb::Point& centerPt,
+                              std::map<FlexMazeIdx, frBox3D*>& mazeIdx2TaperBox,
+                              bool route_with_jumpers)
+{
+  if (debug_) {
+    dump_file_.open("expansions.dump");
+  }
+  curr_id_ = 1;
+  // resetStatus() should have started a fresh epoch already; we sync
+  // dims defensively in case the caller bypassed it.
+  syncSoADims();
+  soa_frontier_.clear_for_epoch();
+
+  frMIdx xDim = 0;
+  frMIdx yDim = 0;
+  frMIdx zDim = 0;
+  getDim(xDim, yDim, zDim);
+  FlexMazeIdx dstMazeIdx1(xDim - 1, yDim - 1, zDim - 1);
+  FlexMazeIdx dstMazeIdx2(0, 0, 0);
+  for (auto& ap : nextPin->getAccessPatterns()) {
+    FlexMazeIdx mi = ap->getMazeIdx();
+    dstMazeIdx1.set(std::min(dstMazeIdx1.x(), mi.x()),
+                    std::min(dstMazeIdx1.y(), mi.y()),
+                    std::min(dstMazeIdx1.z(), mi.z()));
+    dstMazeIdx2.set(std::max(dstMazeIdx2.x(), mi.x()),
+                    std::max(dstMazeIdx2.y(), mi.y()),
+                    std::max(dstMazeIdx2.z(), mi.z()));
+  }
+
+  odb::Point currPt;
+  for (auto& idx : connComps) {
+    if (isDst(idx.x(), idx.y(), idx.z())) {
+      path.emplace_back(idx.x(), idx.y(), idx.z());
+      return true;
+    }
+    getPoint(currPt, idx.x(), idx.y());
+    frCoord currDist = odb::Point::manhattanDistance(currPt, centerPt);
+    FlexWavefrontGrid currGrid(
+        idx.x(), idx.y(), idx.z(),
+        std::numeric_limits<frCoord>::max(),
+        std::numeric_limits<frCoord>::max(),
+        true,
+        std::numeric_limits<frCoord>::max(),
+        currDist,
+        0,
+        getEstCost(idx, dstMazeIdx1, dstMazeIdx2, frDirEnum::UNKNOWN));
+    if (ndr_ && router_cfg_->AUTO_TAPER_NDR_NETS) {
+      auto it = mazeIdx2TaperBox.find(idx);
+      if (it != mazeIdx2TaperBox.end()) {
+        currGrid.setSrcTaperBox(it->second);
+      }
+    }
+    if (debug_) {
+      currGrid.setId(curr_id_++);
+      printExpansion(currGrid, "Pushing");
+    }
+    pushFrontier(currGrid);
+  }
+
+  while (!soa_frontier_.empty()) {
+    auto& batch = soa_frontier_.pop_min_bucket();
+    // FlexWavefrontGrid::operator< returns true when *this* is worse.
+    // Sort with `b < a` so the better element appears first.
+    std::sort(batch.begin(), batch.end(),
+              [](const FlexWavefrontGrid& a, const FlexWavefrontGrid& b) {
+                return b < a;
+              });
+    for (auto& currGrid : batch) {
+      const MazeNodeId id = node_idx_.getNodeId(
+          currGrid.x(), currGrid.y(), currGrid.z());
+      // Skip stale popped entries: this node has already been Closed.
+      if (state_soa_.isLive(id)
+          && state_soa_.state(id) == MazeNodeState::Closed) {
+        continue;
+      }
+      // Honor master closed-set too (defensive; some helpers still use it).
+      if (getPrevAstarNodeDir({currGrid.x(), currGrid.y(), currGrid.z()})
+          != frDirEnum::UNKNOWN) {
+        continue;
+      }
+      state_soa_.touch(id);
+      state_soa_.setState(id, MazeNodeState::Closed);
+      if (debug_) {
+        printExpansion(currGrid, "Popping");
+      }
+      if (graphics_) {
+        graphics_->searchNode(this, currGrid);
+      }
+      if (isDst(currGrid.x(), currGrid.y(), currGrid.z())) {
+        traceBackPath(currGrid, path, connComps, ccMazeIdx1, ccMazeIdx2);
+        return true;
+      }
+      expandWavefront(currGrid, dstMazeIdx1, dstMazeIdx2, centerPt,
+                      route_with_jumpers);
+    }
   }
   return false;
 }

@@ -4,6 +4,7 @@
 #include "dr/FlexGridGraph.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
@@ -513,6 +514,16 @@ void FlexGridGraph::resetStatus()
   resetSrc();
   resetDst();
   resetPrevNodeDir();
+  // grid_state_access (Phase 4): the K-bias invariant requires every
+  // caller that needs a fresh search to land here. By tying the SoA
+  // epoch bump and bucketed-frontier clear to resetStatus(), we
+  // automatically pick up recursive routeNet calls that already
+  // invoke resetStatus(). See MEMORY.md project_routenet_kbias_invariant.
+  if (isSoABackendEnabled()) {
+    syncSoADims();
+    state_soa_.beginNewSearch();
+    soa_frontier_.clear_for_epoch();
+  }
 }
 
 void FlexGridGraph::resetSrc()
@@ -528,6 +539,58 @@ void FlexGridGraph::resetDst()
 void FlexGridGraph::resetPrevNodeDir()
 {
   prevDirs_.assign(prevDirs_.size(), false);
+}
+
+// grid_state_access (Phase 4): resize SoA storage to current grid
+// dimensions. Idempotent: no-op when dims have not changed.
+void FlexGridGraph::syncSoADims()
+{
+  frMIdx xDim = 0;
+  frMIdx yDim = 0;
+  frMIdx zDim = 0;
+  getDim(xDim, yDim, zDim);
+  if (node_idx_.xDim() != xDim || node_idx_.yDim() != yDim
+      || node_idx_.zDim() != zDim) {
+    node_idx_ = MazeNodeIndex(xDim, yDim, zDim);
+    state_soa_.resize(node_idx_.numNodes());
+    // Wipe frontier too; any cached state is from a different grid.
+    soa_frontier_.clear_for_epoch();
+  }
+}
+
+// grid_state_access (Phase 4): dispatcher used in place of direct
+// wavefront_.push() so the SoA backend can intercept frontier pushes.
+void FlexGridGraph::pushFrontier(const FlexWavefrontGrid& grid)
+{
+  if (isSoABackendEnabled()) {
+    // Optional Open-state tag: lets the pop side skip stale entries
+    // for a node that has since been Closed.
+    const MazeNodeId id
+        = node_idx_.getNodeId(grid.x(), grid.y(), grid.z());
+    state_soa_.touch(id);
+    if (grid.getPathCost() < state_soa_.g(id)) {
+      state_soa_.setG(id, grid.getPathCost());
+      state_soa_.setF(id, grid.getCost());
+      state_soa_.setState(id, MazeNodeState::Open);
+    }
+    soa_frontier_.push(grid);
+    return;
+  }
+  wavefront_.push(grid);
+}
+
+// grid_state_access (Phase 4): probe the env var lazily; cache the
+// result for the lifetime of this FlexGridGraph object. The flag is
+// const-ish in practice (set once at process start) so caching is
+// fine.
+bool FlexGridGraph::isSoABackendEnabled() const
+{
+  if (soa_backend_enabled_cache_ < 0) {
+    const char* env = std::getenv("DRT_USE_SOA_BACKEND");
+    soa_backend_enabled_cache_
+        = (env != nullptr && env[0] == '1' && env[1] == '\0') ? 1 : 0;
+  }
+  return soa_backend_enabled_cache_ != 0;
 }
 
 // print the grid graph with edge and vertex for debug purpose
