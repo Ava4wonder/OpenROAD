@@ -57,6 +57,16 @@ struct MazeSearchScratch
   std::vector<bool> srcs;
   std::vector<bool> dsts;
   std::vector<bool> prevDirs;
+
+  // V2.6.h.L2c.2.c — cost-bias state moved out of FlexGridGraph
+  // into the scratch so that two threads running concurrent
+  // searches against different scratches see independent weights.
+  // MazeBiasOverride writes these on construction, restores on
+  // destruction; the A* hot path in FlexGridGraph_maze.cpp reads
+  // them every edge expansion.
+  frUInt4 drcCost = 0;
+  frUInt4 markerCost = 0;
+  frUInt4 fixedShapeCost = 0;
 };
 
 class FlexGridGraph
@@ -789,6 +799,14 @@ class FlexGridGraph
         secondary_scratch_.prevDirs.assign(
             primary_scratch_.prevDirs.size(), false);
       }
+      // V2.6.h.L2c.2.c — propagate primary's cost-bias to secondary
+      // so MazeBiasOverride saves the correct base values (and the
+      // A* hot-path expressions read non-zero weights). Cheap (3
+      // ints) — run every toggle so secondary stays in sync if
+      // primary's costs ever change between fires.
+      secondary_scratch_.drcCost = primary_scratch_.drcCost;
+      secondary_scratch_.markerCost = primary_scratch_.markerCost;
+      secondary_scratch_.fixedShapeCost = primary_scratch_.fixedShapeCost;
     }
     use_secondary_tls_ = b;
   }
@@ -986,17 +1004,21 @@ class FlexGridGraph
                frUInt4 markerCostIn,
                frUInt4 FixedShapeCostIn)
   {
-    ggDRCCost_ = drcCostIn;
-    ggMarkerCost_ = markerCostIn;
-    ggFixedShapeCost_ = FixedShapeCostIn;
+    // V2.6.h.L2c.2.c — writes through scratch() to whichever scratch
+    // is active for the current thread. MazeBiasOverride uses this
+    // to apply per-search bias; the initial worker setCost call
+    // (from FlexDR_init.cpp) writes to primary (toggle off).
+    scratch().drcCost = drcCostIn;
+    scratch().markerCost = markerCostIn;
+    scratch().fixedShapeCost = FixedShapeCostIn;
   }
   // V2.6.f.1 — read accessors paired with setCost so RAII helpers
   // (redesign::MazeBiasOverride) can save the current weights,
   // apply a bias, and restore on scope exit. No behaviour change
   // to upstream code — these are passive const reads.
-  frUInt4 getDRCCost() const { return ggDRCCost_; }
-  frUInt4 getMarkerCost() const { return ggMarkerCost_; }
-  frUInt4 getFixedShapeCost() const { return ggFixedShapeCost_; }
+  frUInt4 getDRCCost() const { return scratch().drcCost; }
+  frUInt4 getMarkerCost() const { return scratch().markerCost; }
+  frUInt4 getFixedShapeCost() const { return scratch().fixedShapeCost; }
   frCoord getHalfViaEncArea(frMIdx z, bool isLayer1) const
   {
     return (isLayer1 ? (*halfViaEncArea_)[z].first
@@ -1150,9 +1172,10 @@ class FlexGridGraph
   frVector<frCoord> zHeights_;  // accumulated Z diff
   std::vector<odb::dbTechLayerDir> layerRouteDirections_;
   odb::Rect dieBox_;
-  frUInt4 ggDRCCost_ = 0;
-  frUInt4 ggMarkerCost_ = 0;
-  frUInt4 ggFixedShapeCost_ = 0;
+  // V2.6.h.L2c.2.c — ggDRCCost_ / ggMarkerCost_ / ggFixedShapeCost_
+  // moved into MazeSearchScratch so two threads can hold independent
+  // bias values. setCost/getDRCCost/getMarkerCost/getFixedShapeCost
+  // route through scratch().
   // temporary variables
   FlexWavefront wavefront_;
   const std::vector<std::pair<frCoord, frCoord>>* halfViaEncArea_

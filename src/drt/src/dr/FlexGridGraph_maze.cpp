@@ -296,9 +296,9 @@ frCost FlexGridGraph::getEstCost(const FlexMazeIdx& src,
   }
   if (isForbidden) {
     if (drWorker_->getDRIter() >= 3) {
-      forbiddenPenalty = 2 * ggMarkerCost_ * edgeLength;
+      forbiddenPenalty = 2 * scratch().markerCost * edgeLength;
     } else {
-      forbiddenPenalty = 2 * ggDRCCost_ * edgeLength;
+      forbiddenPenalty = 2 * scratch().drcCost * edgeLength;
     }
   }
   return (minCostX + minCostY + minCostZ + bendCnt + forbiddenPenalty);
@@ -461,9 +461,9 @@ frCost FlexGridGraph::getNextPathCost(const FlexWavefrontGrid& currGrid,
           std::cout << "isForbiddenVia2Via\n";
         }
         if (drWorker_->getDRIter() >= 3) {
-          nextPathCost += 2 * ggMarkerCost_ * edgeLength;
+          nextPathCost += 2 * scratch().markerCost * edgeLength;
         } else {
-          nextPathCost += 2 * ggDRCCost_ * edgeLength;
+          nextPathCost += 2 * scratch().drcCost * edgeLength;
         }
       }
     }
@@ -515,9 +515,9 @@ frCost FlexGridGraph::getNextPathCost(const FlexWavefrontGrid& currGrid,
           std::cout << "isForbiddenTLen\n";
         }
         if (drWorker_->getDRIter() >= 3) {
-          nextPathCost += 2 * ggDRCCost_ * edgeLength;
+          nextPathCost += 2 * scratch().drcCost * edgeLength;
         } else {
-          nextPathCost += 2 * ggMarkerCost_ * edgeLength;
+          nextPathCost += 2 * scratch().markerCost * edgeLength;
         }
       }
     }
@@ -555,9 +555,9 @@ frCost FlexGridGraph::getCosts(frMIdx gridX,
   // temporarily disable guideCost
   return getEdgeLength(gridX, gridY, gridZ, dir)
          + (gridCost ? router_cfg_->GRIDCOST * edgeLength : 0)
-         + (drcCost ? ggDRCCost_ * edgeLength : 0)
-         + (markerCost ? ggMarkerCost_ * edgeLength : 0)
-         + (shapeCost ? ggFixedShapeCost_ * edgeLength : 0)
+         + (drcCost ? scratch().drcCost * edgeLength : 0)
+         + (markerCost ? scratch().markerCost * edgeLength : 0)
+         + (shapeCost ? scratch().fixedShapeCost * edgeLength : 0)
          + (blockCost ? router_cfg_->BLOCKCOST * layer->getMinWidth() * 20 : 0)
          + (!guideCost ? (router_cfg_->GUIDECOST * jumper_cost) * edgeLength
                        : 0);
