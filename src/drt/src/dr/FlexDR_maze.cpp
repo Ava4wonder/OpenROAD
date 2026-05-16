@@ -3918,6 +3918,20 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         }();
         thread_local std::unordered_map<drt::drNet*, int>
             g_v3_kbias_count_per_net_;
+        // v2.6.h.e1 fix 2 (external-comment item 6): per-(worker,
+        // net) anti-oscillation history. The inner-loop can amplify
+        // ripup oscillation — same net's K=2 winner keeps getting
+        // re-attacked by neighboring K=2 ripups and reverting to
+        // similar topology. Track the last 2 winning v1 hashes per
+        // net; if a new K=2 fire produces a v1 whose hash matches
+        // either, force-pick v0 (the proposed alternative is just
+        // recreating an already-rejected geometry).
+        struct V3HistoryEntry {
+          std::uint64_t recent_hash[2] = {0, 0};
+          std::uint8_t  idx = 0;  // ring-buffer index
+        };
+        thread_local std::unordered_map<drt::drNet*, V3HistoryEntry>
+            g_v3_winner_history_;
         thread_local drt::FlexDRWorker* g_v3_last_worker_seen_
             = nullptr;
         if (g_v3_last_worker_seen_ != this) {
@@ -3925,6 +3939,7 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           // Each outer DRT iter creates new FlexDRWorkers, so this
           // also resets across outer iters as designed.
           g_v3_kbias_count_per_net_.clear();
+          g_v3_winner_history_.clear();
           g_v3_last_worker_seen_ = this;
         }
         const bool kbias_budget_exhausted
@@ -3972,8 +3987,15 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                 static_cast<dr_re::GridGraphCost>(
                     base_fixed * sched[2] * bias_amplifier));
 
-            // Reset gridGraph per-search state (srcs, dsts, prevDirs)
-            gridGraph_.resetStatus();
+            // v2.6.h.e1 fix 1 (external-comment item 4): the
+            // explicit `gridGraph_.resetStatus()` here is REDUNDANT.
+            // The recursive `routeNet` call below invokes upstream's
+            // `mazeNetInit(net)` which itself calls `resetStatus()`
+            // (FlexDR_maze.cpp:1730) as its first action. The double
+            // reset cost ~37.5 KB of vector<bool> memset per K=2
+            // fire × ~82K fires per iter on test9 8t = ~3 GB
+            // unnecessary memory-write bandwidth per iter. Removing
+            // it is bit-identical (mazeNetInit always runs).
 
             // Recursive routeNet — the guard prevents the inner
             // hook from re-entering V2.6 logic.
@@ -4107,6 +4129,29 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           winner_idx = 0;
         }
 
+        // v2.6.h.e1 fix 2 — anti-oscillation. If the chosen
+        // winner is v_k>0 and its captured-content hash matches
+        // a recently committed winner hash for THIS net (within
+        // the worker's 2-entry history), force-fallback to v0.
+        // The K-bias mechanism is just re-creating an already-
+        // committed topology that got ripped up by neighbor
+        // optimization — committing it again would oscillate.
+        bool v26he1_history_match = false;
+        if (winner_idx > 0) {
+          auto& hist = g_v3_winner_history_[net];
+          const std::uint64_t winner_hash = kvariant_hash[winner_idx];
+          if (hist.recent_hash[0] == winner_hash
+              || hist.recent_hash[1] == winner_hash) {
+            v26he1_history_match = true;
+            winner_idx = 0;
+          } else {
+            // Record this new winner in the ring buffer.
+            hist.recent_hash[hist.idx & 1] = winner_hash;
+            hist.idx++;
+          }
+        }
+        (void) v26he1_history_match;
+
         // V2.6.g — stash, don't commit. If V2.6.g is enabled AND
         // the V2.6.f.10-vetted winner was v1, stash v1's clones +
         // captures + DRV/score into the per-thread pending buffer
@@ -4162,6 +4207,7 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         std::fprintf(stderr,
                      "[v2.6.g] net_id=%lu winner=%zu orig_winner=%zu "
                      "amp=%d xnet_conflict=%d v26g_staged=%d "
+                     "hist_match=%d "
                      "v0_size=%zu v0_score=%.1f v0_drv=%lu "
                      "v0_hash=%016lx",
                      (unsigned long) (net->getFrNet() != nullptr
@@ -4171,6 +4217,7 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                      bias_amplifier,
                      v26f10_cross_net_conflict ? 1 : 0,
                      v26g_staged ? 1 : 0,
+                     v26he1_history_match ? 1 : 0,
                      variant0_size,
                      kvariant_score[0],
                      (unsigned long) kvariant_drv[0],
