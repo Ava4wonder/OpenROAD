@@ -4371,7 +4371,7 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
           g_l2c_fire_ns_ += _l2c_call_ns;
           g_l2c_fire_count_++;
         }
-        if (g_l2c_skip_count_ + g_l2c_fire_count_ >= 200000) {
+        if (g_l2c_skip_count_ + g_l2c_fire_count_ >= 30000) {
           std::fprintf(
               stderr,
               "[L2c-timing] tid_self=%p skip_n=%ld skip_total_ns=%ld "
