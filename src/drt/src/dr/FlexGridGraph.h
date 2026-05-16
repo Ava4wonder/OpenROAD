@@ -40,6 +40,25 @@ using frLayerDirMap
 
 class FlexDRWorker;
 class AbstractDRGraphics;
+
+// V2.6.h.L2c.1 — search-scratch state factored out of FlexGridGraph so
+// it can be duplicated when the K-bias driver wants to run a second
+// search (K=2) in parallel with the outer routeNet's K=1. Each
+// instance owns three bit-vectors sized to gridGraph_'s capacity:
+//   srcs     — source-frontier flags (mazePinInit / setSrc / resetSrc)
+//   dsts     — destination flags (routeNet_prep / setDst / resetDst)
+//   prevDirs — A* came-from direction packed 3 bits per cell
+//              (set/getPrevAstarNodeDir)
+// FlexGridGraph holds one primary instance as a member; future parallel
+// K=2 will allocate a secondary instance per fire and run search()
+// against it on a different OMP thread.
+struct MazeSearchScratch
+{
+  std::vector<bool> srcs;
+  std::vector<bool> dsts;
+  std::vector<bool> prevDirs;
+};
+
 class FlexGridGraph
 {
  public:
@@ -731,16 +750,16 @@ class FlexGridGraph
   }
 
   // unsafe access, no idx check
-  void setSrc(frMIdx x, frMIdx y, frMIdx z) { srcs_[getIdx(x, y, z)] = true; }
+  void setSrc(frMIdx x, frMIdx y, frMIdx z) { primary_scratch_.srcs[getIdx(x, y, z)] = true; }
   void setSrc(const FlexMazeIdx& mi)
   {
-    srcs_[getIdx(mi.x(), mi.y(), mi.z())] = true;
+    primary_scratch_.srcs[getIdx(mi.x(), mi.y(), mi.z())] = true;
   }
   // unsafe access, no idx check
-  void setDst(frMIdx x, frMIdx y, frMIdx z) { dsts_[getIdx(x, y, z)] = true; }
+  void setDst(frMIdx x, frMIdx y, frMIdx z) { primary_scratch_.dsts[getIdx(x, y, z)] = true; }
   void setDst(const FlexMazeIdx& mi)
   {
-    dsts_[getIdx(mi.x(), mi.y(), mi.z())] = true;
+    primary_scratch_.dsts[getIdx(mi.x(), mi.y(), mi.z())] = true;
   }
   // unsafe access
   void setSVia(frMIdx x, frMIdx y, frMIdx z)
@@ -789,20 +808,20 @@ class FlexGridGraph
   // unsafe access, no idx check
   void resetSrc(frMIdx x, frMIdx y, frMIdx z)
   {
-    srcs_[getIdx(x, y, z)] = false;
+    primary_scratch_.srcs[getIdx(x, y, z)] = false;
   }
   void resetSrc(const FlexMazeIdx& mi)
   {
-    srcs_[getIdx(mi.x(), mi.y(), mi.z())] = false;
+    primary_scratch_.srcs[getIdx(mi.x(), mi.y(), mi.z())] = false;
   }
   // unsafe access, no idx check
   void resetDst(frMIdx x, frMIdx y, frMIdx z)
   {
-    dsts_[getIdx(x, y, z)] = false;
+    primary_scratch_.dsts[getIdx(x, y, z)] = false;
   }
   void resetDst(const FlexMazeIdx& mi)
   {
-    dsts_[getIdx(mi.x(), mi.y(), mi.z())] = false;
+    primary_scratch_.dsts[getIdx(mi.x(), mi.y(), mi.z())] = false;
   }
   void resetGridCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir)
   {
@@ -945,10 +964,10 @@ class FlexGridGraph
   {
     nodes_.clear();
     nodes_.shrink_to_fit();
-    srcs_.clear();
-    srcs_.shrink_to_fit();
-    dsts_.clear();
-    dsts_.shrink_to_fit();
+    primary_scratch_.srcs.clear();
+    primary_scratch_.srcs.shrink_to_fit();
+    primary_scratch_.dsts.clear();
+    primary_scratch_.dsts.shrink_to_fit();
     guides_.clear();
     guides_.shrink_to_fit();
     xCoords_.clear();
@@ -1063,9 +1082,13 @@ class FlexGridGraph
   static_assert(sizeof(Node) == 16);
 #endif
   frVector<Node> nodes_;
-  std::vector<bool> prevDirs_;
-  std::vector<bool> srcs_;
-  std::vector<bool> dsts_;
+  // V2.6.h.L2c.1 — search scratch (was bare srcs_/dsts_/prevDirs_).
+  // Kept as a member so the existing call surface (setSrc/setDst/...
+  // /isSrc/isDst/setPrevAstarNodeDir/...) can route through
+  // primary_scratch_ without changing signatures. L2.c.2 will add
+  // overloads that accept an external MazeSearchScratch& so the
+  // K-bias driver can run a second concurrent search.
+  MazeSearchScratch primary_scratch_;
   std::vector<bool> guides_;
   frVector<frCoord> xCoords_;
   frVector<frCoord> yCoords_;
@@ -1097,34 +1120,34 @@ class FlexGridGraph
   void setPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir)
   {
     auto baseIdx = 3 * getIdx(x, y, z);
-    prevDirs_[baseIdx] = ((uint16_t) dir >> 2) & 1;
-    prevDirs_[baseIdx + 1] = ((uint16_t) dir >> 1) & 1;
-    prevDirs_[baseIdx + 2] = ((uint16_t) dir) & 1;
+    primary_scratch_.prevDirs[baseIdx] = ((uint16_t) dir >> 2) & 1;
+    primary_scratch_.prevDirs[baseIdx + 1] = ((uint16_t) dir >> 1) & 1;
+    primary_scratch_.prevDirs[baseIdx + 2] = ((uint16_t) dir) & 1;
   }
 
   // unsafe access, no check
   frDirEnum getPrevAstarNodeDir(const FlexMazeIdx& idx) const
   {
     auto baseIdx = 3 * getIdx(idx.x(), idx.y(), idx.z());
-    return (frDirEnum) (((uint16_t) (prevDirs_[baseIdx]) << 2)
-                        + ((uint16_t) (prevDirs_[baseIdx + 1]) << 1)
-                        + ((uint16_t) (prevDirs_[baseIdx + 2]) << 0));
+    return (frDirEnum) (((uint16_t) (primary_scratch_.prevDirs[baseIdx]) << 2)
+                        + ((uint16_t) (primary_scratch_.prevDirs[baseIdx + 1]) << 1)
+                        + ((uint16_t) (primary_scratch_.prevDirs[baseIdx + 2]) << 0));
   }
 
   // unsafe access, no check
   bool isSrc(frMIdx x, frMIdx y, frMIdx z) const
   {
-    return srcs_[getIdx(x, y, z)];
+    return primary_scratch_.srcs[getIdx(x, y, z)];
   }
   // unsafe access, no check
   bool isDst(frMIdx x, frMIdx y, frMIdx z) const
   {
-    return dsts_[getIdx(x, y, z)];
+    return primary_scratch_.dsts[getIdx(x, y, z)];
   }
   bool isDst(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) const
   {
     getNextGrid(x, y, z, dir);
-    bool b = dsts_[getIdx(x, y, z)];
+    bool b = primary_scratch_.dsts[getIdx(x, y, z)];
     getPrevGrid(x, y, z, dir);
     return b;
   }
