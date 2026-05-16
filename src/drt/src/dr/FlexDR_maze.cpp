@@ -3987,18 +3987,24 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                 static_cast<dr_re::GridGraphCost>(
                     base_fixed * sched[2] * bias_amplifier));
 
-            // v2.6.h.e1 fix 1 (external-comment item 4): the
-            // explicit `gridGraph_.resetStatus()` here is REDUNDANT.
-            // The recursive `routeNet` call below invokes upstream's
-            // `mazeNetInit(net)` which itself calls `resetStatus()`
-            // (FlexDR_maze.cpp:1730) as its first action. The double
-            // reset cost ~37.5 KB of vector<bool> memset per K=2
-            // fire × ~82K fires per iter on test9 8t = ~3 GB
-            // unnecessary memory-write bandwidth per iter. Removing
-            // it is bit-identical (mazeNetInit always runs).
+            // v2.6.h.e1 fix 1 — REVERTED. The reasoning was wrong:
+            // mazeNetInit() is invoked by the outer CALLER of
+            // routeNet (see FlexDR_maze.cpp:2040 in the main
+            // mazeIterInit driver), NOT by routeNet itself. Our
+            // K-bias path calls routeNet recursively WITHOUT first
+            // calling mazeNetInit, so resetStatus() does not fire
+            // unless we call it explicitly here. Empirical: e1
+            // (this call removed) caused 100% of K=2 fires to
+            // return v1_size=0 / v1_score=-inf on ispd18 test9 8t.
+            // Restoring this call is required for correctness.
+            gridGraph_.resetStatus();
 
             // Recursive routeNet — the guard prevents the inner
-            // hook from re-entering V2.6 logic.
+            // hook from re-entering V2.6 logic. Note we do NOT
+            // call mazeNetInit here: the outer mazeIterInit already
+            // initialized net costs, and re-running mazeNetInit
+            // would re-reserve via-access and re-clear drNet state
+            // we want to preserve for the recursive search.
             drt::g_v26f5_in_kbias_inner_ = true;
             std::vector<FlexMazeIdx> kpaths;
             const bool kok = routeNet(net, kpaths);
@@ -4190,8 +4196,15 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
 
         // (6) REBUILD with winner's clones. When winner_idx > 0,
         // production routing diverges from upstream baseline by
-        // construction. v2.6.h.e1 option-B: skip when K-loop was
-        // bypassed — drNet/worker_rq/gridGraph_ already at v0.
+        // construction.
+        //
+        // v2.6.h.e1 option-B: when the K-loop was skipped, block
+        // (4) was also skipped, so drNet still holds upstream's
+        // v0 routes and worker_rq/gridGraph_/gcWorker are already
+        // consistent with them. Re-adding kvariant_clones[0] would
+        // double-count costs and re-key worker_rq with duplicates.
+        // Just skip the rebuild — the original v0 state is already
+        // committed.
         if (!skip_kbias_for_this_net) {
           auto& winner_clones = kvariant_clones[winner_idx];
           for (auto& c : winner_clones) {
