@@ -3570,7 +3570,26 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
     }
   }
   if (searchSuccess) {
-    if (router_cfg_->CLEAN_PATCHES) {
+    if (router_cfg_->CLEAN_PATCHES
+#ifdef ENABLE_DRT_REDESIGN_OVERLAY
+        // V2.6.h.L2b — skip CLEAN_PATCHES gcWorker DRC update when
+        // invoked from the K-bias driver's recursive routeNet. The
+        // outer hook calls gcWorker_->clearPWires() immediately after
+        // this routeNet returns (FlexDR_maze.cpp ~4034), so any pWires
+        // CLEAN_PATCHES produces get discarded. updateGCWorker +
+        // cleanUnneededPatches_poly together run a full per-net DRC
+        // scan that we then throw away; gating it on the inner-K-bias
+        // guard saves the gcWorker scan cost on every K=2 fire.
+        //
+        // Safe because: the inner routeNet's drNet still receives all
+        // writes via routeNet_postAstarWritePath (which feeds the
+        // outer hook's snapshot/capture), worker_rq.add still fires
+        // per-route inside that path, and routeNet_postRouteAddPathCost
+        // below still maintains gridGraph_'s path-cost invariant that
+        // block (4) teardown subtracts.
+        && !drt::g_v26f5_in_kbias_inner_
+#endif
+    ) {
       gcWorker_->setTargetNet(net);
       gcWorker_->updateDRNet(net);
       gcWorker_->setEnableSurgicalFix(true);
