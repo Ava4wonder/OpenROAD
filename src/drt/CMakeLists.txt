@@ -35,6 +35,8 @@ add_library(drt_lib
   src/dr/FlexDR_maze.cpp
   src/dr/FlexGridGraph_maze.cpp
   src/dr/FlexGridGraph.cpp
+  src/dr/MazeSearchStateSoA.cpp
+  src/dr/BucketedFrontier.cpp
   src/dr/FlexDR_rq.cpp
   src/dr/FlexDR_end.cpp
   src/ta/FlexTA_end.cpp
