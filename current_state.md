@@ -75,9 +75,12 @@ identical or near-identical QoR vs master baseline.
 - [ ] Add unit tests under `src/drt/test/` for MazeNodeIndex round-trip
       and neighbor lookup (deferred: gtest infrastructure not set up
       without a successful build).
-- [ ] Phase 4: rewrite `FlexGridGraph::search()` behind compile + runtime
-      feature flag. **K-bias invariant constraint**: the epoch bump that
-      replaces `resetStatus()` MUST happen at the existing `resetStatus()`
-      call sites, not inside `routeNet`. Defer until build allowed.
+- [x] Phase 4: SoA + bucketed-frontier search path behind
+      `DRT_USE_SOA_BACKEND=1` runtime flag (a0c82935fa). K-bias
+      invariant honored: epoch bump lives in resetStatus(), the
+      canonical reset site. Build verification pending.
+- [ ] Build verification of P1-P4 inside drt-build-env once user
+      authorizes (likely after their concurrent redesign run
+      finishes). Validation checklist in execution_log.md.
 - [ ] Phase 5: batch processing, prefetch, optional TBB. After Phase 4
       stable.
