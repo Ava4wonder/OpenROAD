@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -3656,6 +3657,20 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
       }
 
       if (real_k > 1) {
+        // V2.6.h.L2c-probe — per-thread accumulators that split the
+        // K-bias hook's per-call wall into (a) skip-path wall, (b)
+        // fire-path total wall, (c) recursive routeNet wall (the
+        // suspected bottleneck). At every 200K hook calls per thread,
+        // emit a [L2c-timing] log line and reset. Aggregated across
+        // workers, this answers: of the per-fire wall, what fraction
+        // is the A* search vs everything else?
+        thread_local std::int64_t g_l2c_skip_ns_ = 0;
+        thread_local std::int64_t g_l2c_fire_ns_ = 0;
+        thread_local std::int64_t g_l2c_recursive_ns_ = 0;
+        thread_local std::int64_t g_l2c_skip_count_ = 0;
+        thread_local std::int64_t g_l2c_fire_count_ = 0;
+        const auto _l2c_entry = std::chrono::steady_clock::now();
+
         // V2.6.f.5.c — score-driven K-bias commit. Differs from
         // V2.6.f.5.b shadow:
         //   * each variant gets its content captured AND its drConnFig
@@ -4082,7 +4097,12 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             // we want to preserve for the recursive search.
             drt::g_v26f5_in_kbias_inner_ = true;
             std::vector<FlexMazeIdx> kpaths;
+            const auto _l2c_c0 = std::chrono::steady_clock::now();
             const bool kok = routeNet(net, kpaths);
+            g_l2c_recursive_ns_
+                += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - _l2c_c0)
+                       .count();
             drt::g_v26f5_in_kbias_inner_ = false;
 
             kvariant_ok[k] = kok;
@@ -4335,6 +4355,39 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                        k, (unsigned long) kvariant_hash[k]);
         }
         std::fprintf(stderr, "\n");
+
+        // V2.6.h.L2c-probe — accumulate per-call wall and emit
+        // every 200K calls per thread. Both skip and fire paths
+        // pass through this point because the entire K-bias hook
+        // is wrapped in `if (real_k > 1)`.
+        const std::int64_t _l2c_call_ns
+            = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - _l2c_entry)
+                  .count();
+        if (skip_kbias_for_this_net) {
+          g_l2c_skip_ns_ += _l2c_call_ns;
+          g_l2c_skip_count_++;
+        } else {
+          g_l2c_fire_ns_ += _l2c_call_ns;
+          g_l2c_fire_count_++;
+        }
+        if (g_l2c_skip_count_ + g_l2c_fire_count_ >= 200000) {
+          std::fprintf(
+              stderr,
+              "[L2c-timing] tid_self=%p skip_n=%ld skip_total_ns=%ld "
+              "fire_n=%ld fire_total_ns=%ld recursive_total_ns=%ld\n",
+              (void*) g_v3_last_worker_seen_,
+              (long) g_l2c_skip_count_,
+              (long) g_l2c_skip_ns_,
+              (long) g_l2c_fire_count_,
+              (long) g_l2c_fire_ns_,
+              (long) g_l2c_recursive_ns_);
+          g_l2c_skip_ns_ = 0;
+          g_l2c_skip_count_ = 0;
+          g_l2c_fire_ns_ = 0;
+          g_l2c_fire_count_ = 0;
+          g_l2c_recursive_ns_ = 0;
+        }
       }
 
       // Build CapturedConnFig vector from drNet::getRouteConnFigs.
