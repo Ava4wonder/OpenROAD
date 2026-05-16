@@ -4089,43 +4089,29 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             // return v1_size=0 / v1_score=-inf on ispd18 test9 8t.
             // Restoring this call is required for correctness.
             //
-            // V2.6.h.L2c.2.b — toggle is now thread_local. Setting
-            // it on the spawned thread does not affect the main
-            // thread's view.
-            //
-            // V2.6.h.L2c.2.d — recursive routeNet runs on a separate
-            // thread via std::async(launch::async). Main thread blocks
-            // on fut.get(). This delivers no wall speedup today (main
-            // thread has no useful work; cost-bias state is still
-            // shared so even if it had work, addPathCost would read
-            // the override-mid-flight value). Purpose: prove the
-            // threading mechanics work bit-identically before doing
-            // the L2c.2.c (cost-bias per-scratch) + L2c.2.e (deferred
-            // winner / speculation) work that delivers the actual
-            // -5.5 min wall projection.
-            //
-            // The g_v26f5_in_kbias_inner_ guard MUST be set on the
-            // spawned thread, not on main, because it gates the V2
-            // hook re-entry inside routeNet. The guard is currently
-            // a non-thread-local global static; relying on the fact
-            // that on the spawned thread, main thread won't enter
-            // routeNet while we're blocked.
+            // V2.6.h.L2c.2.b — toggle is now thread_local, so multiple
+            // threads on the same FlexGridGraph instance can each
+            // hold an independent scratch selection. Today's K-bias
+            // hook still runs the recursive routeNet on the main
+            // thread (no async spawn) — the L2c.2.d attempt at
+            // std::async from inside an OMP-parallel region deadlocked
+            // on OMP-internal locks held by gcWorker (the inner
+            // routeNet calls into gcWorker which uses OMP), so it was
+            // reverted. The correct dispatch primitive is `#pragma
+            // omp task` (OMP-aware), which is the L2c.2.d-v2 path
+            // bundled with L2c.2.e in the next session.
+            gridGraph_.setUseSecondary(true);
+            gridGraph_.resetStatus();
             drt::g_v26f5_in_kbias_inner_ = true;
             std::vector<FlexMazeIdx> kpaths;
             const auto _l2c_c0 = std::chrono::steady_clock::now();
-            auto kfut = std::async(std::launch::async, [&]() -> bool {
-              gridGraph_.setUseSecondary(true);
-              gridGraph_.resetStatus();
-              const bool ok = this->routeNet(net, kpaths);
-              gridGraph_.setUseSecondary(false);
-              return ok;
-            });
-            const bool kok = kfut.get();
+            const bool kok = routeNet(net, kpaths);
             g_l2c_recursive_ns_
                 += std::chrono::duration_cast<std::chrono::nanoseconds>(
                        std::chrono::steady_clock::now() - _l2c_c0)
                        .count();
             drt::g_v26f5_in_kbias_inner_ = false;
+            gridGraph_.setUseSecondary(false);
 
             kvariant_ok[k] = kok;
             if (kok) {
