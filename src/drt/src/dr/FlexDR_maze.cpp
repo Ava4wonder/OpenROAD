@@ -3713,25 +3713,33 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
               return total;
             };
 
-        // Helper: clone drNet's current routeConnFigs into a vector
-        // of drConnFig unique_ptrs AND a parallel CapturedConnFig
-        // vector. The clones survive subsequent clearRouteConnFigs;
-        // the captures are score+hash inputs.
-        auto snapshot_drnet
-            = [&](std::vector<std::unique_ptr<drt::drConnFig>>& clones,
-                  std::vector<dr_overlay::CapturedConnFig>& captures) {
+        // V2.6.h.L2a — split snapshot into two passes. capture_drnet
+        // does only the cheap struct copies needed by predict_drv,
+        // hash, score, cross-net check. clone_drnet does only the
+        // heap-allocating drConnFig deep copies needed to restore
+        // drNet after teardown OR to commit as winner. The skip
+        // path (Lever A / A+) uses ONLY captures, so deferring the
+        // clones to after the skip decision eliminates ~5M useless
+        // make_unique calls per outer iter on test9 8t (91% skip
+        // rate). For !skip and K-loop callers, the two passes
+        // combined produce parallel vectors identical to the prior
+        // single-pass snapshot_drnet.
+        //
+        // Both passes iterate net->getRouteConnFigs() in the same
+        // order and apply the same kind filter (skip nullptr /
+        // unknown typeId), so the resulting vectors have matching
+        // length and 1:1 element correspondence.
+        auto capture_drnet
+            = [&](std::vector<dr_overlay::CapturedConnFig>& captures) {
                 const auto& cfs = net->getRouteConnFigs();
-                clones.reserve(cfs.size());
                 captures.reserve(cfs.size());
                 for (const auto& orig : cfs) {
                   if (orig == nullptr) continue;
                   const auto kind = orig->typeId();
-                  std::unique_ptr<drt::drConnFig> clone;
                   dr_overlay::CapturedConnFig cap;
                   if (kind == drt::drcPathSeg) {
                     const auto* seg
                         = static_cast<const drt::drPathSeg*>(orig.get());
-                    clone = std::make_unique<drt::drPathSeg>(*seg);
                     cap.kind = dr_overlay::CapturedConnFig::Kind::PathSeg;
                     const odb::Rect bb = seg->getBBox();
                     cap.bbox.ll.x = bb.xMin();
@@ -3743,7 +3751,6 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                   } else if (kind == drt::drcVia) {
                     const auto* via
                         = static_cast<const drt::drVia*>(orig.get());
-                    clone = std::make_unique<drt::drVia>(*via);
                     cap.kind = dr_overlay::CapturedConnFig::Kind::Via;
                     const odb::Rect bb = via->getBBox();
                     cap.bbox.ll.x = bb.xMin();
@@ -3761,7 +3768,6 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                   } else if (kind == drt::drcPatchWire) {
                     const auto* pw
                         = static_cast<const drt::drPatchWire*>(orig.get());
-                    clone = std::make_unique<drt::drPatchWire>(*pw);
                     cap.kind
                         = dr_overlay::CapturedConnFig::Kind::PatchWire;
                     const odb::Rect bb = pw->getBBox();
@@ -3774,9 +3780,43 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
                   } else {
                     continue;
                   }
-                  clones.push_back(std::move(clone));
                   captures.push_back(cap);
                 }
+              };
+
+        auto clone_drnet
+            = [&](std::vector<std::unique_ptr<drt::drConnFig>>& clones) {
+                const auto& cfs = net->getRouteConnFigs();
+                clones.reserve(cfs.size());
+                for (const auto& orig : cfs) {
+                  if (orig == nullptr) continue;
+                  const auto kind = orig->typeId();
+                  std::unique_ptr<drt::drConnFig> clone;
+                  if (kind == drt::drcPathSeg) {
+                    const auto* seg
+                        = static_cast<const drt::drPathSeg*>(orig.get());
+                    clone = std::make_unique<drt::drPathSeg>(*seg);
+                  } else if (kind == drt::drcVia) {
+                    const auto* via
+                        = static_cast<const drt::drVia*>(orig.get());
+                    clone = std::make_unique<drt::drVia>(*via);
+                  } else if (kind == drt::drcPatchWire) {
+                    const auto* pw
+                        = static_cast<const drt::drPatchWire*>(orig.get());
+                    clone = std::make_unique<drt::drPatchWire>(*pw);
+                  } else {
+                    continue;
+                  }
+                  clones.push_back(std::move(clone));
+                }
+              };
+
+        // Compatibility wrapper for K-loop callers that need both.
+        auto snapshot_drnet
+            = [&](std::vector<std::unique_ptr<drt::drConnFig>>& clones,
+                  std::vector<dr_overlay::CapturedConnFig>& captures) {
+                capture_drnet(captures);
+                clone_drnet(clones);
               };
 
         // V2.6.f.8 — predict_drv: sum the per-edge marker cost
@@ -3844,13 +3884,18 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
             real_k, std::numeric_limits<std::uint64_t>::max());
         std::vector<bool> kvariant_ok(real_k, false);
 
-        // (1) snapshot + score variant 0 (drNet's current state)
-        snapshot_drnet(kvariant_clones[0], kvariant_captured[0]);
+        // (1) snapshot + score variant 0 (drNet's current state).
+        //
+        // V2.6.h.L2a — captures only; clones are deferred until
+        // after the skip_kbias decision so the heap-alloc cost is
+        // paid only when the K-loop will actually fire (or the
+        // rebuild block needs them to restore v0).
+        capture_drnet(kvariant_captured[0]);
         kvariant_hash[0] = hash_captured(kvariant_captured[0]);
         kvariant_score[0] = score_captured(kvariant_captured[0]);
         kvariant_drv[0] = predict_drv(kvariant_captured[0]);
-        kvariant_ok[0] = !kvariant_clones[0].empty();
-        const std::size_t variant0_size = kvariant_clones[0].size();
+        kvariant_ok[0] = !kvariant_captured[0].empty();
+        const std::size_t variant0_size = kvariant_captured[0].size();
 
         // Bias schedule lookup. K=2 → just variant 1 (4× DRC).
         // K=3 → + (1×, 4×, 1×). K=4 → + (1×, 1×, 4×).
@@ -3951,6 +3996,17 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
 
         if (!skip_kbias_for_this_net) {
           g_v3_kbias_count_per_net_[net]++;
+          // V2.6.h.L2a — now that we know the K-loop will fire,
+          // pay the heap-alloc cost for v0's clones. They're needed
+          // (a) implicitly: the K-loop's first iteration (block 2
+          // teardown) drops drNet's current routes, and we need
+          // them preserved as clones to restore as winner if no
+          // v_k>0 beats v0; (b) explicitly: block (6) rebuild
+          // applies kvariant_clones[winner_idx], which can be 0.
+          //
+          // Skipped on skip path: cheap predicate is the whole
+          // point of Lever A.
+          clone_drnet(kvariant_clones[0]);
         }
 
         for (std::size_t k = 1; k < real_k && !skip_kbias_for_this_net; ++k) {
