@@ -63,13 +63,21 @@ identical or near-identical QoR vs master baseline.
 
 ## Next actions
 
-- [x] Create `grid_state_access` branch + scaffold docs.
-- [ ] Read `src/drt/src/dr/FlexGridGraph*`, `FlexWavefrontGrid.*`,
-      `FlexDR_search.cpp` to map types and call sites.
-- [ ] Phase 1: add `src/drt/src/dr/MazeNodeIndex.h` with flat indexing
-      helpers; unit test in `src/drt/test/`.
-- [ ] Phase 2: add `src/drt/src/dr/MazeSearchStateSoA.h/.cpp`; bridge from
-      `FlexWavefrontGrid`.
-- [ ] Phase 3: add `src/drt/src/dr/BucketedFrontier.h/.cpp` + feature flag.
-- [ ] Defer Phase 4-5 until build+test loop is available (need user OK to
-      build given disk + container constraints).
+- [x] Create `grid_state_access` branch + scaffold docs. (7ede745fb5)
+- [x] Read `src/drt/src/dr/FlexGridGraph*`, `FlexMazeTypes.h`, `frBaseTypes.h`
+      to map types.
+- [x] Phase 1: `src/drt/src/dr/MazeNodeIndex.h` flat indexing helpers
+      (59914b8f4e).
+- [x] Phase 2: `src/drt/src/dr/MazeSearchStateSoA.{h,cpp}` SoA arrays +
+      epoch reset (59914b8f4e).
+- [x] Phase 3: `src/drt/src/dr/BucketedFrontier.{h,cpp}` vector-of-buckets
+      + overflow heap (59914b8f4e).
+- [ ] Add unit tests under `src/drt/test/` for MazeNodeIndex round-trip
+      and neighbor lookup (deferred: gtest infrastructure not set up
+      without a successful build).
+- [ ] Phase 4: rewrite `FlexGridGraph::search()` behind compile + runtime
+      feature flag. **K-bias invariant constraint**: the epoch bump that
+      replaces `resetStatus()` MUST happen at the existing `resetStatus()`
+      call sites, not inside `routeNet`. Defer until build allowed.
+- [ ] Phase 5: batch processing, prefetch, optional TBB. After Phase 4
+      stable.
