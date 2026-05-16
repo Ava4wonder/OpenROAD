@@ -4025,16 +4025,27 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
         }
 
         // (4) TEARDOWN whatever drNet has now (variant K-1's
-        // routes or possibly empty if recursive routeNet failed)
-        for (const auto& cf : net->getRouteConnFigs()) {
-          if (cf == nullptr) continue;
-          subPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
-          worker_rq.remove(cf.get());
+        // routes or possibly empty if recursive routeNet failed).
+        //
+        // v2.6.h.e1 option-B optimization: when the K-loop was
+        // skipped (Lever A or A+ gating), drNet/worker_rq/
+        // gridGraph_ are STILL at v0 state (upstream's routeNet
+        // committed v0 before our hook fired, and we didn't enter
+        // the K-loop to mutate state). Skipping teardown+rebuild
+        // saves O(|routes| × |edges|) subPathCost + O(|routes|)
+        // worker_rq churn + addPathCost on the same routes — pure
+        // waste when the answer is "keep what upstream committed".
+        if (!skip_kbias_for_this_net) {
+          for (const auto& cf : net->getRouteConnFigs()) {
+            if (cf == nullptr) continue;
+            subPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+            worker_rq.remove(cf.get());
+          }
+          if (gc_net != nullptr) {
+            modEolCosts_poly(gc_net, ModCostType::subRouteShape);
+          }
+          net->clearRouteConnFigs();
         }
-        if (gc_net != nullptr) {
-          modEolCosts_poly(gc_net, ModCostType::subRouteShape);
-        }
-        net->clearRouteConnFigs();
 
         // (5) V2.6.f.8 WINNER SELECTION — argmin predict_drv,
         // tie-break argmin score (= argmin WL + 100·via). Only
@@ -4179,24 +4190,27 @@ bool FlexDRWorker::routeNet(drNet* net, std::vector<FlexMazeIdx>& paths)
 
         // (6) REBUILD with winner's clones. When winner_idx > 0,
         // production routing diverges from upstream baseline by
-        // construction.
-        auto& winner_clones = kvariant_clones[winner_idx];
-        for (auto& c : winner_clones) {
-          drt::drConnFig* added = c.get();
-          net->addRoute(std::move(c), /*isExt=*/false);
-          worker_rq.add(added);
-        }
-        for (const auto& cf : net->getRouteConnFigs()) {
-          if (cf == nullptr) continue;
-          addPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
-        }
-        if (gc_net != nullptr) {
-          modEolCosts_poly(gc_net, ModCostType::addRouteShape);
-        }
-        if (gcWorker_ != nullptr) {
-          gcWorker_->setTargetNet(net->getFrNet());
-          gcWorker_->updateDRNet(net);
-          gcWorker_->resetTargetNet();
+        // construction. v2.6.h.e1 option-B: skip when K-loop was
+        // bypassed — drNet/worker_rq/gridGraph_ already at v0.
+        if (!skip_kbias_for_this_net) {
+          auto& winner_clones = kvariant_clones[winner_idx];
+          for (auto& c : winner_clones) {
+            drt::drConnFig* added = c.get();
+            net->addRoute(std::move(c), /*isExt=*/false);
+            worker_rq.add(added);
+          }
+          for (const auto& cf : net->getRouteConnFigs()) {
+            if (cf == nullptr) continue;
+            addPathCost(cf.get(), /*modEol=*/false, /*modCutSpc=*/true);
+          }
+          if (gc_net != nullptr) {
+            modEolCosts_poly(gc_net, ModCostType::addRouteShape);
+          }
+          if (gcWorker_ != nullptr) {
+            gcWorker_->setTargetNet(net->getFrNet());
+            gcWorker_->updateDRNet(net);
+            gcWorker_->resetTargetNet();
+          }
         }
 
         // Log per-net stats. winner_idx > 0 means V2 committed an
