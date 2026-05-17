@@ -563,15 +563,25 @@ void FlexGridGraph::syncSoADims()
 void FlexGridGraph::pushFrontier(const FlexWavefrontGrid& grid)
 {
   if (isSoABackendEnabled()) {
-    // Optional Open-state tag: lets the pop side skip stale entries
-    // for a node that has since been Closed.
-    const MazeNodeId id
-        = node_idx_.getNodeId(grid.x(), grid.y(), grid.z());
-    state_soa_.touch(id);
-    if (grid.getPathCost() < state_soa_.g(id)) {
-      state_soa_.setG(id, grid.getPathCost());
-      state_soa_.setF(id, grid.getCost());
-      state_soa_.setState(id, MazeNodeState::Open);
+    // Defensive: ensure SoA arrays are sized for the current grid.
+    // syncSoADims() is idempotent so calling it on every push is
+    // cheap and prevents OOB if some caller reached pushFrontier
+    // before searchSoA's prologue ran (e.g. parallel worker path).
+    syncSoADims();
+    const int gx = grid.x();
+    const int gy = grid.y();
+    const int gz = grid.z();
+    if (gx >= 0 && gx < node_idx_.xDim() && gy >= 0
+        && gy < node_idx_.yDim() && gz >= 0 && gz < node_idx_.zDim()) {
+      const MazeNodeId id = node_idx_.getNodeId(gx, gy, gz);
+      if (id < state_soa_.size()) {
+        state_soa_.touch(id);
+        if (grid.getPathCost() < state_soa_.g(id)) {
+          state_soa_.setG(id, grid.getPathCost());
+          state_soa_.setF(id, grid.getCost());
+          state_soa_.setState(id, MazeNodeState::Open);
+        }
+      }
     }
     soa_frontier_.push(grid);
     return;

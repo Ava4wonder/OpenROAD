@@ -75,7 +75,7 @@ void WavefrontBucketedFrontier::rebucket_overflow()
   std::make_heap(overflow_.begin(), overflow_.end(), HeapCmp{});
 }
 
-std::vector<FlexWavefrontGrid>& WavefrontBucketedFrontier::pop_min_bucket()
+std::vector<FlexWavefrontGrid> WavefrontBucketedFrontier::pop_min_bucket()
 {
   assert(!empty());
   while (scan_ < buckets_.size() && buckets_[scan_].empty()) {
@@ -85,10 +85,13 @@ std::vector<FlexWavefrontGrid>& WavefrontBucketedFrontier::pop_min_bucket()
     rebucket_overflow();
     return pop_min_bucket();
   }
-  auto& batch = buckets_[scan_];
-  total_ -= batch.size();
+  // Move-out: caller gets independent storage. Any subsequent
+  // push() that resizes buckets_ cannot invalidate the result.
+  std::vector<FlexWavefrontGrid> result;
+  result.swap(buckets_[scan_]);
+  total_ -= result.size();
   ++scan_;
-  return batch;
+  return result;
 }
 
 }  // namespace drt

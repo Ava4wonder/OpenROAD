@@ -892,7 +892,11 @@ bool FlexGridGraph::searchSoA(std::vector<FlexMazeIdx>& connComps,
   }
 
   while (!soa_frontier_.empty()) {
-    auto& batch = soa_frontier_.pop_min_bucket();
+    // pop_min_bucket() returns by value (move-out) so batch storage
+    // is independent of any pushFrontier() calls made inside the
+    // per-element loop. (Reference-based version would dangle when
+    // pushFrontier resized buckets_.)
+    auto batch = soa_frontier_.pop_min_bucket();
     // FlexWavefrontGrid::operator< returns true when *this* is worse.
     // Sort with `b < a` so the better element appears first.
     std::sort(batch.begin(), batch.end(),
@@ -900,10 +904,24 @@ bool FlexGridGraph::searchSoA(std::vector<FlexMazeIdx>& connComps,
                 return b < a;
               });
     for (auto& currGrid : batch) {
-      const MazeNodeId id = node_idx_.getNodeId(
-          currGrid.x(), currGrid.y(), currGrid.z());
+      const int cgx = currGrid.x();
+      const int cgy = currGrid.y();
+      const int cgz = currGrid.z();
+      // Defensive bounds: skip SoA bookkeeping if coords are
+      // outside the indexed grid (shouldn't happen in practice
+      // but guards against bugs in upstream expand() callers).
+      const bool coords_in_range
+          = (cgx >= 0 && cgx < node_idx_.xDim() && cgy >= 0
+             && cgy < node_idx_.yDim() && cgz >= 0
+             && cgz < node_idx_.zDim());
+      MazeNodeId id = 0;
+      bool id_in_range = false;
+      if (coords_in_range) {
+        id = node_idx_.getNodeId(cgx, cgy, cgz);
+        id_in_range = (id < state_soa_.size());
+      }
       // Skip stale popped entries: this node has already been Closed.
-      if (state_soa_.isLive(id)
+      if (id_in_range && state_soa_.isLive(id)
           && state_soa_.state(id) == MazeNodeState::Closed) {
         continue;
       }
@@ -912,8 +930,10 @@ bool FlexGridGraph::searchSoA(std::vector<FlexMazeIdx>& connComps,
           != frDirEnum::UNKNOWN) {
         continue;
       }
-      state_soa_.touch(id);
-      state_soa_.setState(id, MazeNodeState::Closed);
+      if (id_in_range) {
+        state_soa_.touch(id);
+        state_soa_.setState(id, MazeNodeState::Closed);
+      }
       if (debug_) {
         printExpansion(currGrid, "Popping");
       }

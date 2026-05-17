@@ -78,9 +78,15 @@ identical or near-identical QoR vs master baseline.
 - [x] Phase 4: SoA + bucketed-frontier search path behind
       `DRT_USE_SOA_BACKEND=1` runtime flag (a0c82935fa). K-bias
       invariant honored: epoch bump lives in resetStatus(), the
-      canonical reset site. Build verification pending.
-- [ ] Build verification of P1-P4 inside drt-build-env once user
-      authorizes (likely after their concurrent redesign run
-      finishes). Validation checklist in execution_log.md.
+      canonical reset site.
+- [x] Build verification: compiles clean. (drt-build-env, -j 6.)
+- [x] Flag-OFF smoke ispd18_test9 (8t): 17:31, 7 iters, 0 DRVs.
+      Identical convergence to master path. Dispatcher overhead
+      is in the noise.
+- [ ] Flag-ON smoke ispd18_test9 (8t): **FAILS** at iter-0
+      start. v3 binary SIGSEGVs after bounds-guard + pop-by-value
+      fixes. See execution_log.md 2026-05-16/17 entry. At least
+      one more bug in searchSoA hot loop; needs gdb / ASan.
+      Until then: keep flag OFF.
 - [ ] Phase 5: batch processing, prefetch, optional TBB. After Phase 4
       stable.

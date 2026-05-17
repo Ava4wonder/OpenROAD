@@ -26,6 +26,78 @@ Decision / next step:
 Files / commits / artifacts:
 - 7ede745fb5 grid_state_access: scaffold plan/execution_log/current_state
 
+## 2026-05-16/17 — P4 build + ispd18_test9 smoke (8 threads)
+
+What I did:
+- Incremental build of openroad with P4 changes inside drt-build-env
+  (cmake --build --target openroad -j 8 / -j 6). Three rebuilds total:
+  v1 (initial), v2 (added bounds guards), v3 (pop-by-value fix).
+- Saved binaries under build-container/bin/: openroad.master_baseline,
+  openroad.net_order_test_5c6bcbe, openroad.grid_state_access_v3
+  (current). Stale v1/v2 grid_state_access binaries removed.
+- Ran ispd18_test9 with run_test.tcl harness (8 threads, fixed by the
+  tcl driver) on the grid_state_access binary under two configs.
+
+Flag OFF (master-equivalent dispatcher path):
+- iter trace: 92705 -> 1620 -> 391 -> 5 -> 3 -> 3 -> 0
+- 7 iters total (5 opt + 2 cleanup), CONVERGES to 0 DRVs.
+- Wallclock 17:31.40 (1051 s), CPU-user 5663 s, peak mem 8.5 GB.
+- BUILD IS HEALTHY. pushFrontier dispatcher under flag OFF behaves
+  identically to direct wavefront_.push (no regressions vs master path).
+
+Flag ON (DRT_USE_SOA_BACKEND=1, SoA + bucketed-frontier path):
+- v1: crashed at iter-0 start with std::vector<unsigned int> OOB assert
+  on state_soa_.epoch_. Stack: searchSoA -> ... -> touch().
+- v2: added (a) syncSoADims() inside pushFrontier as a defensive idempotent
+  size sync, (b) explicit bounds guards in pushFrontier and searchSoA pop
+  loop so OOB coords don't dereference SoA arrays. Re-ran -> different
+  OOB assert this time, on std::vector<odb::dbTechLayerDir> (which is
+  layerRouteDirections_, indexed by z via getZDir in getIdx). This means
+  expandWavefront was called with a popped grid whose z was out of range.
+- Root-cause analysis: pop_min_bucket() was returning std::vector<...>&
+  (a reference into buckets_[scan_]). pushFrontier called from inside
+  expandWavefront resizes buckets_ on capacity growth, invalidating the
+  reference. The currGrid reference dangled, picked up garbage coords.
+  Mirrors a textbook iterator-invalidation bug.
+- v3: pop_min_bucket() now returns std::vector<FlexWavefrontGrid> by
+  value (move-out). searchSoA captures with `auto batch = ...`. Caller's
+  batch is independent of the frontier. Re-ran -> SIGSEGV at iter-0
+  start. No stack trace from signal handler (likely faulted in a
+  pre-handler path).
+
+State of P4 flag-ON path:
+- Compiles clean (-O3 -flto, _GLIBCXX_ASSERTIONS on).
+- Build is reproducible.
+- There is at least one more bug in the SoA hot loop preventing
+  flag-ON from running on real designs. Need a debugger session
+  (gdb + drt-build-env or compile with AddressSanitizer) to localize.
+
+Decision / next step:
+- Do NOT enable DRT_USE_SOA_BACKEND in production.
+- Flag-OFF path is correct and ships untouched master behavior; safe
+  to keep on master.
+- Commit the bounds-guard + pop-by-value fixes as a real defensive
+  improvement; both are correct regardless of the remaining bug.
+- Schedule a debugger session for the SIGSEGV. Suspected suspects:
+  (i) cross-thread sharing of a per-instance state (race in the
+  isSoABackendEnabled cache or the openmp worker fan-out); (ii) another
+  reference-invalidation site I have not spotted; (iii) a missing
+  resetStatus on a code path that bypasses mazeNetInit.
+
+Note 2026-05-17: H100 rebooted during this session (uptime 41m at
+resume). Container drt-build-env will need to be restarted before any
+further runs. Run logs from the three flag-ON attempts are preserved
+on the host filesystem at
+/home/azureuser/openroad-profile/OpenROAD-flow-scripts/.net_order_test/
+grid_p4_runs/{ispd18_test9_flagoff, ispd18_test9_flagon,
+ispd18_test9_flagon_v2, ispd18_test9_flagon_v3}/run.log.
+
+Files / commits / artifacts:
+- a0c82935fa P4 initial backend (already pushed).
+- 84a78dbdc9 P4 docs (already pushed).
+- pending commit: bounds-guard + pop-by-value fixes (4 files, ~58
+  insertions + 22 deletions).
+
 ## 2026-05-16 — P4 SoA + bucketed-frontier search behind flag
 
 What I did:

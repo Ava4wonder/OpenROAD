@@ -45,9 +45,12 @@ class WavefrontBucketedFrontier
   std::size_t size() const { return total_; }
   frCost width() const { return width_; }
 
-  // Return a non-empty bucket containing the current min-priority items.
-  // The reference is valid until the next push() or pop call.
-  std::vector<FlexWavefrontGrid>& pop_min_bucket();
+  // Return (by value) the current min-priority bucket contents.
+  // The bucket storage in the frontier is left empty. Returning by
+  // value means the caller's batch is independent of buckets_ and
+  // can safely outlive subsequent push() calls (which may resize
+  // buckets_ and invalidate references to internal storage).
+  std::vector<FlexWavefrontGrid> pop_min_bucket();
 
  private:
   static constexpr std::size_t kBucketCap = 4096;
