@@ -1389,6 +1389,14 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
       logger_->info(DRT, 200, "Skipping iteration {}", iter_);
     }
   }
+  // outer_loop_plus Patch 2 — adaptive marker model lifecycle. Begin
+  // here decays heat carried from previous iter; the per-iter
+  // accumulators get reset by writeCsvRowIfEnabled at endOuterIter
+  // below. Guard on the unique_ptr — when env var is unset the model
+  // is nullptr and this is a no-op.
+  if (adaptive_marker_model_) {
+    adaptive_marker_model_->beginOuterIter(iter_);
+  }
   // start timer for the current iteration
   IterationProgress iter_prog;
 
@@ -1424,6 +1432,17 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
     fixMaxSpacing();
   }
   numViols_.push_back(getDesign()->getTopBlock()->getNumMarkers());
+  // outer_loop_plus Patch 2 — at end of iter, hand the final marker
+  // list (after maxSpacing fix + connectivity check) to the model
+  // for observation. Counted ONCE per iter — never per worker — so
+  // overlapping worker DRC boxes don't double-count. endOuterIter
+  // then updates the hotspot list and writes a CSV row when
+  // OPENROAD_DRT_ADAPTIVE_MARKER_LOG is set.
+  if (adaptive_marker_model_) {
+    adaptive_marker_model_->observeGlobalMarkers(
+        getDesign()->getTopBlock()->getMarkers());
+    adaptive_marker_model_->endOuterIter();
+  }
   debugPrint(logger_,
              utl::DRT,
              "workers",

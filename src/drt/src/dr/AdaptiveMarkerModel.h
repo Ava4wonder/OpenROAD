@@ -19,7 +19,10 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -79,6 +82,12 @@ class AdaptiveMarkerModel
   void endOuterIter();
 
   // Mutation paths — FlexDR thread ONLY.
+  // The std::list overload matches frBlock::getMarkers()'s
+  // `const frList<std::unique_ptr<frMarker>>&` return (frList is a
+  // typedef for std::list). The vector overload is kept for callers
+  // that hold markers in a vector.
+  void observeGlobalMarkers(
+      const std::list<std::unique_ptr<frMarker>>& markers);
   void observeGlobalMarkers(
       const std::vector<std::unique_ptr<frMarker>>& markers);
   void observeGlobalMarkers(const std::vector<frMarker>& markers);
@@ -112,6 +121,10 @@ class AdaptiveMarkerModel
   void decayHeat();
   void addMarkerObservation(const AdaptiveMarkerObs& obs);
   void updateHotspots();
+  // Patch 2 — internal helpers.
+  void observeOneMarker(const frMarker& marker);
+  void writeCsvRowIfEnabled();
+  std::size_t heatIdx(int rule, int layer, int ty, int tx) const;
 
   Options options_;
   frDesign* design_ = nullptr;
@@ -120,10 +133,24 @@ class AdaptiveMarkerModel
   int iter_ = 0;
 
   // Flat heat arrays: indexed [rule][layer][tile_y][tile_x]. Sized
-  // lazily on first observation once tile dimensions are known.
+  // lazily on first beginOuterIter() once design dimensions are known.
   std::vector<std::uint16_t> rule_layer_heat_;
   std::vector<std::uint16_t> layer_heat_;
   std::vector<std::uint16_t> via_heat_;
+
+  // Tile-grid dimensions; set on first beginOuterIter().
+  int num_tile_x_ = 0;
+  int num_tile_y_ = 0;
+  int num_layers_ = 0;
+  int tile_pitch_dbu_ = 0;
+  int die_ll_x_ = 0;
+  int die_ll_y_ = 0;
+
+  // Per-iter accumulators reset by writeCsvRowIfEnabled at end of iter.
+  std::array<int, 16> iter_rule_counts_{};
+  int iter_total_markers_ = 0;
+  int iter_weighted_score_ = 0;
+  bool csv_header_written_ = false;
 
   std::unordered_map<frNet*, int> net_score_;
 
