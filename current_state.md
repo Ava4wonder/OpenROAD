@@ -23,9 +23,34 @@ Targets:
 
 | Variant | Iters | DRT wall | DRC | WL (µm) | Vias | Source |
 |---|---|---|---|---|---|---|
-| Upstream master via `openroad/orfs:latest` docker image | 7 | ~14:06 | 0 | — | — | user-reported reference; to be re-measured on this branch's env-UNSET binary |
-| Upstream master (this branch HEAD, Patch 1, env UNSET) | — | — | — | — | — | pending Patch 1 verification run |
+| Upstream master via `openroad/orfs:latest` docker image (older master) | 7 | ~14:06 | 0 | — | — | user-reported reference; STALE — upstream has moved 504 commits forward |
+| **Upstream master `fb6bde3f48` (this branch, Patch 1, env UNSET)** | **4 opt + 1 cleanup** | **10:27** | **0** | **5,412,412** | **2,284,621** | **canonical baseline; measured 2026-05-19 on H100** |
 | outer_loop_plus + AdaptiveMarkerModel (env SET, Patch N) | — | — | — | — | — | pending |
+
+**Key finding from Patch 1 verification (2026-05-19):** Today's upstream
+master (`fb6bde3f48`) already reaches 4 optimization iters DRC-clean on
+ISPD-18 test9 8t in 10m 27s. This is 504 commits ahead of the upstream
+that produced the earlier 7/14:06 reference, and the routing has improved
+in that window. **Canonical baseline for this branch is 4 opt iters / 10:27
+/ WL 5,412,412 / vias 2,284,621**, not 7/14:06.
+
+Implication for the AdaptiveMarkerModel contribution claim: improving on
+4 iters is materially harder than improving on 7. The realistic L1 target
+becomes **3 opt iters DRC-clean** (or weighted-marker-score reduction at
+4 iters if the iter floor can't be pushed below 4 on this design).
+
+DRT-0267 timing breakdown for the canonical baseline:
+
+| Phase | Elapsed |
+|---|---|
+| Iter 0 (initial routing) | ~4:30 |
+| Iter 1 (opt) | 3:27 |
+| Iter 2 (opt) | 0:43 |
+| Iter 3 (opt) | 0:21 |
+| Iter 4 (guides tiles cleanup) | 1:26 |
+| **DRT total** | **10:27** |
+
+CPU 1h 03m 45s = 6.1-thread avg utilization. Peak memory 8.35 GB.
 
 Measurement env (canonical): H100 host `azureuser@20.110.81.12`, container
 `drt-build-env`, ISPD-18 test9, 8 OMP threads. **No V2.6.h env vars are set
