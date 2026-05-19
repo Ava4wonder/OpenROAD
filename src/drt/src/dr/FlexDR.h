@@ -17,6 +17,7 @@
 #include "boost/polygon/polygon.hpp"
 #include "boost/serialization/export.hpp"
 #include "db/drObj/drAccessPattern.h"
+#include "dr/AdaptiveMarkerTypes.h"  // outer_loop_plus Patch 3 — for AdaptiveWorkerPolicy
 #include "db/drObj/drFig.h"
 #include "db/drObj/drMarker.h"
 #include "db/drObj/drNet.h"
@@ -383,6 +384,21 @@ class FlexDRWorker
   {
     workerMarkerDecay_ = markerDecayIn;
   }
+  // outer_loop_plus Patch 3 — store the FlexDR-computed AdaptiveWorker
+  // Policy snapshot. The policy is consumed only at worker setup time
+  // (cost-multiplier application happens in FlexDR::createWorker before
+  // setCost is called), so the worker just holds a copy for any later
+  // introspection. Default-constructed value (enabled=false, all
+  // multipliers 1.0) means "no policy applied" — exactly upstream
+  // behavior.
+  void setAdaptivePolicy(const AdaptiveWorkerPolicy& policy)
+  {
+    adaptive_policy_ = policy;
+  }
+  const AdaptiveWorkerPolicy& getAdaptivePolicy() const
+  {
+    return adaptive_policy_;
+  }
   void setMarkers(std::vector<frMarker>& in)
   {
     markers_.clear();
@@ -562,6 +578,11 @@ class FlexDRWorker
   frUInt4 workerMarkerCost_{0};
   frUInt4 workerFixedShapeCost_{0};
   float workerMarkerDecay_{0};
+  // outer_loop_plus Patch 3 — read-only policy snapshot set by FlexDR
+  // before this worker runs. Default-constructed (enabled=false, all
+  // multipliers 1.0) when the adaptive marker model is disabled —
+  // worker behaves like upstream master.
+  AdaptiveWorkerPolicy adaptive_policy_;
   // used in init route as gr boundary pin
   frOrderedIdMap<frNet*, std::set<std::pair<odb::Point, frLayerNum>>>
       boundaryPin_;

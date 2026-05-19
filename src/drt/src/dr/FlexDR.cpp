@@ -624,10 +624,41 @@ std::unique_ptr<FlexDRWorker> FlexDR::createWorker(const int x_offset,
   worker->setFollowGuide(args.followGuide);
   // TODO: only pass to relevant workers
   worker->setGraphics(graphics_.get());
-  worker->setCost(args.workerDRCCost,
-                  args.workerMarkerCost,
-                  args.workerFixedShapeCost,
-                  args.workerMarkerDecay);
+
+  // outer_loop_plus Patch 3 — fetch a read-only policy snapshot from
+  // the adaptive marker model based on this worker's drc_box overlap
+  // with the persistent heat map. The policy is multiplied into the
+  // worker's scalar cost knobs BEFORE setCost. With the model unset
+  // (env var off) the if-block is skipped and the worker gets the
+  // unmodified args.workerXxxCost values — bit-identical to upstream.
+  auto worker_drc = args.workerDRCCost;
+  auto worker_marker = args.workerMarkerCost;
+  auto worker_fixed = args.workerFixedShapeCost;
+  auto worker_decay = args.workerMarkerDecay;
+  if (adaptive_marker_model_) {
+    const auto policy = adaptive_marker_model_->getWorkerPolicy(
+        worker->getRouteBox(),
+        worker->getDrcBox(),
+        iter_,
+        args.workerDRCCost,
+        args.workerMarkerCost,
+        args.workerFixedShapeCost,
+        args.workerMarkerDecay);
+    worker->setAdaptivePolicy(policy);
+    if (policy.enabled) {
+      worker_drc = static_cast<frUInt4>(
+          std::lround(static_cast<float>(worker_drc) * policy.drc_cost_mul));
+      worker_marker = static_cast<frUInt4>(std::lround(
+          static_cast<float>(worker_marker) * policy.marker_cost_mul));
+      worker_fixed = static_cast<frUInt4>(std::lround(
+          static_cast<float>(worker_fixed) * policy.fixed_shape_cost_mul));
+      if (policy.marker_decay_override >= 0.0f) {
+        worker_decay = policy.marker_decay_override;
+      }
+    }
+  }
+
+  worker->setCost(worker_drc, worker_marker, worker_fixed, worker_decay);
   return worker;
 }
 

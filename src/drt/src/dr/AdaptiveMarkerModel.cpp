@@ -149,16 +149,79 @@ void AdaptiveMarkerModel::observeWorkerStats(
 
 AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
     const odb::Rect& /*route_box*/,
-    const odb::Rect& /*drc_box*/,
-    int /*iter*/,
+    const odb::Rect& drc_box,
+    int iter,
     frUInt4 /*base_drc_cost*/,
     frUInt4 /*base_marker_cost*/,
     frUInt4 /*base_fixed_shape_cost*/,
-    float /*base_decay*/) const
+    float base_decay) const
 {
-  // Patch 2: still identity. Real scalar policy lands in Patch 3.
+  // Patch 3 — compute real scalar multipliers from per-tile heat
+  // overlap with the worker's drc_box.
+  //
+  // Activation gates:
+  //   1. Model must be enabled (env var set).
+  //   2. Heat array must be sized (set on first beginOuterIter).
+  //   3. Iter gate: only apply policy from iter 2 onwards. Iters 0-1
+  //      have no useful heat history to draw on (iter 0 starts with
+  //      empty heat; iter 1 has just one decayed iter of history).
+  //      Applying policy early risks biasing the search before the
+  //      hotspot signal is reliable. From iter 2 the model has 2+
+  //      iterations of decay-accumulated heat per tile.
+  //   4. Caps: drc_cost_mul / marker_cost_mul capped at 2.0;
+  //      marker_decay_override capped at 0.99.
+
   AdaptiveWorkerPolicy policy;
   policy.enabled = options_.enabled;
+  if (!options_.enabled) {
+    return policy;
+  }
+  if (rule_layer_heat_.empty()) {
+    return policy;
+  }
+  if (iter < 2) {
+    return policy;
+  }
+
+  // Sum heat over tiles overlapping drc_box (across all rules + layers).
+  const int tx_lo = std::clamp<int>(
+      (drc_box.xMin() - die_ll_x_) / tile_pitch_dbu_, 0, num_tile_x_ - 1);
+  const int tx_hi = std::clamp<int>(
+      (drc_box.xMax() - die_ll_x_) / tile_pitch_dbu_, 0, num_tile_x_ - 1);
+  const int ty_lo = std::clamp<int>(
+      (drc_box.yMin() - die_ll_y_) / tile_pitch_dbu_, 0, num_tile_y_ - 1);
+  const int ty_hi = std::clamp<int>(
+      (drc_box.yMax() - die_ll_y_) / tile_pitch_dbu_, 0, num_tile_y_ - 1);
+
+  std::uint64_t total_heat = 0;
+  for (int r = 0; r < static_cast<int>(kNumAdaptiveRuleClasses); ++r) {
+    for (int l = 0; l < num_layers_; ++l) {
+      for (int ty = ty_lo; ty <= ty_hi; ++ty) {
+        for (int tx = tx_lo; tx <= tx_hi; ++tx) {
+          total_heat += rule_layer_heat_[heatIdx(r, l, ty, tx)];
+        }
+      }
+    }
+  }
+
+  // Threshold ladder. Hotspot/severe thresholds are configurable via
+  // Options. Default 200 / 800 from current_state.md's risk cap doc.
+  if (static_cast<int>(total_heat) >= options_.severe_hotspot_threshold) {
+    policy.marker_cost_mul = 1.50f;
+    policy.drc_cost_mul = 1.25f;
+    policy.marker_decay_override
+        = std::min(0.99f, std::max(base_decay, 0.99f));
+  } else if (static_cast<int>(total_heat) >= options_.hotspot_threshold) {
+    policy.marker_cost_mul = 1.25f;
+    policy.drc_cost_mul = 1.10f;
+    // No decay override at the moderate level — only severe.
+  }
+
+  // Cap mults at 2.0 (defensive — current values never exceed 1.5).
+  policy.drc_cost_mul = std::min(policy.drc_cost_mul, 2.0f);
+  policy.marker_cost_mul = std::min(policy.marker_cost_mul, 2.0f);
+  policy.fixed_shape_cost_mul = std::min(policy.fixed_shape_cost_mul, 2.0f);
+
   return policy;
 }
 
