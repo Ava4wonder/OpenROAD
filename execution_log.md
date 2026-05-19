@@ -87,3 +87,71 @@ during that window. New canonical baseline locked into `current_state.md`.
 
 Expected next entry: Patch 2 commit hash + observation-CSV verification
 (env SET) showing observation logs + bit-stable routing.
+
+---
+
+## 2026-05-20 — Patch 2 committed + UNSET/SET dual verification
+
+Patch 2 = commit `d3060196e5` on `outer_loop_plus`. Real
+`classifyConstraint` (17 frConstraintTypeEnum cases → 7 rule classes),
+`extractMarkerNets` (conservative frcNet-only), `getRuleAwareInflatedBox`
+(spacing rules get 1.5× bloat). AdaptiveMarkerModel: lazy heat-array
+allocation, beginOuterIter→decayHeat, observeOneMarker accumulates
+weighted heat into the (rule,layer,ty,tx) flat array + bumps net_score_,
+updateHotspots scans tile totals for severe threshold, writeCsvRowIf
+Enabled dumps per-iter row. FlexDR.cpp hooks at top + bottom of
+searchRepair (counted ONCE per outer iter, never per worker).
+
+### UNSET regression check (test9 8t)
+
+Output: `ispd18_test9_olp_p2_unset_8t/run.log`. Result:
+  * 4 opt + 1 cleanup iters
+  * DRT wall 10:18 (Patch 1 baseline was 10:27 — within run-to-run noise)
+  * DRC 0, WL 5,412,412 µm ✓ bit-identical, vias 2,284,621 ✓
+    bit-identical
+  * Peak memory 8.37 GB (Patch 1 baseline 8.35 — neutral)
+
+Disabled-shell guarantee empirically reconfirmed: env UNSET → no model
+construction → routing exactly matches Patch 1 / pure upstream master.
+
+### SET observation+CSV check (test9 8t, env SET, CSV path provided)
+
+Output: `ispd18_test9_olp_p2_set_8t/run.log` + `adaptive_marker.csv`.
+Result:
+  * 4 opt + 1 cleanup iters
+  * DRT wall 10:23 (Patch 2 UNSET was 10:18 → **+5s overhead = +0.8% wall**)
+  * DRC 0, WL 5,412,412 ✓, vias 2,284,621 ✓ — **routing bit-identical
+    to UNSET** (observation has zero routing impact, as Patch 2 design
+    requires)
+  * Peak memory 8.39 GB (UNSET 8.37 → **+24 MB heat-map cost**, well
+    inside the budget the heat-array sizing assumed)
+
+CSV is the headline artifact for this patch. Per-iter rows:
+
+```
+iter,total_markers,weighted_score,num_hotspots,short,cut_short,metal_spc,cut_spc,eol,min_area,ns_metal,other
+0,92709,2482125,295,8781,0,19186,1329,15594,0,1,47818
+1,1618,132040,174,1156,0,273,118,68,0,2,1
+2,390,31010,81,264,0,85,26,15,0,0,0
+3,3,240,35,2,0,1,0,0,0,0,0
+4,0,0,9,0,0,0,0,0,0,0,0
+```
+
+**weighted_score convergence:** 2.48M → 132K → 31K → 240 → 0. This is
+the metric Patches 3-7 will use to measure policy effects against the
+identity-policy SET baseline. **Number of unique tile hotspots peaks
+at 295 in iter 0** (with `severe_hotspot_threshold = 800` default) and
+decays toward 9 by iter 4 (these 9 are stale tiles from the iter-0
+heat map whose decayed value still sits above threshold).
+
+**Followup work flagged:** the `other_count` column is 47,818 in iter 0
+(about half of all markers). My `classifyConstraint` switch is missing
+some common frConstraintTypeEnum cases on this design. Doesn't affect
+weighted_score's directional convergence but per-rule attribution will
+be incomplete until I expand the switch. Worth a 10-min refinement
+patch before Patch 3 to maximise signal-to-noise on per-rule policy
+effects.
+
+Expected next: Patch 3 (worker AdaptiveWorkerPolicy snapshot + scalar
+multipliers on drcCost/markerCost/fixedShapeCost). Feature-gated.
+Goal: first measurable wall or weighted-score improvement when env SET.

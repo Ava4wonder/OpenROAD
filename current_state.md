@@ -25,7 +25,8 @@ Targets:
 |---|---|---|---|---|---|---|
 | Upstream master via `openroad/orfs:latest` docker image (older master) | 7 | ~14:06 | 0 | — | — | user-reported reference; STALE — upstream has moved 504 commits forward |
 | **Upstream master `fb6bde3f48` (this branch, Patch 1, env UNSET)** | **4 opt + 1 cleanup** | **10:27** | **0** | **5,412,412** | **2,284,621** | **canonical baseline; measured 2026-05-19 on H100** |
-| outer_loop_plus + AdaptiveMarkerModel (env SET, Patch N) | — | — | — | — | — | pending |
+| Patch 2 UNSET (regression check) | 4 opt + 1 cleanup | 10:18 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical to canonical baseline |
+| Patch 2 SET (observation enabled, identity policy) | 4 opt + 1 cleanup | 10:23 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | +5s wall (+0.8%) for observation; routing bit-identical to UNSET |
 
 **Key finding from Patch 1 verification (2026-05-19):** Today's upstream
 master (`fb6bde3f48`) already reaches 4 optimization iters DRC-clean on
