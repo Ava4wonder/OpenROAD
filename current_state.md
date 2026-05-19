@@ -27,6 +27,7 @@ Targets:
 | **Upstream master `fb6bde3f48` (this branch, Patch 1, env UNSET)** | **4 opt + 1 cleanup** | **10:27** | **0** | **5,412,412** | **2,284,621** | **canonical baseline; measured 2026-05-19 on H100** |
 | Patch 2 UNSET (regression check) | 4 opt + 1 cleanup | 10:18 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical to canonical baseline |
 | Patch 2 SET (observation enabled, identity policy) | 4 opt + 1 cleanup | 10:23 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | +5s wall (+0.8%) for observation; routing bit-identical to UNSET |
+| Patch 2.1 SET (MinStep + expanded classify) | 4 opt + 1 cleanup | 10:29 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical routing; expanded switch caught 0 new markers — the 47K "Other" bucket is null-constraint markers from FlexGCWorker, not unrecognized enum cases |
 
 **Key finding from Patch 1 verification (2026-05-19):** Today's upstream
 master (`fb6bde3f48`) already reaches 4 optimization iters DRC-clean on

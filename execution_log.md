@@ -155,3 +155,63 @@ effects.
 Expected next: Patch 3 (worker AdaptiveWorkerPolicy snapshot + scalar
 multipliers on drcCost/markerCost/fixedShapeCost). Feature-gated.
 Goal: first measurable wall or weighted-score improvement when env SET.
+
+---
+
+## 2026-05-20 — Patch 2.1 committed + SET verification
+
+Patch 2.1 = commit `2cdabc444d`. Added AdaptiveRuleClass::MinStep
+(bucket 7, before Other). Expanded MetalSpacing to absorb
+SpacingTableInfluence, SpacingTableOrth, Lef58WidthTableOrth,
+Lef58SpacingWrongDir, Lef58KeepOutZone, Lef58TwoWiresForbiddenSpc,
+Lef58ForbiddenSpc, Lef58Enclosure, MetalWidthVia,
+Lef58RightWayOnGridOnly, Lef58RectOnly. Expanded Eol to absorb
+Lef58SpacingEndOfLineWithinEncloseCut/ParallelEdge/MaxMinLength.
+New MinStep bucket covers frcMinStep, Lef58MinStep, Minimumcut,
+Lef58MinimumCut.
+
+CSV header gained `min_step_count` column between ns_metal_count
+and other_count.
+
+### SET verification (test9 8t)
+
+Output: `ispd18_test9_olp_p21_set_8t/`. Result:
+  * 4 opt + 1 cleanup iters
+  * DRT wall 10:29 (Patch 2 SET was 10:23 — within noise)
+  * DRC 0, WL 5,412,412 ✓ bit-identical, vias 2,284,621 ✓
+    bit-identical
+  * Peak memory 8.34 GB
+
+CSV iter 0:
+```
+0,92709,2482125,295,8781,0,19186,1329,15594,0,1,0,47818,182,157,10000
+        total  score   ho  Sh   CS  MS    CSpc  Eol   MA NM MStp Other
+```
+
+**Surprise:** `min_step_count = 0` AND `other_count = 47818`
+(unchanged from Patch 2). The expanded switch caught zero new
+markers. Diagnosis: those 47,818 "other" markers don't carry a
+`frConstraint*` at all — `marker.getConstraint()` returns nullptr,
+so `classifyConstraint(nullptr)` falls through to Other. Sum check:
+8781+19186+1329+15594+0+1+0+47818 = 92,709 ✓.
+
+This is a known-ish OpenROAD behaviour: some marker-creation paths
+(notably in FlexGCWorker's geometric checks) emit `frMarker` with
+the constraint field left null — the marker carries the bbox and
+layer but not the rule pointer. The weighted_score still weighs
+them at the default (10 / unit), correctly attributed in the
+overall total. The per-rule columns are a diagnostic, not a
+control input.
+
+**Decision:** accept the Other bucket as-is and proceed to Patch 3.
+Per-tile heat (sum across all rules) and per-net score are unaffected
+by the missing per-rule attribution. Investigating where the
+null-constraint markers come from would mean instrumenting
+FlexGCWorker's addMarker call sites — out of scope for the
+AdaptiveMarkerModel work, and not blocking the contribution claim.
+
+Expected next: Patch 3 (worker AdaptiveWorkerPolicy snapshot +
+scalar drcCost/markerCost/fixedShapeCost multipliers, hotspot-
+triggered). First patch to actually CHANGE routing behaviour when
+SET vs UNSET. Goal: weighted_score improvement OR iter-count
+reduction on test9 8t without harming WL.
