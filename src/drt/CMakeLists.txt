@@ -27,6 +27,8 @@ swig_lib(NAME      drt
 )
 
 add_library(drt_lib
+  src/dr/AdaptiveMarkerModel.cpp
+  src/dr/AdaptiveMarkerUtils.cpp
   src/dr/FlexDR_conn.cpp
   src/dr/FlexDR_init.cpp
   src/dr/FlexDR.cpp

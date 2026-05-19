@@ -76,6 +76,7 @@ struct FlexDRViaData
 };
 
 class FlexDRFlow;
+class AdaptiveMarkerModel;  // outer_loop_plus Patch 1
 class FlexDR
 {
  public:
@@ -160,6 +161,11 @@ class FlexDR
   std::unique_ptr<AbstractDRGraphics> graphics_{nullptr};
   std::string debugNetName_;
   int numWorkUnits_;
+  // outer_loop_plus Patch 1 — persistent adaptive marker model. Owned by
+  // FlexDR (sole mutator), default-disabled. Constructed only when the
+  // OPENROAD_DRT_ADAPTIVE_MARKER env var is set; otherwise stays nullptr
+  // and all call sites guard on it. See plan.md / current_state.md.
+  std::unique_ptr<AdaptiveMarkerModel> adaptive_marker_model_;
 
   // distributed
   dst::Distributed* dist_;

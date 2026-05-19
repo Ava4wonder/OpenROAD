@@ -3,6 +3,8 @@
 
 #include "dr/FlexDR.h"
 
+#include "dr/AdaptiveMarkerModel.h"
+
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -11,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <ios>
@@ -126,6 +129,23 @@ FlexDR::FlexDR(TritonRoute* router,
       clipSizeInc_(0),
       iter_(0)
 {
+  // outer_loop_plus Patch 1 — opt-in construction of AdaptiveMarkerModel.
+  // Default OFF: env var absent → unique_ptr stays nullptr and every
+  // call site guards on `adaptive_marker_model_ != nullptr`, preserving
+  // bit-identical upstream-master behaviour. Patch 2+ promotes this to
+  // a Tcl option (detailed_route -adaptive_marker_model).
+  if (const char* env = std::getenv("OPENROAD_DRT_ADAPTIVE_MARKER");
+      env != nullptr && env[0] == '1') {
+    AdaptiveMarkerModel::Options opts;
+    opts.enabled = true;
+    if (const char* log_path = std::getenv("OPENROAD_DRT_ADAPTIVE_MARKER_LOG");
+        log_path != nullptr && log_path[0] != '\0') {
+      opts.log_csv = true;
+      opts.log_path = log_path;
+    }
+    adaptive_marker_model_
+        = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
+  }
 }
 
 FlexDR::~FlexDR() = default;
