@@ -206,21 +206,53 @@ AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
 
   // Threshold ladder. Hotspot/severe thresholds are configurable via
   // Options. Default 200 / 800 from current_state.md's risk cap doc.
+  bool is_severe = false;
+  bool is_hot = false;
   if (static_cast<int>(total_heat) >= options_.severe_hotspot_threshold) {
     policy.marker_cost_mul = 1.50f;
     policy.drc_cost_mul = 1.25f;
     policy.marker_decay_override
         = std::min(0.99f, std::max(base_decay, 0.99f));
+    is_severe = true;
   } else if (static_cast<int>(total_heat) >= options_.hotspot_threshold) {
     policy.marker_cost_mul = 1.25f;
     policy.drc_cost_mul = 1.10f;
     // No decay override at the moderate level — only severe.
+    is_hot = true;
   }
 
   // Cap mults at 2.0 (defensive — current values never exceed 1.5).
   policy.drc_cost_mul = std::min(policy.drc_cost_mul, 2.0f);
   policy.marker_cost_mul = std::min(policy.marker_cost_mul, 2.0f);
   policy.fixed_shape_cost_mul = std::min(policy.fixed_shape_cost_mul, 2.0f);
+
+  // Patch 3.1a — diagnostics: count calls, hot/severe workers, and
+  // (optionally) emit a per-call CSV row for offline coverage analysis.
+  ++iter_policy_calls_;
+  if (is_severe) {
+    ++iter_severe_workers_;
+  } else if (is_hot) {
+    ++iter_hot_workers_;
+  }
+  if (options_.log_policy_csv && !options_.policy_log_path.empty()) {
+    const bool need_header = !policy_csv_header_written_;
+    std::ofstream os(options_.policy_log_path,
+                     need_header ? std::ios::trunc : std::ios::app);
+    if (os.is_open()) {
+      if (need_header) {
+        os << "iter,drc_x1,drc_y1,drc_x2,drc_y2,total_heat,"
+              "is_hot,is_severe,drc_mul,marker_mul,fixed_mul,"
+              "marker_decay_override\n";
+        policy_csv_header_written_ = true;
+      }
+      os << iter << ',' << drc_box.xMin() << ',' << drc_box.yMin()
+         << ',' << drc_box.xMax() << ',' << drc_box.yMax() << ','
+         << total_heat << ',' << (is_hot ? 1 : 0) << ','
+         << (is_severe ? 1 : 0) << ',' << policy.drc_cost_mul << ','
+         << policy.marker_cost_mul << ',' << policy.fixed_shape_cost_mul
+         << ',' << policy.marker_decay_override << '\n';
+    }
+  }
 
   return policy;
 }
@@ -368,11 +400,13 @@ void AdaptiveMarkerModel::writeCsvRowIfEnabled()
     // Column order matches AdaptiveRuleClass enum values 0..8
     // (Short, CutShort, MetalSpacing, CutSpacing, Eol, MinArea,
     // NsMetal, MinStep, Other). Patch 2.1 inserted MinStep before
-    // Other.
+    // Other. Patch 3.1a appended policy_calls / hot_workers /
+    // severe_workers.
     os << "iter,total_markers,weighted_score,num_hotspots,"
           "short_count,cut_short_count,metal_spacing_count,cut_spacing_count,"
           "eol_count,min_area_count,ns_metal_count,min_step_count,other_count,"
-          "num_tile_x,num_tile_y,tile_pitch_dbu\n";
+          "num_tile_x,num_tile_y,tile_pitch_dbu,"
+          "policy_calls,hot_workers,severe_workers\n";
     csv_header_written_ = true;
   }
   os << iter_ << ',' << iter_total_markers_ << ','
@@ -381,12 +415,16 @@ void AdaptiveMarkerModel::writeCsvRowIfEnabled()
     os << ',' << iter_rule_counts_[r];
   }
   os << ',' << num_tile_x_ << ',' << num_tile_y_ << ','
-     << tile_pitch_dbu_ << '\n';
+     << tile_pitch_dbu_ << ',' << iter_policy_calls_ << ','
+     << iter_hot_workers_ << ',' << iter_severe_workers_ << '\n';
   os.flush();
 
   iter_rule_counts_.fill(0);
   iter_total_markers_ = 0;
   iter_weighted_score_ = 0;
+  iter_policy_calls_ = 0;
+  iter_hot_workers_ = 0;
+  iter_severe_workers_ = 0;
 }
 
 void AdaptiveMarkerModel::addMarkerObservation(

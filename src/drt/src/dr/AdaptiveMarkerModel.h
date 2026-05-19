@@ -60,6 +60,11 @@ class AdaptiveMarkerModel
 
     bool log_csv = false;
     std::string log_path;
+
+    // Patch 3.1a — per-getWorkerPolicy-call CSV path. One row per
+    // getWorkerPolicy invocation. Empty = disabled.
+    bool log_policy_csv = false;
+    std::string policy_log_path;
   };
 
   AdaptiveMarkerModel(const Options& options,
@@ -151,6 +156,16 @@ class AdaptiveMarkerModel
   int iter_total_markers_ = 0;
   int iter_weighted_score_ = 0;
   bool csv_header_written_ = false;
+
+  // Patch 3.1a — policy-call counters reset at end of each iter.
+  // Mutable so the const getWorkerPolicy can update them; the const
+  // contract is "doesn't change observed model state" (no heat
+  // mutation), but observation counters for diagnostics are
+  // legitimate.
+  mutable int iter_policy_calls_ = 0;
+  mutable int iter_hot_workers_ = 0;
+  mutable int iter_severe_workers_ = 0;
+  mutable bool policy_csv_header_written_ = false;
 
   std::unordered_map<frNet*, int> net_score_;
 

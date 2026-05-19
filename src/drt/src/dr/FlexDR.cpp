@@ -143,6 +143,13 @@ FlexDR::FlexDR(TritonRoute* router,
       opts.log_csv = true;
       opts.log_path = log_path;
     }
+    // Patch 3.1a — per-getWorkerPolicy-call CSV, gated by separate env var.
+    if (const char* policy_path
+            = std::getenv("OPENROAD_DRT_ADAPTIVE_POLICY_LOG");
+        policy_path != nullptr && policy_path[0] != '\0') {
+      opts.log_policy_csv = true;
+      opts.policy_log_path = policy_path;
+    }
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }
