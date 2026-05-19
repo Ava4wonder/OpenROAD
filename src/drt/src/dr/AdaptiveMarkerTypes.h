@@ -35,9 +35,11 @@ enum class AdaptiveRuleClass : std::uint8_t
   Eol = 4,
   MinArea = 5,
   NsMetal = 6,
-  Other = 7,
+  MinStep = 7,  // Patch 2.1 — added to absorb min-step / minimum-cut
+                // rules that dominated the "Other" bucket on ISPD-18.
+  Other = 8,
 };
-inline constexpr std::size_t kNumAdaptiveRuleClasses = 8;
+inline constexpr std::size_t kNumAdaptiveRuleClasses = 9;
 
 // Tile index into the model's flat heat array. (-1, -1) is the sentinel
 // for "outside all tiles" used by tile-overlap iteration.

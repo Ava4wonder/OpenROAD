@@ -21,12 +21,26 @@ AdaptiveRuleClass classifyConstraint(const frConstraint* constraint)
     case frConstraintTypeEnum::frcShortConstraint:
       return AdaptiveRuleClass::Short;
 
+    // Metal-spacing family. Also folds in enclosure/forbidden/wrong-dir
+    // /keep-out/influence rules whose marker arises from the same kind
+    // of mistake (wire-vs-wire / wire-vs-cut clearance).
     case frConstraintTypeEnum::frcSpacingConstraint:
     case frConstraintTypeEnum::frcSpacingTablePrlConstraint:
     case frConstraintTypeEnum::frcSpacingTableTwConstraint:
     case frConstraintTypeEnum::frcSpacingSamenetConstraint:
     case frConstraintTypeEnum::frcSpacingRangeConstraint:
     case frConstraintTypeEnum::frcLef58MaxSpacingConstraint:
+    case frConstraintTypeEnum::frcSpacingTableInfluenceConstraint:
+    case frConstraintTypeEnum::frcSpacingTableOrth:
+    case frConstraintTypeEnum::frcLef58WidthTableOrth:
+    case frConstraintTypeEnum::frcLef58SpacingWrongDirConstraint:
+    case frConstraintTypeEnum::frcLef58KeepOutZoneConstraint:
+    case frConstraintTypeEnum::frcLef58TwoWiresForbiddenSpcConstraint:
+    case frConstraintTypeEnum::frcLef58ForbiddenSpcConstraint:
+    case frConstraintTypeEnum::frcLef58EnclosureConstraint:
+    case frConstraintTypeEnum::frcMetalWidthViaConstraint:
+    case frConstraintTypeEnum::frcLef58RightWayOnGridOnlyConstraint:
+    case frConstraintTypeEnum::frcLef58RectOnlyConstraint:
       return AdaptiveRuleClass::MetalSpacing;
 
     case frConstraintTypeEnum::frcCutSpacingConstraint:
@@ -38,9 +52,15 @@ AdaptiveRuleClass classifyConstraint(const frConstraint* constraint)
     case frConstraintTypeEnum::frcLef58CutSpacingTablePrlConstraint:
       return AdaptiveRuleClass::CutSpacing;
 
+    // EOL family. The LEF58 EOL "within-*" sub-variants are folded in
+    // since they're triggered by the same geometric condition (line-end
+    // clearance) as the base EOL.
     case frConstraintTypeEnum::frcSpacingEndOfLineConstraint:
     case frConstraintTypeEnum::frcLef58SpacingEndOfLineConstraint:
     case frConstraintTypeEnum::frcLef58SpacingEndOfLineWithinConstraint:
+    case frConstraintTypeEnum::frcLef58SpacingEndOfLineWithinEncloseCutConstraint:
+    case frConstraintTypeEnum::frcLef58SpacingEndOfLineWithinParallelEdgeConstraint:
+    case frConstraintTypeEnum::frcLef58SpacingEndOfLineWithinMaxMinLengthConstraint:
     case frConstraintTypeEnum::frcLef58EolExtensionConstraint:
     case frConstraintTypeEnum::frcLef58EolKeepOutConstraint:
       return AdaptiveRuleClass::Eol;
@@ -53,7 +73,21 @@ AdaptiveRuleClass classifyConstraint(const frConstraint* constraint)
     case frConstraintTypeEnum::frcNonSufficientMetalConstraint:
       return AdaptiveRuleClass::NsMetal;
 
+    // Patch 2.1 — min-step / minimum-cut family. Distinct from spacing
+    // and area: these markers fire on small geometric features (notches,
+    // step risers, isolated cuts). Promoted to its own bucket because
+    // measurement on test9 8t showed this group dominated the prior
+    // "Other" bucket.
+    case frConstraintTypeEnum::frcMinStepConstraint:
+    case frConstraintTypeEnum::frcLef58MinStepConstraint:
+    case frConstraintTypeEnum::frcMinimumcutConstraint:
+    case frConstraintTypeEnum::frcLef58MinimumCutConstraint:
+      return AdaptiveRuleClass::MinStep;
+
     default:
+      // Truly residual cases: frcMinWidthConstraint (rare on routed
+      // designs), frcOffGridConstraint, frcRecheckConstraint, the
+      // "not-supported" LEF58 corner-spacing variants, etc.
       return AdaptiveRuleClass::Other;
   }
 }
@@ -92,6 +126,12 @@ int getRuleWeight(AdaptiveRuleClass rule)
     case AdaptiveRuleClass::MinArea:
       return 10;
     case AdaptiveRuleClass::NsMetal:
+      return 10;
+    case AdaptiveRuleClass::MinStep:
+      // Min-step / minimum-cut violations are local feature issues —
+      // small in DRV severity (similar to MinArea) but cheap to fix
+      // by re-shaping. Same weight as MinArea/NsMetal in the
+      // weighted_score formula.
       return 10;
     case AdaptiveRuleClass::Other:
       return 10;

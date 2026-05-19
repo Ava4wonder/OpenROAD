@@ -302,9 +302,13 @@ void AdaptiveMarkerModel::writeCsvRowIfEnabled()
     return;
   }
   if (need_header) {
+    // Column order matches AdaptiveRuleClass enum values 0..8
+    // (Short, CutShort, MetalSpacing, CutSpacing, Eol, MinArea,
+    // NsMetal, MinStep, Other). Patch 2.1 inserted MinStep before
+    // Other.
     os << "iter,total_markers,weighted_score,num_hotspots,"
           "short_count,cut_short_count,metal_spacing_count,cut_spacing_count,"
-          "eol_count,min_area_count,ns_metal_count,other_count,"
+          "eol_count,min_area_count,ns_metal_count,min_step_count,other_count,"
           "num_tile_x,num_tile_y,tile_pitch_dbu\n";
     csv_header_written_ = true;
   }
