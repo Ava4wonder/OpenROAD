@@ -605,4 +605,105 @@ std::size_t AdaptiveMarkerModel::heatIdx(int rule, int layer, int ty,
          + tx;
 }
 
+// Patch 3.5 — profile sink helpers.
+
+namespace {
+
+std::string buildProfilePath(const std::string& dir, const char* name)
+{
+  if (dir.empty()) {
+    return std::string(name);
+  }
+  if (dir.back() == '/') {
+    return dir + std::string(name);
+  }
+  return dir + std::string("/") + std::string(name);
+}
+
+void writeRectCells(std::ofstream& os, const odb::Rect& r)
+{
+  os << r.xMin() << ',' << r.yMin() << ',' << r.xMax() << ',' << r.yMax();
+}
+
+}  // namespace
+
+void AdaptiveMarkerModel::recordWorkerProfiles(
+    const std::vector<AdaptiveWorkerProfile>& ps)
+{
+  if (!options_.profile_enabled || ps.empty()) {
+    return;
+  }
+  const std::string path
+      = buildProfilePath(options_.profile_dir, "adaptive_worker_runtime.csv");
+  std::ofstream os(path, std::ios::app);
+  if (!os.is_open()) {
+    return;
+  }
+  if (!worker_profile_header_written_) {
+    os << "variant,iter,batch_id,worker_id,"
+       << "route_x1,route_y1,route_x2,route_y2,"
+       << "drc_x1,drc_y1,drc_x2,drc_y2,"
+       << "policy_class,drc_mul,marker_mul,fixed_mul,"
+       << "input_markers,output_markers,"
+       << "input_weighted_score,output_weighted_score,"
+       << "heat_score,current_marker_overlap,"
+       << "congested,worker_wall_ms,"
+       << "queue_pops,rerouted_nets,failed_routes\n";
+    worker_profile_header_written_ = true;
+  }
+  for (const auto& p : ps) {
+    os << options_.variant_label << ',' << p.iter << ',' << p.batch_id << ','
+       << p.worker_id << ',';
+    writeRectCells(os, p.route_box);
+    os << ',';
+    writeRectCells(os, p.drc_box);
+    os << ',' << p.policy_class << ',' << p.drc_mul << ',' << p.marker_mul
+       << ',' << p.fixed_mul << ',' << p.input_markers << ','
+       << p.output_markers << ',' << p.input_weighted_score << ','
+       << p.output_weighted_score << ',' << p.heat_score << ','
+       << p.current_marker_overlap << ',' << (p.congested ? 1 : 0) << ','
+       << p.worker_wall_ms << ',' << p.queue_pops << ',' << p.rerouted_nets
+       << ',' << p.failed_routes << '\n';
+  }
+}
+
+void AdaptiveMarkerModel::recordIterProfile(const AdaptiveIterProfile& p)
+{
+  if (!options_.profile_enabled) {
+    return;
+  }
+  const std::string path
+      = buildProfilePath(options_.profile_dir, "adaptive_iter_runtime.csv");
+  std::ofstream os(path, std::ios::app);
+  if (!os.is_open()) {
+    return;
+  }
+  if (!iter_profile_header_written_) {
+    os << "variant,iter,flow_state,ripup_mode,clip_size,"
+       << "markers_start,markers_end,weighted_start,weighted_end,"
+       << "policy_phase,hot_drc,severe_drc,marker_mul,fixed_mul,"
+       << "num_worker_calls,num_active_workers,"
+       << "num_hot_workers,num_severe_workers,num_identity_workers,"
+       << "search_repair_wall_ms,worker_wall_sum_ms,worker_wall_max_ms,"
+       << "worker_wall_p50_ms,worker_wall_p95_ms,worker_wall_p99_ms,"
+       << "connectivity_wall_ms,writeback_wall_ms,gc_wall_ms,"
+       << "total_queue_pops,total_rerouted_nets,total_failed_routes\n";
+    iter_profile_header_written_ = true;
+  }
+  os << options_.variant_label << ',' << p.iter << ',' << p.flow_state << ','
+     << p.ripup_mode << ',' << p.clip_size << ',' << p.markers_start << ','
+     << p.markers_end << ',' << p.weighted_start << ',' << p.weighted_end
+     << ',' << p.policy_phase << ',' << p.hot_drc << ',' << p.severe_drc
+     << ',' << p.marker_mul << ',' << p.fixed_mul << ','
+     << p.num_worker_calls << ',' << p.num_active_workers << ','
+     << p.num_hot_workers << ',' << p.num_severe_workers << ','
+     << p.num_identity_workers << ',' << p.search_repair_wall_ms << ','
+     << p.worker_wall_sum_ms << ',' << p.worker_wall_max_ms << ','
+     << p.worker_wall_p50_ms << ',' << p.worker_wall_p95_ms << ','
+     << p.worker_wall_p99_ms << ',' << p.connectivity_wall_ms << ','
+     << p.writeback_wall_ms << ',' << p.gc_wall_ms << ','
+     << p.total_queue_pops << ',' << p.total_rerouted_nets << ','
+     << p.total_failed_routes << '\n';
+}
+
 }  // namespace drt

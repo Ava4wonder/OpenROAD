@@ -203,6 +203,24 @@ FlexDR::FlexDR(TritonRoute* router,
         kt != nullptr && kt[0] == '1') {
       opts.k_taper = true;
     }
+    // Patch 3.5 — runtime profiling. Default OFF. Three env vars:
+    //   OPENROAD_DRT_ADAPTIVE_PROFILE=1      enable
+    //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR    output dir (defaults to cwd)
+    //   OPENROAD_DRT_ADAPTIVE_VARIANT        text label for CSV column
+    if (const char* pp = std::getenv("OPENROAD_DRT_ADAPTIVE_PROFILE");
+        pp != nullptr && pp[0] == '1') {
+      opts.profile_enabled = true;
+      if (const char* pd = std::getenv("OPENROAD_DRT_ADAPTIVE_PROFILE_DIR");
+          pd != nullptr && pd[0] != '\0') {
+        opts.profile_dir = pd;
+      }
+      if (const char* pv = std::getenv("OPENROAD_DRT_ADAPTIVE_VARIANT");
+          pv != nullptr && pv[0] != '\0') {
+        opts.variant_label = pv;
+      } else {
+        opts.variant_label = "default";
+      }
+    }
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }
@@ -822,10 +840,51 @@ void FlexDR::processWorkersBatch(
 {
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
   ThreadException exception;
+  // Patch 3.5 — per-worker profile collection. Pre-sized to the batch
+  // length; each OMP thread writes by its own index — no shared
+  // mutation, no atomics. When profiling is disabled this stays empty
+  // and the cost is one branch + zero allocations.
+  const bool profile_on
+      = adaptive_marker_model_
+        && adaptive_marker_model_->getOptions().profile_enabled;
+  std::vector<AdaptiveWorkerProfile> profiles;
+  if (profile_on) {
+    profiles.assign(workers_batch.size(), AdaptiveWorkerProfile{});
+  }
+  const int batch_id_now = iter_active_batch_id_++;
 #pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < (int) workers_batch.size(); i++) {  // NOLINT
     try {
+      std::chrono::steady_clock::time_point w_start;
+      if (profile_on) {
+        w_start = std::chrono::steady_clock::now();
+      }
       workers_batch[i]->main(getDesign());
+      if (profile_on) {
+        const auto w_end = std::chrono::steady_clock::now();
+        auto& p = profiles[i];
+        p.iter = iter_;
+        p.batch_id = batch_id_now;
+        p.worker_id = i;
+        p.route_box = workers_batch[i]->getRouteBox();
+        p.drc_box = workers_batch[i]->getDrcBox();
+        const auto& pol = workers_batch[i]->getAdaptivePolicy();
+        p.drc_mul = pol.drc_cost_mul;
+        p.marker_mul = pol.marker_cost_mul;
+        p.fixed_mul = pol.fixed_shape_cost_mul;
+        if (pol.drc_cost_mul >= 1.5f) {
+          p.policy_class = "severe";
+        } else if (pol.drc_cost_mul > 1.0f) {
+          p.policy_class = "hot";
+        } else {
+          p.policy_class = "identity";
+        }
+        p.output_markers = workers_batch[i]->getNumMarkers();
+        p.congested = workers_batch[i]->isCongested();
+        p.worker_wall_ms
+            = std::chrono::duration<double, std::milli>(w_end - w_start)
+                  .count();
+      }
 #pragma omp critical
       {
         if (router_cfg_->VERBOSE > 0) {
@@ -837,6 +896,27 @@ void FlexDR::processWorkersBatch(
     }
   }
   exception.rethrow();
+  // Patch 3.5 — emit worker rows + accumulate into iter aggregator
+  // serially on the FlexDR thread (we're outside the OMP region).
+  if (profile_on) {
+    adaptive_marker_model_->recordWorkerProfiles(profiles);
+    iter_worker_walls_ms_.reserve(iter_worker_walls_ms_.size()
+                                  + profiles.size());
+    for (const auto& p : profiles) {
+      iter_worker_walls_ms_.push_back(p.worker_wall_ms);
+      ++iter_worker_calls_;
+      if (p.policy_class == "severe") {
+        ++iter_severe_worker_count_;
+      } else if (p.policy_class == "hot") {
+        ++iter_hot_worker_count_;
+      } else {
+        ++iter_identity_worker_count_;
+      }
+      if (p.output_markers > 0 || p.worker_wall_ms > 10.0) {
+        ++iter_active_worker_count_;
+      }
+    }
+  }
 }
 
 void FlexDR::processWorkersBatchDistributed(
@@ -1485,6 +1565,21 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
   // accumulators get reset by writeCsvRowIfEnabled at endOuterIter
   // below. Guard on the unique_ptr — when env var is unset the model
   // is nullptr and this is a no-op.
+  // Patch 3.5 — reset per-iter profile aggregators (cheap regardless of
+  // profile state). Also snapshot the starting marker count before the
+  // model observes them, so the iter-level CSV can show start vs end.
+  iter_active_batch_id_ = 0;
+  iter_worker_calls_ = 0;
+  iter_active_worker_count_ = 0;
+  iter_hot_worker_count_ = 0;
+  iter_severe_worker_count_ = 0;
+  iter_identity_worker_count_ = 0;
+  iter_worker_walls_ms_.clear();
+  const int profile_markers_start
+      = getDesign()->getTopBlock()->getNumMarkers();
+  const auto profile_sr_t0 = std::chrono::steady_clock::now();
+  // Snapshot the policy tier BEFORE beginOuterIter applies K_taper, so
+  // the row reports the tier this iter will actually use.
   if (adaptive_marker_model_) {
     adaptive_marker_model_->beginOuterIter(iter_);
   }
@@ -1514,9 +1609,16 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
     printIterationProgress(
         logger_, iter_prog, getDesign()->getTopBlock()->getNumMarkers(), 100);
   }
+  // Patch 3.5 — connectivity check wall.
+  const auto profile_conn_t0 = std::chrono::steady_clock::now();
   FlexDRConnectivityChecker checker(
       router_, logger_, router_cfg_, graphics_.get(), dist_on_);
   checker.check(iter_);
+  const auto profile_conn_t1 = std::chrono::steady_clock::now();
+  const double profile_conn_ms
+      = std::chrono::duration<double, std::milli>(profile_conn_t1
+                                                  - profile_conn_t0)
+            .count();
   flow_state_machine_->setFixingMaxSpacing(false);
   if (getDesign()->getTopBlock()->getNumMarkers() == 0
       && getTech()->hasMaxSpacingConstraints()) {
@@ -1533,6 +1635,73 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
     adaptive_marker_model_->observeGlobalMarkers(
         getDesign()->getTopBlock()->getMarkers());
     adaptive_marker_model_->endOuterIter();
+  }
+  // Patch 3.5 — emit iter-level profile row.
+  if (adaptive_marker_model_
+      && adaptive_marker_model_->getOptions().profile_enabled) {
+    const auto profile_sr_t1 = std::chrono::steady_clock::now();
+    AdaptiveIterProfile ip;
+    ip.iter = iter_;
+    ip.flow_state = flow_state_machine_->getFlowName();
+    ip.ripup_mode = std::to_string(static_cast<int>(args.ripupMode));
+    ip.clip_size = -1;  // not exposed through SearchRepairArgs here
+    ip.markers_start = profile_markers_start;
+    ip.markers_end = getDesign()->getTopBlock()->getNumMarkers();
+    ip.weighted_start = -1;  // would need a pre-observe scan; deferred
+    ip.weighted_end = -1;
+    const auto& opts = adaptive_marker_model_->getOptions();
+    ip.hot_drc = opts.hot_drc_mul;
+    ip.severe_drc = opts.severe_drc_mul;
+    ip.marker_mul = opts.hot_marker_mul;
+    ip.fixed_mul = 1.0f;
+    // Decode phase from the (hot, severe) pair that beginOuterIter
+    // just installed (K_taper may have mutated them).
+    if (opts.severe_drc_mul >= 2.0f) {
+      ip.policy_phase = "H";
+    } else if (opts.severe_drc_mul >= 1.5f) {
+      ip.policy_phase = "G";
+    } else if (opts.severe_drc_mul > 1.0f) {
+      ip.policy_phase = "D";
+    } else {
+      ip.policy_phase = "identity";
+    }
+    ip.num_worker_calls = iter_worker_calls_;
+    ip.num_active_workers = iter_active_worker_count_;
+    ip.num_hot_workers = iter_hot_worker_count_;
+    ip.num_severe_workers = iter_severe_worker_count_;
+    ip.num_identity_workers = iter_identity_worker_count_;
+    ip.search_repair_wall_ms
+        = std::chrono::duration<double, std::milli>(profile_sr_t1
+                                                    - profile_sr_t0)
+              .count();
+    ip.connectivity_wall_ms = profile_conn_ms;
+    if (!iter_worker_walls_ms_.empty()) {
+      std::vector<double> sorted = iter_worker_walls_ms_;
+      std::sort(sorted.begin(), sorted.end());
+      double sum = 0.0;
+      double mx = 0.0;
+      for (double v : sorted) {
+        sum += v;
+        if (v > mx) {
+          mx = v;
+        }
+      }
+      auto pct = [&](double p) {
+        const std::size_t n = sorted.size();
+        std::size_t idx
+            = static_cast<std::size_t>(p * static_cast<double>(n - 1));
+        if (idx >= n) {
+          idx = n - 1;
+        }
+        return sorted[idx];
+      };
+      ip.worker_wall_sum_ms = sum;
+      ip.worker_wall_max_ms = mx;
+      ip.worker_wall_p50_ms = pct(0.50);
+      ip.worker_wall_p95_ms = pct(0.95);
+      ip.worker_wall_p99_ms = pct(0.99);
+    }
+    adaptive_marker_model_->recordIterProfile(ip);
   }
   debugPrint(logger_,
              utl::DRT,

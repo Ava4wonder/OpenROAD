@@ -127,6 +127,19 @@ class AdaptiveMarkerModel
     // mid-route quality win.
     // Env var: OPENROAD_DRT_ADAPTIVE_K_TAPER=1 enables.
     bool k_taper = false;
+
+    // Patch 3.5 — runtime profiling. Default-OFF. Gated by env vars:
+    //   OPENROAD_DRT_ADAPTIVE_PROFILE=1
+    //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR=/path/to/dir (optional;
+    //     defaults to cwd)
+    //   OPENROAD_DRT_ADAPTIVE_VARIANT=<label>           (optional;
+    //     stamped into the CSV "variant_name" column)
+    // When enabled, two CSVs are written:
+    //   <dir>/adaptive_iter_runtime.csv   (one row per outer iter)
+    //   <dir>/adaptive_worker_runtime.csv (one row per worker call)
+    bool profile_enabled = false;
+    std::string profile_dir;
+    std::string variant_label;
   };
 
   AdaptiveMarkerModel(const Options& options,
@@ -172,6 +185,13 @@ class AdaptiveMarkerModel
                                        frUInt4 base_fixed_shape_cost,
                                        float base_decay) const;
 
+  // Patch 3.5 — runtime profile sinks. Called by FlexDR thread only,
+  // serially (the worker overload after each OMP batch finishes, the
+  // iter overload at endOuterIter equivalent). Both are no-ops unless
+  // options_.profile_enabled is true.
+  void recordWorkerProfiles(const std::vector<AdaptiveWorkerProfile>& ps);
+  void recordIterProfile(const AdaptiveIterProfile& p);
+
   int getMarkerIncrement(const frMarker& marker,
                          bool is_via,
                          frLayerNum layer) const;
@@ -201,6 +221,10 @@ class AdaptiveMarkerModel
       const std::vector<std::unique_ptr<frMarker>>& markers);
   void writeTailRow(const frMarker& marker);
   mutable bool tail_csv_header_written_ = false;
+  // Patch 3.5 — profile CSV header flags. Mutable so the const-ish
+  // record* methods can write the header lazily on first row.
+  mutable bool iter_profile_header_written_ = false;
+  mutable bool worker_profile_header_written_ = false;
 
   Options options_;
   frDesign* design_ = nullptr;

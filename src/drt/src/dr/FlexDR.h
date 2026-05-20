@@ -168,6 +168,18 @@ class FlexDR
   // and all call sites guard on it. See plan.md / current_state.md.
   std::unique_ptr<AdaptiveMarkerModel> adaptive_marker_model_;
 
+  // Patch 3.5 — per-iter profile aggregator. Reset at the start of
+  // each searchRepair() iter and consumed at its end to emit the
+  // adaptive_iter_runtime.csv row. All zero-cost when profile is OFF
+  // (no allocations, just a few int writes).
+  int iter_active_batch_id_ = 0;
+  int iter_worker_calls_ = 0;
+  int iter_active_worker_count_ = 0;
+  int iter_hot_worker_count_ = 0;
+  int iter_severe_worker_count_ = 0;
+  int iter_identity_worker_count_ = 0;
+  std::vector<double> iter_worker_walls_ms_;
+
   // distributed
   dst::Distributed* dist_;
   bool dist_on_;
