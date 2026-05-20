@@ -419,8 +419,10 @@ class FlexDRWorker
   {
     return adaptive_policy_;
   }
-  // outer_loop_plus Patch 4 — per-worker constraint field. Built by
-  // FlexDR before main() when OPENROAD_DRT_CONSTRAINT_FIELD=1.
+  // outer_loop_plus Patch 4 — per-worker constraint field. The
+  // policy is set by FlexDR before main(); the worker builds the
+  // field internally between init() and route_queue() (Phase 4.2.b)
+  // so it can see committed drNet connFigs pulled in by init.
   // FlexGridGraph queries it via getDRWorker()->getConstraintField()
   // during maze expansion.
   void setConstraintField(std::unique_ptr<ConstraintField> field)
@@ -430,6 +432,14 @@ class FlexDRWorker
   ConstraintField* getConstraintField() const
   {
     return constraint_field_.get();
+  }
+  void setConstraintFieldPolicy(const ConstraintFieldPolicy& policy)
+  {
+    constraint_field_policy_ = policy;
+  }
+  const ConstraintFieldPolicy& getConstraintFieldPolicy() const
+  {
+    return constraint_field_policy_;
   }
   void setMarkers(std::vector<frMarker>& in)
   {
@@ -615,11 +625,12 @@ class FlexDRWorker
   // multipliers 1.0) when the adaptive marker model is disabled —
   // worker behaves like upstream master.
   AdaptiveWorkerPolicy adaptive_policy_;
-  // Patch 4 — owned per worker. Built before worker.main() when the
-  // feature env var is set. Nullptr otherwise -> getConstraintField()
-  // returns nullptr and FlexGridGraph::getNextPathCost skips the
-  // field query (zero-cost no-op).
+  // Patch 4 — owned per worker. Built between init() and
+  // route_queue() inside worker.main() when policy.enabled. Nullptr
+  // otherwise -> getConstraintField() returns nullptr and
+  // FlexGridGraph::getNextPathCost skips the field query.
   std::unique_ptr<ConstraintField> constraint_field_;
+  ConstraintFieldPolicy constraint_field_policy_;
   // used in init route as gr boundary pin
   frOrderedIdMap<frNet*, std::set<std::pair<odb::Point, frLayerNum>>>
       boundaryPin_;

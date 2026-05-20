@@ -408,6 +408,23 @@ int FlexDRWorker::main(frDesign* design)
   if (!skipRouting_) {
     init(design);
   }
+  // Patch 4 Phase 4.2.b — build the constraint field NOW, between
+  // init() (which pulls committed connFigs from the design's frBlock
+  // into the worker's drNets) and route_queue() (where the maze
+  // search runs and queries the field). The field has to exist
+  // before route_queue starts; the source data has to exist before
+  // the build can populate it. This is the only seam where both
+  // hold.
+  if (!skipRouting_ && constraint_field_policy_.enabled) {
+    constraint_field_ = std::make_unique<ConstraintField>();
+    ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
+    builder.build(*constraint_field_,
+                  this,
+                  design,
+                  /*iter=*/getDRIter(),
+                  /*worker_id=*/0,
+                  /*batch_id=*/0);
+  }
   high_resolution_clock::time_point t1 = high_resolution_clock::now();
   if (!skipRouting_) {
     route_queue();
@@ -907,23 +924,28 @@ void FlexDR::processWorkersBatch(
       if (profile_on) {
         w_start = std::chrono::steady_clock::now();
       }
-      // Patch 4 — Phase 4.2 constraint-field build (worker-local).
-      // Built BEFORE the worker's main() and handed to the worker so
-      // FlexGridGraph::getNextPathCost can query it via
-      // getDRWorker()->getConstraintField() during maze expansion.
+      // Patch 4 Phase 4.2.b — pass policy to the worker so it can
+      // build the field itself between init() and route_queue() in
+      // main(), at the point where drNets have committed connFigs.
+      // No field-build here — main() does it.
       if (field_on) {
-        auto cf = std::make_unique<ConstraintField>();
-        ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
-        builder.build(*cf,
-                      workers_batch[i].get(),
-                      getDesign(),
-                      iter_,
-                      i,
-                      batch_id_now);
-        field_stats[i] = cf->stats();
-        workers_batch[i]->setConstraintField(std::move(cf));
+        workers_batch[i]->setConstraintFieldPolicy(constraint_field_policy_);
       }
       workers_batch[i]->main(getDesign());
+      // Collect stats from the worker post-main; the worker stored
+      // both the populated ConstraintField (used during routing) and
+      // its stats accessible via getConstraintField().
+      if (field_on) {
+        if (auto* cf = workers_batch[i]->getConstraintField()) {
+          field_stats[i] = cf->stats();
+        }
+        // Worker tagged with iter / batch / worker_id during build;
+        // overwrite from FlexDR side so the CSV row is consistent
+        // when the worker did not actually build (skip path).
+        field_stats[i].iter = iter_;
+        field_stats[i].batch_id = batch_id_now;
+        field_stats[i].worker_id = i;
+      }
       if (profile_on) {
         const auto w_end = std::chrono::steady_clock::now();
         auto& p = profiles[i];
