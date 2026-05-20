@@ -872,12 +872,18 @@ void FlexDR::processWorkersBatch(
         p.drc_mul = pol.drc_cost_mul;
         p.marker_mul = pol.marker_cost_mul;
         p.fixed_mul = pol.fixed_shape_cost_mul;
-        if (pol.drc_cost_mul >= 1.5f) {
-          p.policy_class = "severe";
-        } else if (pol.drc_cost_mul > 1.0f) {
-          p.policy_class = "hot";
-        } else {
+        // Patch 3.5.b — classify against the CURRENT iter's mul tiers,
+        // not a fixed threshold (1.5 was H-specific and miscategorised
+        // hot-tier workers as severe). Severe tier = the larger of
+        // hot_drc_mul/severe_drc_mul applied this iter; identity = 1.0.
+        const auto& iter_opts = adaptive_marker_model_->getOptions();
+        if (pol.drc_cost_mul <= 1.0f + 1e-6f) {
           p.policy_class = "identity";
+        } else if (pol.drc_cost_mul + 1e-6f
+                   >= iter_opts.severe_drc_mul) {
+          p.policy_class = "severe";
+        } else {
+          p.policy_class = "hot";
         }
         p.output_markers = workers_batch[i]->getNumMarkers();
         p.congested = workers_batch[i]->isCongested();
