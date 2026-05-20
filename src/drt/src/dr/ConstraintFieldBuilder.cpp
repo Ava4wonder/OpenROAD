@@ -65,74 +65,122 @@ void ConstraintFieldBuilder::build(ConstraintField& field,
   stats.batch_id = batch_id;
   stats.worker_id = worker_id;
 
-  // Phase 4.2 — iterate the worker's drNets; for each committed
-  // drVia in route + ext connFigs, splat into the cut-layer risk
-  // field, kernel sized by LEF cut spacing. Owner-net tracked so
-  // the maze query can subtract same-net contribution.
+  // Patch 4.3 — marker-conditioned splat source.
+  //
+  // P4.2 splatted every committed via in every worker every iter →
+  // degenerated into via-density penalty (-2.7% vias but +50% wall
+  // on test9). The corrected design only emits risk near markers
+  // the worker is actively trying to repair, with same-net filter
+  // already in place (per-net subtraction in ConstraintField).
+  //
+  // Two modes:
+  //   marker_conditioned = true (P4.3, default): bloat each marker
+  //     bbox; iterate worker drVias; splat ONLY if via origin lies
+  //     inside the bloated bbox. Same-net via still goes into the
+  //     per-net map for query-time subtraction.
+  //   marker_conditioned = false (P4.2 legacy): splat every via
+  //     regardless of marker proximity. Reachable via env var for
+  //     A/B comparison.
   if (design != nullptr && design->getTech() != nullptr) {
     auto* tech = design->getTech();
-    for (auto& net_uptr : worker->getNets()) {
-      drNet* net = net_uptr.get();
-      if (net == nullptr) {
-        continue;
+
+    // Pre-compute bloated marker bboxes when marker-conditioned.
+    std::vector<odb::Rect> marker_rois;
+    if (policy_.marker_conditioned) {
+      const auto& markers = worker->getMarkers();
+      marker_rois.reserve(markers.size());
+      for (const auto& m : markers) {
+        odb::Rect r = m.getBBox();
+        const int bloat = policy_.marker_bloat_dbu;
+        r.set_xlo(r.xMin() - bloat);
+        r.set_ylo(r.yMin() - bloat);
+        r.set_xhi(r.xMax() + bloat);
+        r.set_yhi(r.yMax() + bloat);
+        marker_rois.push_back(r);
       }
-      auto handle = [&](const std::vector<std::unique_ptr<drConnFig>>& figs) {
-        for (auto& fig_uptr : figs) {
-          if (fig_uptr == nullptr) {
-            continue;
-          }
-          if (fig_uptr->typeId() != drcVia) {
-            continue;
-          }
-          auto* via = static_cast<drVia*>(fig_uptr.get());
-          const auto* vd = via->getViaDef();
-          if (vd == nullptr) {
-            continue;
-          }
-          ++stats.num_vias_seen;
-          const frLayerNum cut_layer = vd->getCutLayerNum();
-          if (cut_layer < 0 || cut_layer >= num_layers) {
-            continue;
-          }
-          // LEF cut spacing — frLayer::getCutSpacingValue returns the
-          // worst (largest) cut-to-cut spacing constraint on that
-          // layer, falling back to 0 when none is defined.
-          const auto* layer = tech->getLayer(cut_layer);
-          int cut_spacing_dbu = 0;
-          if (layer != nullptr) {
-            cut_spacing_dbu = layer->getCutSpacingValue();
-          }
-          // Kernel radius: spacing rounded up to whole tiles, plus
-          // one for the cut's own tile coverage. Bounded so a huge
-          // LEF spacing doesn't cover the whole worker.
-          int kernel_tiles
-              = (cut_spacing_dbu + kTilePitchDbu - 1) / kTilePitchDbu;
-          if (kernel_tiles < 1) {
-            kernel_tiles = 1;  // at minimum splat own tile + 8-neighbour
-          }
-          if (kernel_tiles > 6) {
-            kernel_tiles = 6;
-          }
-          const odb::Point origin = via->getOrigin();
-          const int cx_tile = (origin.x() - drc_box.xMin()) / kTilePitchDbu;
-          const int cy_tile = (origin.y() - drc_box.yMin()) / kTilePitchDbu;
-          drNet* owner = net;
-          for (int dy = -kernel_tiles; dy <= kernel_tiles; ++dy) {
-            for (int dx = -kernel_tiles; dx <= kernel_tiles; ++dx) {
-              // Risk magnitude decays with manhattan distance.
-              const int dist = std::abs(dx) + std::abs(dy);
-              int risk = std::max(1, kernel_tiles + 1 - dist);
-              field.addViaRisk(static_cast<int>(cut_layer),
-                               cx_tile + dx,
-                               cy_tile + dy,
-                               risk * 10,
-                               owner);
-            }
-          }
+    }
+
+    auto inside_any_marker_roi = [&](const odb::Point& pt) {
+      if (!policy_.marker_conditioned) {
+        return true;  // legacy P4.2: splat everything
+      }
+      for (const auto& r : marker_rois) {
+        if (pt.x() >= r.xMin() && pt.x() <= r.xMax()
+            && pt.y() >= r.yMin() && pt.y() <= r.yMax()) {
+          return true;
         }
-      };
-      handle(net->getRouteConnFigs());
-      handle(net->getExtConnFigs());
+      }
+      return false;
+    };
+
+    // Early exit: marker-conditioned mode with no marker ROIs → no
+    // splats possible. (Worker passed the activation gate via the
+    // initNumMarkers check on the FlexDR side, but the live
+    // getMarkers() could still be empty on edge cases.)
+    if (!policy_.marker_conditioned || !marker_rois.empty()) {
+      for (auto& net_uptr : worker->getNets()) {
+        drNet* net = net_uptr.get();
+        if (net == nullptr) {
+          continue;
+        }
+        auto handle
+            = [&](const std::vector<std::unique_ptr<drConnFig>>& figs) {
+                for (auto& fig_uptr : figs) {
+                  if (fig_uptr == nullptr) {
+                    continue;
+                  }
+                  if (fig_uptr->typeId() != drcVia) {
+                    continue;
+                  }
+                  auto* via = static_cast<drVia*>(fig_uptr.get());
+                  const auto* vd = via->getViaDef();
+                  if (vd == nullptr) {
+                    continue;
+                  }
+                  ++stats.num_vias_seen;
+                  const odb::Point origin = via->getOrigin();
+                  if (!inside_any_marker_roi(origin)) {
+                    continue;  // P4.3 marker-conditioned filter
+                  }
+                  const frLayerNum cut_layer = vd->getCutLayerNum();
+                  if (cut_layer < 0 || cut_layer >= num_layers) {
+                    continue;
+                  }
+                  const auto* layer = tech->getLayer(cut_layer);
+                  int cut_spacing_dbu = 0;
+                  if (layer != nullptr) {
+                    cut_spacing_dbu = layer->getCutSpacingValue();
+                  }
+                  int kernel_tiles = (cut_spacing_dbu + kTilePitchDbu - 1)
+                                     / kTilePitchDbu;
+                  if (kernel_tiles < 1) {
+                    kernel_tiles = 1;
+                  }
+                  if (kernel_tiles > 6) {
+                    kernel_tiles = 6;
+                  }
+                  const int cx_tile
+                      = (origin.x() - drc_box.xMin()) / kTilePitchDbu;
+                  const int cy_tile
+                      = (origin.y() - drc_box.yMin()) / kTilePitchDbu;
+                  drNet* owner = net;
+                  for (int dy = -kernel_tiles; dy <= kernel_tiles; ++dy) {
+                    for (int dx = -kernel_tiles; dx <= kernel_tiles; ++dx) {
+                      const int dist = std::abs(dx) + std::abs(dy);
+                      const int risk
+                          = std::max(1, kernel_tiles + 1 - dist);
+                      field.addViaRisk(static_cast<int>(cut_layer),
+                                       cx_tile + dx,
+                                       cy_tile + dy,
+                                       risk * 10,
+                                       owner);
+                    }
+                  }
+                }
+              };
+        handle(net->getRouteConnFigs());
+        handle(net->getExtConnFigs());
+      }
     }
   }
 

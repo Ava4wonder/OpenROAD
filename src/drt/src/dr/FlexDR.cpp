@@ -260,6 +260,39 @@ FlexDR::FlexDR(TritonRoute* router,
       } catch (...) {
       }
     }
+    // Patch 4.3 — marker-conditioned + activation policy env vars.
+    auto read_bool_env = [](const char* name, bool fallback) {
+      const char* v = std::getenv(name);
+      if (v == nullptr || v[0] == '\0') {
+        return fallback;
+      }
+      return v[0] != '0';
+    };
+    constraint_field_policy_.marker_conditioned = read_bool_env(
+        "OPENROAD_DRT_CF_MARKER_CONDITIONED",
+        constraint_field_policy_.marker_conditioned);
+    constraint_field_policy_.skip_iter_zero = read_bool_env(
+        "OPENROAD_DRT_CF_SKIP_ITER_ZERO",
+        constraint_field_policy_.skip_iter_zero);
+    constraint_field_policy_.skip_clean_workers = read_bool_env(
+        "OPENROAD_DRT_CF_SKIP_CLEAN_WORKERS",
+        constraint_field_policy_.skip_clean_workers);
+    if (const char* mb = std::getenv("OPENROAD_DRT_CF_MARKER_BLOAT_DBU");
+        mb != nullptr && mb[0] != '\0') {
+      try {
+        constraint_field_policy_.marker_bloat_dbu
+            = std::stoi(std::string(mb));
+      } catch (...) {
+      }
+    }
+    if (const char* sn = std::getenv("OPENROAD_DRT_CF_SAME_NET_WEIGHT");
+        sn != nullptr && sn[0] != '\0') {
+      try {
+        constraint_field_policy_.same_net_weight
+            = std::stof(std::string(sn));
+      } catch (...) {
+      }
+    }
   }
 }
 
@@ -411,19 +444,27 @@ int FlexDRWorker::main(frDesign* design)
   // Patch 4 Phase 4.2.b — build the constraint field NOW, between
   // init() (which pulls committed connFigs from the design's frBlock
   // into the worker's drNets) and route_queue() (where the maze
-  // search runs and queries the field). The field has to exist
-  // before route_queue starts; the source data has to exist before
-  // the build can populate it. This is the only seam where both
-  // hold.
+  // search runs and queries the field).
+  // Patch 4.3 — conservative activation policy: skip iter 0 (no
+  // markers to inform "risk" yet + corrupting initial topology was
+  // a documented P4.2 failure mode) and skip workers that started
+  // with 0 markers (these don't need any DRC-risk guidance).
   if (!skipRouting_ && constraint_field_policy_.enabled) {
-    constraint_field_ = std::make_unique<ConstraintField>();
-    ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
-    builder.build(*constraint_field_,
-                  this,
-                  design,
-                  /*iter=*/getDRIter(),
-                  /*worker_id=*/0,
-                  /*batch_id=*/0);
+    const bool skip_for_iter_zero = constraint_field_policy_.skip_iter_zero
+                                    && getDRIter() == 0;
+    const bool skip_for_clean
+        = constraint_field_policy_.skip_clean_workers
+          && getInitNumMarkers() == 0;
+    if (!skip_for_iter_zero && !skip_for_clean) {
+      constraint_field_ = std::make_unique<ConstraintField>();
+      ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
+      builder.build(*constraint_field_,
+                    this,
+                    design,
+                    /*iter=*/getDRIter(),
+                    /*worker_id=*/0,
+                    /*batch_id=*/0);
+    }
   }
   high_resolution_clock::time_point t1 = high_resolution_clock::now();
   if (!skipRouting_) {

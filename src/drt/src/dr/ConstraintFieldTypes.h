@@ -48,6 +48,23 @@ struct ConstraintFieldPolicy
   int max_risk_cost = 1000;
   // Stats CSV output directory. Empty = cwd.
   std::string stats_dir;
+
+  // Patch 4.3 — marker-conditioned + conservative activation.
+  // Default to the new semantics (marker-conditioned, repair-stage-
+  // only) because P4.2's blanket via splat was a documented
+  // negative result on test9. The legacy P4.2 behaviour stays
+  // reachable via env override (set marker_conditioned=0).
+  // Env vars:
+  //   OPENROAD_DRT_CF_MARKER_CONDITIONED=0/1 (default 1)
+  //   OPENROAD_DRT_CF_SKIP_ITER_ZERO=0/1     (default 1)
+  //   OPENROAD_DRT_CF_SKIP_CLEAN_WORKERS=0/1 (default 1)
+  //   OPENROAD_DRT_CF_MARKER_BLOAT_DBU=<int> (default 2000 = 2um)
+  //   OPENROAD_DRT_CF_SAME_NET_WEIGHT=<flt>  (default 0.0 — discount)
+  bool marker_conditioned = true;
+  bool skip_iter_zero = true;
+  bool skip_clean_workers = true;
+  int marker_bloat_dbu = 2000;
+  float same_net_weight = 0.0f;
 };
 
 // Patch 4 — one CSV row per worker field build. Populated by
