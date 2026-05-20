@@ -128,6 +128,21 @@ class AdaptiveMarkerModel
     // Env var: OPENROAD_DRT_ADAPTIVE_K_TAPER=1 enables.
     bool k_taper = false;
 
+    // Patch 5 — iter-0 uniform DRC pressure. At iter 0 the model has
+    // no marker history (heat array is empty until observeGlobal
+    // Markers runs at end-of-iter-0). The standard policy gate
+    // (iter < 1 → identity) therefore returns identity for every
+    // worker. But P3.5 profiling showed iter 0 = 4-5 min of test9's
+    // 10:18 total wall — a meaningful fraction of runtime. P5
+    // overrides identity at iter 0 with a uniform DRC mul applied
+    // to EVERY worker (no heat sensing, just blanket pressure).
+    // Hypothesis: even without per-region targeting, raising DRC
+    // pressure during initial routing reduces marker generation
+    // → faster iter 0 + 1.
+    // Env var: OPENROAD_DRT_ADAPTIVE_ITER0_DRC_MUL=<float> (default
+    // 1.0 = off). Values 1.25 / 1.50 / 2.00 to be swept.
+    float iter0_drc_mul = 1.0f;
+
     // Patch 3.5 — runtime profiling. Default-OFF. Gated by env vars:
     //   OPENROAD_DRT_ADAPTIVE_PROFILE=1
     //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR=/path/to/dir (optional;

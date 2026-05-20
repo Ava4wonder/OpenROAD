@@ -301,6 +301,13 @@ AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
   // reflects real DRC data, so it's the earliest meaningful
   // activation point.
   if (iter < 1) {
+    // Patch 5 — iter-0 uniform DRC pressure. Override identity when
+    // configured. No heat sensing — every worker sees the same mul.
+    if (options_.iter0_drc_mul > 1.0f + 1e-6f) {
+      policy.enabled = true;
+      policy.drc_cost_mul = options_.iter0_drc_mul;
+      // marker_mul + fixed_shape_mul stay at 1.0 (locked H values).
+    }
     return policy;
   }
 
