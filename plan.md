@@ -88,6 +88,17 @@ FlexDR ingests after `#pragma omp parallel for` returns.
      test9-on-this-design ceiling.
   4. **Patch 4 — Constraint-Field-Guided Detailed Routing**
 
+     **Patch 4 RAMPED DOWN 2026-05-21** — convergence-safe at V1
+     P4.3 but ceiling too low to be worth further investment.
+     Code stays on branch behind `OPENROAD_DRT_CONSTRAINT_FIELD`
+     env var (default-OFF, disabled-path bit-identical to P3.3).
+     Documented as a positive milestone for projection-indexed
+     marker-conditioned field design; the actuator (via/cut
+     spacing) just targets a minor DRC class while the dominant
+     test9 runtime is planar shorts + metal-spacing + congestion.
+     Returning to AdaptiveMarkerModel main track for next major
+     algorithmic exploration.
+
      **Phase 4.1 ✅ + 4.2 V1 ✅ — CLOSED AS NEGATIVE RESULT** on
      `outer_loop_plus` at commits `a5574aec12` (skeleton),
      `d2edfe6a89` (V1 cost), `aaf29688cb` (build seam),
@@ -185,7 +196,19 @@ FlexDR ingests after `#pragma omp parallel for` returns.
          expansions, FlexGC time, route_queue size, pathological
          worker time)
 
-     **Deferred to Phase 4.4+ if 4.3 wins**:
+     **Phase 4.3 V1 ✅ — Convergence-safety milestone PASSED**
+     (commit `5fbda56f1a`). test9 vs H_no_field baseline:
+     same iter count (5), same wall (10:18), WL +0.037%, vias
+     −0.17%, iter-2 −7.0%, final DRC = 0. 23× fewer splats than
+     P4.2 (220k vs 5M) because marker-conditioned ROI filter +
+     projection index. Activation policy fired correctly:
+     0% iter 0, 93.8% iter 1, 13.0% iter 2, 2.4% iter 3.
+     **CLOSED EARLY** — gains too marginal vs main-track
+     AdaptiveMarkerModel exploration; field's actuator (cut
+     spacing) is too narrow for the dominant runtime cost. The
+     V1 codebase is correct and reusable if we revisit.
+
+     **Deferred to Phase 4.4+ if 4.3 wins (not pursued)**:
        * Planar metal-spacing dilation field (separate channel)
        * EOL / corner directional kernels
        * Global (not just worker-local) field

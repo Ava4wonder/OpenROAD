@@ -172,6 +172,25 @@ Stop pursuing a patch K if:
   * K's feature-disabled regression run differs from upstream-master
     baseline (build-green rule violation).
 
+## Patch 4 — RAMPED DOWN 2026-05-21
+
+After Patch 4.3 V1 passed the convergence-safety bar on test9
+(same iter count, same wall, vias −0.17 %, iter-2 −7 %), we
+ramped down Patch 4 to return to the AdaptiveMarkerModel main
+track. Reasoning: the field's actuator is via/cut spacing — a
+minor DRC class — while the dominant runtime cost on test9 is
+planar shorts + metal-spacing + congestion (per P3.5 profiling
+showing iter 0+1 = 76 % of wall). Even tuned aggressively, the
+ceiling on field-only speedup is small relative to what's
+likely available from main-track AdaptiveMarkerModel work.
+
+Code for Patches 4.1-4.3 stays on the branch behind the env var
+`OPENROAD_DRT_CONSTRAINT_FIELD` (default-OFF, disabled-path
+bit-identical to P3.3 H baseline). The V1 codebase
+(ProjectionIndex + marker-conditioned splat + categorical cost
+model + extended instrumentation) is correct and reusable if
+we revisit later.
+
 ## Patch 4 Phase 4.2 — CLOSED as NEGATIVE result (2026-05-20)
 
 Phase 4.2 V1 (via/cut spacing field with maze-cost integration)
