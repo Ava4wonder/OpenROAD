@@ -94,6 +94,19 @@ struct ConstraintFieldStats
   // Resource accounting.
   double build_wall_ms = 0.0;
   int memory_bytes = 0;
+
+  // Patch 4.3 — instrumentation fields. Default -1 / 0 so non-P4.3
+  // run paths still produce valid rows.
+  int proj_index_features = -1;
+  int proj_index_peak_layer = -1;
+  int num_markers_used = -1;  // worker.getMarkers().size() at build
+  // Maze-side counters (filled post-main from FlexGridGraph). -1 if
+  // gridGraph didn't track them this iter.
+  int maze_expansions = -1;
+  // Query-side counters (mutated by ConstraintField at lookup time).
+  int field_query_count = 0;
+  int field_query_hit_count = 0;
+  long long field_query_total_cost_added = 0;  // raw aggregate of added cost
 };
 
 }  // namespace drt

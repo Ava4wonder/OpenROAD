@@ -31,6 +31,7 @@ add_library(drt_lib
   src/dr/AdaptiveMarkerUtils.cpp
   src/dr/ConstraintField.cpp
   src/dr/ConstraintFieldBuilder.cpp
+  src/dr/ProjectionIndex.cpp
   src/dr/FlexDR_conn.cpp
   src/dr/FlexDR_init.cpp
   src/dr/FlexDR.cpp

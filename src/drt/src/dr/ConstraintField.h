@@ -104,8 +104,10 @@ class ConstraintField
   std::unordered_map<drNet*, std::uint32_t> owner_to_id_;
   std::uint32_t next_owner_id_ = 1;  // 0 reserved for "none"
 
-  // Stats populated by the builder; read by the FlexDR-side CSV writer.
-  ConstraintFieldStats stats_;
+  // Stats populated by the builder; read by the FlexDR-side CSV
+  // writer. Mutable because getViaRisk() is const but bumps the
+  // query-side counters (P4.3 instrumentation).
+  mutable ConstraintFieldStats stats_;
 
   std::size_t cellIdx(int layer, int ty, int tx) const;
   std::uint32_t getOrAssignOwnerId(drNet* owner_net);

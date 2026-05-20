@@ -108,6 +108,7 @@ int ConstraintField::getViaRisk(int cut_layer,
                                 int dbu_y,
                                 drNet* routing_net) const
 {
+  ++stats_.field_query_count;  // P4.3 instrumentation
   if (!initialized_ || via_risk_.empty()) {
     return 0;
   }
@@ -137,6 +138,10 @@ int ConstraintField::getViaRisk(int cut_layer,
         }
       }
     }
+  }
+  if (risk > 0) {
+    ++stats_.field_query_hit_count;
+    stats_.field_query_total_cost_added += risk;
   }
   return risk;
 }

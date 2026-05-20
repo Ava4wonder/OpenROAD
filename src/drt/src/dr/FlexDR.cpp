@@ -1047,7 +1047,12 @@ void FlexDR::processWorkersBatch(
            << "spacing_splats,cut_splats,"
            << "field_nonzero_tiles,field_max_risk,"
            << "field_mean_nonzero_risk,"
-           << "build_wall_ms,memory_bytes\n";
+           << "build_wall_ms,memory_bytes,"
+           // Patch 4.3 instrumentation columns:
+           << "proj_index_features,proj_index_peak_layer,"
+           << "num_markers_used,maze_expansions,"
+           << "field_query_count,field_query_hit_count,"
+           << "field_query_total_cost_added\n";
         constraint_field_header_written_ = true;
       }
       for (const auto& s : field_stats) {
@@ -1059,7 +1064,11 @@ void FlexDR::processWorkersBatch(
            << s.num_vias_seen << ',' << s.spacing_splats << ','
            << s.cut_splats << ',' << s.field_nonzero_tiles << ','
            << s.field_max_risk << ',' << s.field_mean_nonzero_risk
-           << ',' << s.build_wall_ms << ',' << s.memory_bytes << '\n';
+           << ',' << s.build_wall_ms << ',' << s.memory_bytes
+           << ',' << s.proj_index_features << ',' << s.proj_index_peak_layer
+           << ',' << s.num_markers_used << ',' << s.maze_expansions
+           << ',' << s.field_query_count << ',' << s.field_query_hit_count
+           << ',' << s.field_query_total_cost_added << '\n';
       }
     }
   }
