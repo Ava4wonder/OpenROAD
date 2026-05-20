@@ -172,6 +172,80 @@ Stop pursuing a patch K if:
   * K's feature-disabled regression run differs from upstream-master
     baseline (build-green rule violation).
 
+## Patch 4 Phase 4.2 — CLOSED as NEGATIVE result (2026-05-20)
+
+Phase 4.2 V1 (via/cut spacing field with maze-cost integration)
+shipped through 4 commits (a5574aec12 → c5292da25f). Test9 H + field
+vs H_no_field result:
+
+| Metric | H_no_field | H_plus_field (λ=1.0) | Δ |
+|---|---:|---:|---|
+| Outer iters | 5 | 7 | **+40 %** |
+| Wall | 10:18 | 15:28 | **+50 %** |
+| Trajectory | 92,709→1,200→243→1→0 | 93,598→1,373→317→5→2→2→0 | worse |
+| Vias | 2,288,021 | 2,226,314 | **−2.7 %** (only positive signal) |
+| DRC final | 0 ✓ | 0 ✓ | converges |
+
+**The design diagnosis (sharp):**
+
+> Phase 4.2 via/cut field targets via/cut risk.
+> The dominant runtime/violation cost on test9 is iter 0/1 massive
+> marker count — mostly planar shorts, metal-spacing, and congestion
+> conflicts, expensive workers. **The via/cut field is the wrong
+> first speedup actuator.**
+
+P3.5 profiling already showed iter 0+1 dominate wall (76 % on
+test9) with 12× p99-to-max worker imbalance. Those expensive iters
+are expensive because of *planar* DRC repair work, not via-row
+optimisation. P4.2's broad via-density penalty moved routing but
+didn't reduce the actual repair cost — and in fact made it worse
+by destabilising the initial topology.
+
+A secondary pathology: the field activated on EVERY worker
+(including clean ones), in EVERY iter (including iter 0 where no
+markers exist to inform "risk"), and the splat source was blanket
+"every via in worker's drcBox" rather than marker-conditioned
+neighbourhoods. Net effect = via-density penalty, not DRC-risk
+guidance.
+
+## Patch 4.3 thesis — Projection-Indexed, Marker-Conditioned Fields
+
+The field should not represent generic via density. It should
+represent estimated future repair difficulty:
+
+> `field_cost(candidate) ≈ risk that this candidate will create or
+>  preserve expensive exact DRC markers`
+
+Four corrections from P4.2:
+
+  1. **Net-aware lookup** — already plumbed in P4.2.c
+     (`current_routing_net_` set in `search()`, passed to
+     `getViaRisk`); P4.3 extends with per-category weights:
+     `same_net_weight = 0`, `fixed > marker_conditioned > diff_net`.
+
+  2. **Marker-conditioned generation** — splats only from bloated
+     `worker.getInitMarkers()` boxes + AdaptiveMarkerModel hotspot
+     regions. Clean workers build no field.
+
+  3. **Projection-filtered candidates** — x/y-interval + layer +
+     owner + shape kind index; emit splats only for rule-relevant
+     geometric pairs.
+
+  4. **Conservative activation** — default-OFF for iter 0,
+     cleanup, clean workers, low-global-marker regime.
+
+Cost model becomes categorical (per-shape-kind weights) instead of
+single λ-scalar. Same-net contribution explicitly 0.
+
+Initial implementation should NOT chase speedup. The first goal is
+**convergence-safe guidance** — final DRC = 0, no iter-count
+regression, no worse trajectory. Runtime optimization comes only
+after the field stops hurting convergence.
+
+Ablation plan A0..A5 in plan.md. Required new instrumentation
+(per-worker maze pushed/popped, FlexGC sub-phase wall, route_queue
+size) extends P3.5 profiling.
+
 ## Patch 4 thesis — Constraint-Field-Guided Detailed Routing
 
 Patch 3 closed with a sharp design lesson (heat = sensor, DRC mul =
@@ -245,13 +319,23 @@ metrics, success criteria, failure modes.
      guide-induced central-congestion failure mode that DRC-only
      policy cannot break.
 
-  7. **Patch 4 = Constraint-Field-Guided DRT** (IN FLIGHT — new
-     active branch). Implementing Phase 4.1 skeleton + Phase 4.2
-     via/cut spacing field. Default-off (env
-     `OPENROAD_DRT_CONSTRAINT_FIELD=1`). Eval order: test9 smoke,
-     test2, test10. See plan.md for full architecture.
+  7. **Patch 4 Phase 4.2** — CLOSED as negative result (this
+     section above; commits a5574aec12 → c5292da25f). Code stays
+     on the branch behind the OPENROAD_DRT_CONSTRAINT_FIELD env
+     var (default-OFF, so disabled-path is bit-identical to P3.3).
+     Same-net filter + lambda scaling left in place — they're not
+     wrong, they're just insufficient on their own.
 
-  8. **Patch 5 / Patch 6 deprioritised**: rule-aware DRC policy +
-     layer-aware actuator. Subsumed by Patch 4 once it ships —
-     becomes a refinement (choose lambda_cut / lambda_spacing per
-     rule class) rather than a separate patch.
+  8. **Patch 4.3** (NEW ACTIVE BRANCH) —
+     Projection-Indexed, Marker-Conditioned Constraint Fields.
+     Implementation order: (a) marker-conditioned splat source +
+     activation policy (replace blanket via splat with
+     getInitMarkers-bloated regions); (b) per-shape-kind cost
+     weights; (c) projection index over candidates; (d) extended
+     instrumentation (maze push/pop + FlexGC sub-phase wall +
+     route_queue size). Ablation A0..A5. See plan.md.
+
+  9. **Patch 5 / Patch 6 deprioritised**: rule-aware DRC policy +
+     layer-aware actuator. Subsumed by Patch 4 once 4.3 ships —
+     becomes a refinement (per-rule-class field weights) rather
+     than a separate patch.

@@ -86,41 +86,111 @@ FlexDR ingests after `#pragma omp parallel for` returns.
      the third is policy-dependent and removed by H. So the 4-iter
      test9 tail is structural, not a tuning issue, and H is at the
      test9-on-this-design ceiling.
-  4. **Patch 4 — REDESIGNED**: Constraint-Field-Guided Detailed Routing
-     (proactive DRC-aware cost layer). The original "guide relaxation"
-     goal was abandoned: Patch 3.5 profiling showed wall time is
-     dominated by early expensive iters and pathological workers, not
-     by guide-imposed detours. Marker-driven repair is reactive; we
-     need a proactive spatial constraint layer so the maze search can
-     see DRC risk BEFORE exact markers are materialised.
+  4. **Patch 4 — Constraint-Field-Guided Detailed Routing**
 
-     **Thesis:** move DRT partially from
-       `route → exact-check → marker → repair`
-     toward
-       `compile geometry+rules → spatial risk fields → DRC-aware path
-        search → exact-check for certification + remaining repair`
+     **Phase 4.1 ✅ + 4.2 V1 ✅ — CLOSED AS NEGATIVE RESULT** on
+     `outer_loop_plus` at commits `a5574aec12` (skeleton),
+     `d2edfe6a89` (V1 cost), `aaf29688cb` (build seam),
+     `c5292da25f` (same-net filter + lambda).
 
-     **MVP scope** (default-off, env `OPENROAD_DRT_CONSTRAINT_FIELD=1`):
-       * Phase 4.1 — Skeleton: `ConstraintField{,Builder,Types}.{h,cpp}`,
-         worker-local fields, `constraint_field_stats.csv`. No
-         routing behaviour change.
-       * Phase 4.2 — Via/cut spacing risk field: splat existing vias
-         and cuts into per-cut-layer uint16_t risk tiles; query
-         during FlexGridGraph via expansion; add cost term
-         `via_cost += lambda_cut * F_cut`. Cost-only (not blockage);
-         exact FlexGC remains the legality oracle.
+     test9 readout (H_no_field vs H_plus_field at λ=1.0):
+       * Iters: 5 → 7 (+40%)
+       * Wall: 10:18 → 15:28 (+50%)
+       * Trajectory: 92,709→1,200→243→1→0 vs 93,598→1,373→317→5→2→2→0
+       * Vias: 2,288,021 → 2,226,314 (−2.7%) ← only positive signal
+       * Same-net filter (P4.2.c) shifted iter 0 by only 49 markers
+         (93,598 → 93,549) → filter is not the dominant fix.
 
-     **Strict correctness:** field is advisory. Disabling the env var
-     must restore exactly upstream-master / Patch 3.3-H behaviour.
-     Never suppresses exact DRC.
+     **Why P4.2 failed (the design diagnosis):**
 
-     **Deferred** (future Patch 4.3/4.4 if MVP wins):
-       * Planar metal-spacing dilation field
+       Phase 4.2's via/cut field targets via/cut risk.
+       The dominant runtime/violation problem (per P3.5 profiling)
+       is iter 0/1 massive marker count — mostly planar shorts,
+       metal-spacing, and congestion-style conflicts, expensive
+       workers. **The via/cut field is the wrong first speedup
+       actuator.** It moved routing decisions (fewer vias) but
+       didn't address the planar-DRC repair cost that actually
+       dominates wall time.
+
+       The broader pathology: the field degenerated into a
+       broad via-density penalty rather than DRC-risk guidance,
+       because (a) it splats blindly from every existing via,
+       (b) it activates on all workers including clean ones,
+       and (c) it runs during iter 0 where no markers yet exist
+       to inform "risk".
+
+     **Phase 4.3 — REDESIGNED: Projection-Indexed,
+     Marker-Conditioned Constraint Fields**
+
+     Reframes the field from "via-density penalty" to "surgical
+     DRC-risk guidance". Four corrections:
+
+       1. **Net-aware field evaluation** — every lookup carries the
+          routing drNet. `same_net_weight = 0` by default so a worker
+          can never penalise its own committed structures. Per-shape
+          weights by kind: fixed > marker-conditioned > diff-net >>
+          same-net.
+
+       2. **Marker-conditioned field generation** — only build
+          splats from neighbourhoods of `worker.getInitMarkers()`
+          (bloated bboxes) + persistent AdaptiveMarkerModel
+          hotspots. No blanket via splatting. Clean workers get NO
+          field.
+
+       3. **Projection-filtered candidate extraction** — before
+          splatting, run an x-interval / y-interval / layer / owner
+          projection query and emit splats only for rule-relevant
+          geometric pairs (cut-spacing pair: same cut layer within
+          distance threshold; metal-spacing: projected overlap
+          with PRL; EOL: directional projection).
+
+       4. **Conservative activation policy** — default-OFF for:
+          iter 0 (preserves initial topology), cleanup phase
+          (preserves stubborn-repair convergence), workers with 0
+          markers, global marker count below threshold. Default-ON
+          only for repair-stage workers with markers OR in known
+          hotspot regions.
+
+     **Cost model** (categorical, not single-scalar):
+     ```
+     cost += λ_diff_net   * diff_net_risk
+     cost += λ_fixed      * fixed_obj_risk
+     cost += λ_marker     * marker_conditioned_risk
+     cost += λ_hotspot    * persistent_hotspot_risk
+     cost -= λ_same_net   * same_net_reconnect_discount
+     ```
+
+     **Strict correctness** unchanged: field advisory, never
+     suppresses exact DRC, env-OFF returns to upstream-equivalent.
+
+     **Required instrumentation** (per worker, in addition to
+     P3.5 profiling fields):
+       * field build time
+       * field lookup time
+       * splats / capped splats / charged candidates
+       * maze pushed/popped/expanded counts
+       * route_queue size
+       * FlexGCWorker::main + checkMetalSpacing/Cut/MetalShape time
+       * markers generated per worker
+
+     **Ablation plan (A0..A5)** — see Patch 4.3 design doc;
+     evaluated on test9 + at least 2 other designs.
+
+     **Success criteria** (primary):
+       * Final DRC = 0
+       * No iter-count regression vs H_no_field
+       * No worse violation trajectory
+       * Wall within ±3 % of H_no_field
+       * Reduction in at least one expensive component (maze
+         expansions, FlexGC time, route_queue size, pathological
+         worker time)
+
+     **Deferred to Phase 4.4+ if 4.3 wins**:
+       * Planar metal-spacing dilation field (separate channel)
        * EOL / corner directional kernels
-       * Projection-indexed exact-candidate prefilter
-       * Marker-history diffusion
        * Global (not just worker-local) field
-       * GPU/fluid solver
+       * GPU / fluid solver
+       * Marker-history diffusion potential field
 
   5. **Patch 4 (guide relaxation) — DROPPED**. Subsumed by the
      redesigned Patch 4 above. The original 3.1c+d sweep already
