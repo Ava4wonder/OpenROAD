@@ -907,20 +907,21 @@ void FlexDR::processWorkersBatch(
       if (profile_on) {
         w_start = std::chrono::steady_clock::now();
       }
-      // Patch 4 — Phase 4.1 constraint-field build (worker-local).
-      // Built before the worker's main() so future phases can pass
-      // it through to FlexGridGraph maze cost. In Phase 4.1 it is
-      // discarded after stats are captured — no routing change.
+      // Patch 4 — Phase 4.2 constraint-field build (worker-local).
+      // Built BEFORE the worker's main() and handed to the worker so
+      // FlexGridGraph::getNextPathCost can query it via
+      // getDRWorker()->getConstraintField() during maze expansion.
       if (field_on) {
-        ConstraintField cf;
+        auto cf = std::make_unique<ConstraintField>();
         ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
-        builder.build(cf,
+        builder.build(*cf,
                       workers_batch[i].get(),
                       getDesign(),
                       iter_,
                       i,
                       batch_id_now);
-        field_stats[i] = cf.stats();
+        field_stats[i] = cf->stats();
+        workers_batch[i]->setConstraintField(std::move(cf));
       }
       workers_batch[i]->main(getDesign());
       if (profile_on) {

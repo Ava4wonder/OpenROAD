@@ -470,6 +470,31 @@ frCost FlexGridGraph::getNextPathCost(const FlexWavefrontGrid& currGrid,
         }
       }
     }
+    // outer_loop_plus Patch 4 Phase 4.2 — constraint-field via cost.
+    // Default-OFF: when no ConstraintField is attached the call below
+    // is a single nullptr branch + no further work. When present, the
+    // field returns 0 risk for tiles untouched by any splat (sparse
+    // map miss). Otherwise the risk is added as a small cost term.
+    if (drWorker_ != nullptr) {
+      if (auto* cf = drWorker_->getConstraintField(); cf != nullptr) {
+        odb::Point pt;
+        getPoint(pt, gridX, gridY);
+        const frLayerNum routing_lnum = getLayerNum(gridZ);
+        // For dir=U the via uses the cut layer ABOVE this routing
+        // layer; for dir=D it uses the one BELOW. Cut frLayerNums lie
+        // between consecutive routing layer frLayerNums in
+        // OpenROAD's tech layer stack.
+        const int cut_lnum
+            = (dir == frDirEnum::U) ? routing_lnum + 1 : routing_lnum - 1;
+        // V1: no same-net subtraction (routing_net = nullptr).
+        // Phase 4.2.b will plumb the routing drNet through search so
+        // own-net via rows aren't self-penalised.
+        const int risk = cf->getViaRisk(cut_lnum, pt.x(), pt.y(), nullptr);
+        if (risk > 0) {
+          nextPathCost += static_cast<frCost>(risk);
+        }
+      }
+    }
   }
 
   // via2turn forbidden len enablement

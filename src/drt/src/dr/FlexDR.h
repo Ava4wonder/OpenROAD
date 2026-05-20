@@ -18,7 +18,7 @@
 #include "boost/serialization/export.hpp"
 #include "db/drObj/drAccessPattern.h"
 #include "dr/AdaptiveMarkerTypes.h"  // outer_loop_plus Patch 3 — for AdaptiveWorkerPolicy
-#include "dr/ConstraintFieldTypes.h"  // outer_loop_plus Patch 4
+#include "dr/ConstraintField.h"      // outer_loop_plus Patch 4 — full include needed for unique_ptr member
 #include "db/drObj/drFig.h"
 #include "db/drObj/drMarker.h"
 #include "db/drObj/drNet.h"
@@ -419,6 +419,18 @@ class FlexDRWorker
   {
     return adaptive_policy_;
   }
+  // outer_loop_plus Patch 4 — per-worker constraint field. Built by
+  // FlexDR before main() when OPENROAD_DRT_CONSTRAINT_FIELD=1.
+  // FlexGridGraph queries it via getDRWorker()->getConstraintField()
+  // during maze expansion.
+  void setConstraintField(std::unique_ptr<ConstraintField> field)
+  {
+    constraint_field_ = std::move(field);
+  }
+  ConstraintField* getConstraintField() const
+  {
+    return constraint_field_.get();
+  }
   void setMarkers(std::vector<frMarker>& in)
   {
     markers_.clear();
@@ -603,6 +615,11 @@ class FlexDRWorker
   // multipliers 1.0) when the adaptive marker model is disabled —
   // worker behaves like upstream master.
   AdaptiveWorkerPolicy adaptive_policy_;
+  // Patch 4 — owned per worker. Built before worker.main() when the
+  // feature env var is set. Nullptr otherwise -> getConstraintField()
+  // returns nullptr and FlexGridGraph::getNextPathCost skips the
+  // field query (zero-cost no-op).
+  std::unique_ptr<ConstraintField> constraint_field_;
   // used in init route as gr boundary pin
   frOrderedIdMap<frNet*, std::set<std::pair<odb::Point, frLayerNum>>>
       boundaryPin_;

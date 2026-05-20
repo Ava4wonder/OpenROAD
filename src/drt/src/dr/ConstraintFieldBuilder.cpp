@@ -14,10 +14,14 @@
 
 #include "dr/ConstraintFieldBuilder.h"
 
+#include "db/drObj/drNet.h"
+#include "db/drObj/drVia.h"
 #include "db/obj/frBlock.h"
 #include "db/tech/frLayer.h"
 #include "db/tech/frTechObject.h"
+#include "db/tech/frViaDef.h"
 #include "dr/FlexDR.h"
+#include "frBaseTypes.h"
 #include "frDesign.h"
 #include "utl/Logger.h"
 
@@ -60,21 +64,89 @@ void ConstraintFieldBuilder::build(ConstraintField& field,
   stats.iter = iter;
   stats.batch_id = batch_id;
   stats.worker_id = worker_id;
-  // Phase 4.1: just-initialised, no splats. Counts stay at 0; the
-  // CSV row documents that the field is wired but doesn't change
-  // routing.
-  stats.num_shapes_seen = 0;
-  stats.num_vias_seen = 0;
-  stats.spacing_splats = 0;
-  stats.cut_splats = 0;
+
+  // Phase 4.2 — iterate the worker's drNets; for each committed
+  // drVia in route + ext connFigs, splat into the cut-layer risk
+  // field, kernel sized by LEF cut spacing. Owner-net tracked so
+  // the maze query can subtract same-net contribution.
+  if (design != nullptr && design->getTech() != nullptr) {
+    auto* tech = design->getTech();
+    for (auto& net_uptr : worker->getNets()) {
+      drNet* net = net_uptr.get();
+      if (net == nullptr) {
+        continue;
+      }
+      auto handle = [&](const std::vector<std::unique_ptr<drConnFig>>& figs) {
+        for (auto& fig_uptr : figs) {
+          if (fig_uptr == nullptr) {
+            continue;
+          }
+          if (fig_uptr->typeId() != drcVia) {
+            continue;
+          }
+          auto* via = static_cast<drVia*>(fig_uptr.get());
+          const auto* vd = via->getViaDef();
+          if (vd == nullptr) {
+            continue;
+          }
+          ++stats.num_vias_seen;
+          const frLayerNum cut_layer = vd->getCutLayerNum();
+          if (cut_layer < 0 || cut_layer >= num_layers) {
+            continue;
+          }
+          // LEF cut spacing — frLayer::getCutSpacingValue returns the
+          // worst (largest) cut-to-cut spacing constraint on that
+          // layer, falling back to 0 when none is defined.
+          const auto* layer = tech->getLayer(cut_layer);
+          int cut_spacing_dbu = 0;
+          if (layer != nullptr) {
+            cut_spacing_dbu = layer->getCutSpacingValue();
+          }
+          // Kernel radius: spacing rounded up to whole tiles, plus
+          // one for the cut's own tile coverage. Bounded so a huge
+          // LEF spacing doesn't cover the whole worker.
+          int kernel_tiles
+              = (cut_spacing_dbu + kTilePitchDbu - 1) / kTilePitchDbu;
+          if (kernel_tiles < 1) {
+            kernel_tiles = 1;  // at minimum splat own tile + 8-neighbour
+          }
+          if (kernel_tiles > 6) {
+            kernel_tiles = 6;
+          }
+          const odb::Point origin = via->getOrigin();
+          const int cx_tile = (origin.x() - drc_box.xMin()) / kTilePitchDbu;
+          const int cy_tile = (origin.y() - drc_box.yMin()) / kTilePitchDbu;
+          drNet* owner = net;
+          for (int dy = -kernel_tiles; dy <= kernel_tiles; ++dy) {
+            for (int dx = -kernel_tiles; dx <= kernel_tiles; ++dx) {
+              // Risk magnitude decays with manhattan distance.
+              const int dist = std::abs(dx) + std::abs(dy);
+              int risk = std::max(1, kernel_tiles + 1 - dist);
+              field.addViaRisk(static_cast<int>(cut_layer),
+                               cx_tile + dx,
+                               cy_tile + dy,
+                               risk * 10,
+                               owner);
+            }
+          }
+        }
+      };
+      handle(net->getRouteConnFigs());
+      handle(net->getExtConnFigs());
+    }
+  }
+
+  // Phase 4.3 reserved — planar metal spacing splat.
+
+  // Stats roll-up.
+  stats.spacing_splats = 0;  // 4.3
   stats.field_nonzero_tiles = 0;
   stats.field_max_risk = 0;
   stats.field_mean_nonzero_risk = 0.0;
-  // Rough memory accounting — Phase 4.1 only holds the tile geometry,
-  // no per-tile entries until Phase 4.2 starts splatting.
-  stats.memory_bytes
-      = static_cast<int>(sizeof(ConstraintField)
-                         + sizeof(ConstraintFieldStats));
+  stats.memory_bytes = static_cast<int>(
+      sizeof(ConstraintField) + sizeof(ConstraintFieldStats)
+      + stats.cut_splats * (sizeof(std::size_t) + sizeof(std::uint16_t))
+                  * 2);  // aggregate + per-net entries
 
   const auto t1 = std::chrono::steady_clock::now();
   stats.build_wall_ms

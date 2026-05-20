@@ -26,6 +26,8 @@ namespace drt {
 
 class FlexDRWorker;
 class frBlock;
+class frNet;
+class drNet;
 
 class ConstraintField
 {
@@ -47,12 +49,24 @@ class ConstraintField
 
   // Sparse splat — per Phase 4.2. Risk values saturate at UINT16_MAX
   // internally; the maze-cost path applies its own max_risk_cost cap.
-  void addViaRisk(int cut_layer, int tile_x, int tile_y, int delta);
+  // owner_net is the drNet that contributed this splat. Tracking per-
+  // owner contributions allows getViaRisk to subtract the routing
+  // net's own contribution so the maze isn't penalised for laying its
+  // own via row (same-net filtering).
+  void addViaRisk(int cut_layer,
+                  int tile_x,
+                  int tile_y,
+                  int delta,
+                  drNet* owner_net);
 
-  // Lookup — Phase 4.1 returns 0 always. Phase 4.2 returns the tile's
-  // accumulated risk after coordinate-to-tile mapping. Bounds-safe:
-  // out-of-region coords return 0.
-  int getViaRisk(int cut_layer, int dbu_x, int dbu_y) const;
+  // Lookup with optional same-net filtering. routing_net == nullptr
+  // returns the raw aggregate (no subtraction). When routing_net is
+  // supplied, the per-net contribution by that net is subtracted so
+  // its own committed vias don't penalise its own search.
+  int getViaRisk(int cut_layer,
+                 int dbu_x,
+                 int dbu_y,
+                 drNet* routing_net) const;
 
   // Phase 4.3 placeholder. Returns 0 in Phase 4.2. dir is the routing
   // direction (-1 = unspecified, 0 = horizontal, 1 = vertical) for
@@ -81,10 +95,22 @@ class ConstraintField
   // for Phase 4.3 when planar metal coverage is high.
   std::unordered_map<std::size_t, std::uint16_t> via_risk_;
 
+  // Per-owner-net contribution map for same-net filtering. Keyed by a
+  // packed (cellIdx << 32) | net_id pair; net_id is a small int
+  // assigned at first sighting via owner_to_id_. We hash a 64-bit
+  // packed key so unordered_map can stay lightweight. The per-net
+  // contribution can never exceed the aggregate by construction.
+  std::unordered_map<std::uint64_t, std::uint16_t> via_risk_per_net_;
+  std::unordered_map<drNet*, std::uint32_t> owner_to_id_;
+  std::uint32_t next_owner_id_ = 1;  // 0 reserved for "none"
+
   // Stats populated by the builder; read by the FlexDR-side CSV writer.
   ConstraintFieldStats stats_;
 
   std::size_t cellIdx(int layer, int ty, int tx) const;
+  std::uint32_t getOrAssignOwnerId(drNet* owner_net);
+  std::uint64_t packPerNetKey(std::size_t cell_idx,
+                              std::uint32_t owner_id) const;
 };
 
 }  // namespace drt
