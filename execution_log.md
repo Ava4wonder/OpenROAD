@@ -303,3 +303,125 @@ scalar drcCost/markerCost/fixedShapeCost multipliers, hotspot-
 triggered). First patch to actually CHANGE routing behaviour when
 SET vs UNSET. Goal: weighted_score improvement OR iter-count
 reduction on test9 8t without harming WL.
+
+---
+
+## Patches 3.0 → 3.3 — worker policy + multiplier sweep + lock H (test9 anchor)
+
+### 3.0/3.1 sequence
+
+Landed worker AdaptiveWorkerPolicy snapshot path (FlexDR computes
+policy per-worker via `getWorkerPolicy(drc_box, …)`, worker takes
+read-only copy). First version applied scalar drc/marker/fixed-
+shape multipliers in `createWorker` via `std::lround(cost * mul)`
+before `setCost`.
+
+  * 3.1a — per-policy-call CSV diagnostic (`policy_log_path`),
+    iter / drc_box / heat / classification / multipliers emitted.
+  * 3.1b — found that iter gate `>= 2` was blocking the policy
+    from the iters where 99.6% of markers live; lowered to `>= 1`.
+    First positive signal: iter-1 markers −9.3%, iter-2 −12.7%
+    vs UNSET (fixed thresholds, mul 1.10/1.25 + 1.25/1.50).
+  * 3.1c — percentile-based dynamic thresholds: top 10% nonzero
+    tiles = hot, top 2% = severe. Effective threshold =
+    `max(static_floor, dynamic_percentile)` — distribution-
+    adaptive across designs without losing the absolute-heat
+    sanity check.
+  * 3.1d — env-var-driven multiplier sweep (HOT_DRC_MUL /
+    HOT_MARKER_MUL / SEVERE_DRC_MUL / SEVERE_MARKER_MUL /
+    SEVERE_DECAY_OVERRIDE / HOT_PERCENTILE / SEVERE_PERCENTILE).
+    Defaults remain the 3.1b values; any subset can be overridden
+    for sweeping.
+
+Sweep results on ISPD-18 test9 8t (4 opt + 1 cleanup base):
+
+| Variant | Hot drc/mk | Sev drc/mk | Iter-1 wscore | Iter-2 wscore | Iter-3 markers | Wall | DRC |
+|---|---|---|---|---|---|---|---|
+| A_identity | 1.00/1.00 | 1.00/1.00 | 100% | 100% | 3 | 10:36 | 0 |
+| B/C (marker-only) | 1.00/1.10–1.50 | 1.00/1.25–2.00 | regress | regress | +EOL/cut | — | 0 |
+| D | 1.10/1.25 | 1.25/1.50 | −9% | −13% | 3 | 10:38 | 0 |
+| E | 1.25/1.50 | 1.50/2.00 | −18% | −24% | 3 | — | 0 |
+| F (DRC-only mild) | 1.10/1.00 | 1.25/1.00 | beats D | beats D | 3 | — | 0 |
+| **G (DRC-only strong)** | **1.25/1.00** | **1.50/1.00** | **−25.1%** | **−36.4%** | **3** | **10:19** | **0** |
+| **H (DRC-only xstrong)** ★ | **1.50/1.00** | **2.00/1.00** | **−30.7%** | **−43.9%** | **1** ★ | **≤ 10:19** | **0** |
+| I (DRC-only uxstrong) | 1.75/1.00 | 2.50/1.00 | ≈ H | ≈ H | 1 | ≈ H | 0 |
+| G_no_decay | 1.25/1.00 | 1.50/1.00 (decay=-1) | ≈ G | ≈ G | 3 | ≈ G | 0 |
+
+**Design lesson (sharp, defensible, repeatable across F-vs-D and
+G-vs-E pairs):**
+
+```
+Persistent frMarker heat:    GOOD sensor    (selects WHICH workers)
+Marker-cost multiplier:      BAD actuator   (creates detours, adds tail markers)
+DRC-cost multiplier:         USEFUL actuator (raises legality sensitivity)
+```
+
+### 3.2 — per-marker tail dump (H1 test)
+
+Added `OPENROAD_DRT_ADAPTIVE_TAIL_LOG` + `tail_dump_threshold`
+(default 20). When an iter's marker count ≤ threshold, every
+marker is dumped as a separate CSV row: bbox / layer / rule
+class / net IDs. const-correctness bug (frMarker::getAggressors
+is non-const, can't be called from a const writeTailRow) fixed
+by emitting `-1` placeholder instead of touching aggressors —
+committed as `b0168bbba1`.
+
+Cross-variant comparison of test9 iter-3 tails revealed:
+  * marker-1 (layer 16, no net owner) — shared across A, F, G,
+    H. Pin-access / macro-edge structural residue.
+  * marker-2 (net pair 66482↔133240) — shared structurally across
+    variants but at slightly different bbox locations (different
+    routing solutions hitting the same congested net pair).
+  * marker-3 — policy-dependent. Present in A/F/G, absent in H.
+
+So H1 ("one geometric knot → multiple markers") is **partially
+confirmed**: the iter-3 tail is *mostly* structural. The 4-iter
+floor on test9 is intrinsic to the design at upstream-master
+HEAD, not a tuning issue. H removes the one tail marker that
+policy CAN remove.
+
+### 3.3 — lock H as default
+
+Closed Patch 3 by hardcoding the H values into the `Options`
+defaults in `AdaptiveMarkerModel.h`:
+
+```
+hot_drc_mul = 1.50f          (was 1.10f)
+hot_marker_mul = 1.00f       (was 1.25f)
+severe_drc_mul = 2.00f       (was 1.25f)
+severe_marker_mul = 1.00f    (was 1.50f)
+severe_decay_override = -1.0f  (was 0.99f; -1 = disabled)
+```
+
+Marker multiplier kept as a struct field but defaulted to 1.0
+with a comment recording the negative result (so future
+experimenters don't burn cycles re-discovering that marker mul
+is a bad actuator). Same for `severe_decay_override`: kept as a
+field, defaulted to disabled, with the G_no_decay ≈ G ablation
+noted.
+
+Env-var override site in `FlexDR.cpp` reads `opts.X_mul` as the
+fallback, so the new defaults flow through automatically. Stale
+comment ("defaults to the Patch 3 / 3.1b values") updated to
+"defaults to the Patch 3.3 H values".
+
+### Cross-design validation (next, IN FLIGHT)
+
+  * Designs: ispd18_test2 (small, low-iter — sanity check that
+    H does not regress on a design where there's little
+    headroom), ispd18_test10 (large, more iteration headroom
+    — where iter-count drop is plausible).
+  * Variants per design: UNSET (true upstream baseline),
+    A_identity (model on, multipliers all 1.0 — isolates
+    instrumentation overhead from policy effect), H (locked
+    default).
+  * 6 runs total. test2 + test10 designs both already on H100
+    (test2 downloaded 2026-05-19; test10 from earlier work).
+
+### Patch 4 status
+
+BLOCKED pending cross-design results. Will be unblocked only if
+test10 shows a guide-induced central-congestion failure mode
+that DRC-only policy cannot break. Otherwise skip directly to
+the redesigned Patch 5 (rule-aware DRC-policy / marker-policy
+separation).

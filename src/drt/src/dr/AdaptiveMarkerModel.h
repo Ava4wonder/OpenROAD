@@ -88,18 +88,29 @@ class AdaptiveMarkerModel
     float hot_percentile = 0.10f;     // top 10% by heat = hot
     float severe_percentile = 0.02f;  // top 2% by heat = severe
 
-    // Patch 3.1d — env-var-driven multiplier sweep configuration.
-    // Defaults match Patch 3 / 3.1b values; override via env vars:
+    // Patch 3.3 — defaults locked to "config H" (DRC-only, decay
+    // disabled) after the 3.1c+d sweep + 3.2 ablation showed:
+    //   - Marker multiplier is a BAD actuator (over-penalises stale
+    //     local scars, adds detour markers in late iters). Disabled
+    //     by default (1.0). Field kept for future experiments.
+    //   - DRC multiplier is the load-bearing knob. F → G → H ladder
+    //     monotonically improved iter-1/iter-2 wscore; I (1.75/2.50)
+    //     plateaued at H. So H (1.50/2.00) is the ceiling that
+    //     matters.
+    //   - marker_decay_override was unnecessary (G_no_decay ≈ G on
+    //     every metric). Set to -1 = disabled. Field kept for future
+    //     experiments.
+    // All five values are env-var-overridable for sweeping:
     //   OPENROAD_DRT_ADAPTIVE_HOT_DRC_MUL
     //   OPENROAD_DRT_ADAPTIVE_HOT_MARKER_MUL
     //   OPENROAD_DRT_ADAPTIVE_SEVERE_DRC_MUL
     //   OPENROAD_DRT_ADAPTIVE_SEVERE_MARKER_MUL
     //   OPENROAD_DRT_ADAPTIVE_SEVERE_DECAY_OVERRIDE
-    float hot_drc_mul = 1.10f;
-    float hot_marker_mul = 1.25f;
-    float severe_drc_mul = 1.25f;
-    float severe_marker_mul = 1.50f;
-    float severe_decay_override = 0.99f;
+    float hot_drc_mul = 1.50f;
+    float hot_marker_mul = 1.00f;
+    float severe_drc_mul = 2.00f;
+    float severe_marker_mul = 1.00f;
+    float severe_decay_override = -1.0f;
   };
 
   AdaptiveMarkerModel(const Options& options,

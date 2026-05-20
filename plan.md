@@ -71,12 +71,21 @@ FlexDR ingests after `#pragma omp parallel for` returns.
   3. **Patch 3** ✅ — Worker `AdaptiveWorkerPolicy` snapshot + scalar
      multipliers. Iterated 3.1a (instrumentation) / 3.1b (iter gate
      lowered to ≥ 1) / 3.1c+d (percentile thresholds + env-var multiplier
-     sweep). **Best candidate: G_drc_strong** (hot drc 1.25, sev drc 1.50,
-     marker mul 1.0). On test9 8t: iter-1 wscore −25%, iter-2 wscore −36%
-     vs identity policy, wall 10:19 (vs P1 canonical 10:27), no DRC
-     regression, no iter-count drop (4-iter test9 tail looks structural).
-     **3.2** (in flight) dumps per-marker iter-3 tail rows to test H1
-     (one geometric knot → multiple markers).
+     sweep) / 3.2 (per-marker tail dump) / 3.3 (lock H defaults).
+     **Final candidate: config H_drc_xstrong** (hot drc 1.50, severe
+     drc 2.00, marker mul 1.00, decay override disabled). On test9 8t:
+     iter-1 wscore −30.7%, iter-2 wscore −43.9% vs A_identity; iter-3
+     tail collapses from 3 → 1 marker (structural floor), wall faster
+     than P1 canonical, no DRC regression. I_drc_uxstrong (1.75/2.50)
+     plateaued at H — ladder ceiling confirmed. G_no_decay ≈ G —
+     `marker_decay_override` is unnecessary, set to -1 (disabled) by
+     default. **Patch 3.2 H1 result:** test9 iter-3 tail contains one
+     genuine structural marker (layer 16, no net owner — pin-access /
+     macro-edge residue) shared across all variants; the second iter-3
+     marker observed across most variants is also shared structurally;
+     the third is policy-dependent and removed by H. So the 4-iter
+     test9 tail is structural, not a tuning issue, and H is at the
+     test9-on-this-design ceiling.
   4. **Patch 4 (guide relaxation) — BLOCKED** pending test10 validation.
      G already delivers strong intermediate improvement without guide
      relaxation. Guide rewriting is more invasive and would add detour
@@ -126,25 +135,29 @@ The original Patch 5 intuition "hot region → raise marker cost" was
 plausible but the data forces the better rule: "hot region → raise
 DRC cost, leave marker cost at 1.0."
 
-## Open experiments queue (post 3.2)
+## Open experiments queue (post 3.3)
 
-These ablations are designed to lock G in and characterise its
-sweet spot before locking defaults:
+Patch 3 sweep is closed. Remaining cross-design validation:
 
-  - **H_drc_xstrong** — one more DRC-only ladder point at
-    `hot_drc=1.50, severe_drc=2.00, marker=1.0`. Diagnostic: is
-    G at the sweet spot, or does stronger DRC keep helping without
-    via blowup?
-  - **G_no_decay_override** — same as G but with
-    `severe_decay_override = -1` (disabled). Tests whether G's
-    gain comes from DRC mul alone or also from stronger heat
-    persistence. Removes a confounder.
-  - **Run A / F / G / G_no_decay / (optional H) on test10.** The
-    minimum cross-design validation. test9 4-iter tail is
-    structural (H1 result pending from Patch 3.2); test10 has
-    more iteration headroom and is the design where iter-count
-    benefit is plausible. The "iter count drop" piece of the
-    original contribution claim depends on this run.
+  - ✅ **H_drc_xstrong (1.50/2.00)** — won the ladder on test9; now
+    the locked default (Patch 3.3, see Options in
+    `AdaptiveMarkerModel.h`).
+  - ✅ **I_drc_uxstrong (1.75/2.50)** — plateaued at H, no further
+    benefit. Confirms H as the test9 ceiling.
+  - ✅ **G_no_decay_override** — ≈ G. `marker_decay_override`
+    contributes nothing; now disabled by default (-1).
+  - **Cross-design on test2 + test10 with H + control** — IN
+    FLIGHT (Patch 3.3 follow-up). Variants per design:
+      - UNSET (true upstream baseline)
+      - A_identity (model on, all multipliers 1.0 — isolates
+        instrumentation overhead from policy effect)
+      - H (locked default)
+    test9 4-iter tail is structural (Patch 3.2 H1 result), so
+    iter-count drop is not expected there. test10 is the design
+    with more iteration headroom — that's where an iter-count
+    win (the original L1 contribution piece) is plausible.
+    test2 is a smaller sanity check that H does not regress
+    on a design where iter-floor is already low.
 
 ## Metrics (per design, per variant)
 

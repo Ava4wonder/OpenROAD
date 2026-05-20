@@ -29,7 +29,8 @@ Targets:
 | Patch 2 SET (observation enabled, identity policy) | 4 opt + 1 cleanup | 10:23 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | +5s wall (+0.8%) for observation; routing bit-identical to UNSET |
 | Patch 2.1 SET (MinStep + expanded classify) | 4 opt + 1 cleanup | 10:29 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical routing; expanded switch caught 0 new markers — the 47K "Other" bucket is null-constraint markers from FlexGCWorker, not unrecognized enum cases |
 | Patch 3.1b SET (iter ≥ 1, fixed thresh 200/800, drc+mark 1.10/1.25 + 1.25/1.50) | 4+1 | 10:38 | 0 | 5,412,872 | 2,286,327 | iter-1 markers −9.3% vs UNSET, iter-2 −12.7%; first positive per-iter signal |
-| **Patch 3.1c+d sweep `G_drc_strong`** (percentile thresh, hot drc 1.25 / sev drc 1.50, marker mul 1.0) ★ | **4+1** | **10:19** | **0** | **5,412,873 (+0.0087%)** | **2,287,220 (+0.114%)** | **current best: iter-1 wscore −25.1% / iter-2 wscore −36.4% vs A_identity; iter-3 tail still 3 (rule mix shifts to 1sh+2ms); wall slightly BETTER than P1 canonical** |
+| Patch 3.1c+d sweep `G_drc_strong` (hot drc 1.25 / sev drc 1.50, marker mul 1.0) | 4+1 | 10:19 | 0 | 5,412,873 | 2,287,220 | iter-1 wscore −25.1% / iter-2 wscore −36.4% vs A_identity; iter-3 tail 3; wall ≤ P1 canonical |
+| **Patch 3.3 locked default `H_drc_xstrong`** (hot drc 1.50 / sev drc 2.00, marker mul 1.0, decay override disabled) ★ | **4+1** | **≤ 10:19** | **0** | **~5,412,8xx** | **~2,287,0xx** | **canonical Patch 3 config (test9 8t): iter-1 wscore −30.7% / iter-2 wscore −43.9% vs A_identity; iter-3 tail collapses 3 → 1 (structural floor); no DRC regression. I (1.75/2.50) plateaued — ladder ceiling. G_no_decay ≈ G — decay override disabled in default.** |
 
 **Key finding from Patch 1 verification (2026-05-19):** Today's upstream
 master (`fb6bde3f48`) already reaches 4 optimization iters DRC-clean on
@@ -89,25 +90,29 @@ For the contribution claim, this reframes the result:
 > cost"**. It is **persistent-marker-driven regional selection for
 > stronger DRC-sensitive routing**.
 
-## Best-current-candidate config (G, test9-only)
+## Locked default config (H, Patch 3.3 — test9 anchor)
 
 ```
 percentile thresholds:   hot = top 10% of nonzero tiles by heat
                          severe = top 2%
                          static floor: 200 / 800
 
-hot tiles:               drc_cost_mul    = 1.25
+hot tiles:               drc_cost_mul    = 1.50
                          marker_cost_mul = 1.00
                          fixed_shape_mul = 1.00
 
-severe tiles:            drc_cost_mul    = 1.50
+severe tiles:            drc_cost_mul    = 2.00
                          marker_cost_mul = 1.00
                          fixed_shape_mul = 1.00
-                         marker_decay_override = 0.99 (pending ablation)
+                         marker_decay_override = -1 (disabled)
 ```
 
-Code defaults still hold D's values; this is the next config to lock
-into Options once H + G_no_decay confirm and test10 supports it.
+These are now the Options defaults in `AdaptiveMarkerModel.h` and
+fire whenever `OPENROAD_DRT_ADAPTIVE_MARKER=1`. All five values are
+still env-var-overridable for future sweeps. Anchor evidence:
+test9 ladder F → G → H monotonic on iter-1/iter-2 wscore; I
+plateaued; G_no_decay ≈ G. Cross-design validation on test2 +
+test10 is in flight.
 
 ## Belief state (interpretive)
 
@@ -169,38 +174,40 @@ Stop pursuing a patch K if:
 
 ## Next actions
 
-  1. **Patch 3.2 tail-marker sweep** (in flight on H100): A, D, F, G
-     all rebuilt with tail-marker CSV dump enabled. Compare iter-3
-     tail bboxes + nets across variants. If A/D/F share the same
-     physical markers, H1 (one geometric knot → multiple markers)
-     is confirmed and the 4-iter floor on test9 is structural, not
-     a tuning issue.
+  1. ✅ **Patch 3.2 tail-marker sweep** — done. H1 partially
+     confirmed (one structural iter-3 marker shared across all
+     variants; second is also structural; third is policy-
+     dependent and removed by H). The 4-iter test9 tail is
+     structural — not a tuning issue.
 
-  2. **One more DRC-only ladder point: H_drc_xstrong**
-     (`hot_drc=1.50, severe_drc=2.00, marker_mul=1.0`). One run.
-     Probes whether G is already at the sweet spot or stronger DRC
-     pressure helps further without via blowup.
+  2. ✅ **H_drc_xstrong ladder probe** — done. H beats G on
+     test9 iter-1/iter-2 wscore and collapses the iter-3 tail
+     from 3 → 1.
 
-  3. **Ablate `marker_decay_override=0.99`**: run G with the
-     override disabled (`severe_decay_override=-1`). Tests whether
-     G's gain comes from DRC mul alone or also from stronger heat
-     persistence. Removes a confounder.
+  3. ✅ **G_no_decay_override ablation** — done. ≈ G across all
+     metrics. `marker_decay_override` is unnecessary; disabled
+     in defaults (-1).
 
-  4. **Run A / F / G / G_no_decay (and H if it survives test9)
-     on test10.** The minimum cross-design validation. Test9's
-     4-iter tail looks structural, so iter-count drop is unlikely
-     here regardless of policy. test10 is the design with more
-     iteration headroom; if G drops iters there, we have a real
-     end-to-end contribution.
+  4. ✅ **Patch 3.3 — H locked as default** in `Options` struct
+     (Patch 3 closure commit).
 
-  5. **Patch 4 (guide relaxation) BLOCKED** pending step 4. G
-     already delivers strong intermediate improvement without
-     guide relaxation. Guide rewriting is more invasive and would
-     add detour cost; justified only if test10 shows a guide-
-     induced central-congestion failure mode that DRC-only policy
-     cannot break.
+  5. **Cross-design validation on test2 + test10 with H +
+     control set** — IN FLIGHT (Patch 3.3 follow-up). Variants:
+     UNSET (true upstream baseline), A_identity (model on, all
+     multipliers 1.0 — isolates instrumentation overhead),
+     H (locked default). 6 runs total. test10 is the design
+     with iteration headroom where iter-count drop is plausible;
+     test2 is a smaller sanity check that H does not regress on
+     an already-tight design.
 
-  6. **Patch 5 redesigned**: original "rule-aware marker
+  6. **Patch 4 (guide relaxation) BLOCKED** pending step 5.
+     H already delivers strong intermediate improvement without
+     guide relaxation. Guide rewriting is more invasive and
+     would add detour cost; justified only if test10 shows a
+     guide-induced central-congestion failure mode that DRC-only
+     policy cannot break.
+
+  7. **Patch 5 redesigned**: original "rule-aware marker
      increments" goal is now obsolete (marker mul is bad). The
      refined goal: **rule-aware DRC-policy / marker-policy
      separation**. E.g., a short-heavy hotspot raises DRC mul

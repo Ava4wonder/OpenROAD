@@ -160,8 +160,10 @@ FlexDR::FlexDR(TritonRoute* router,
       opts.log_tail_csv = true;
       opts.tail_log_path = tail_path;
     }
-    // Patch 3.1d — multiplier sweep config via env vars. Each defaults
-    // to the Patch 3 / 3.1b values; override any subset to sweep.
+    // Patch 3.1d — multiplier sweep config via env vars. Defaults are
+    // now the Patch 3.3 "config H" values (hot drc=1.50, severe drc=
+    // 2.00, marker mul=1.00, decay override disabled = -1). Override
+    // any subset to sweep against H.
     auto read_float_env = [](const char* name, float fallback) {
       const char* v = std::getenv(name);
       if (v == nullptr || v[0] == '\0') {
