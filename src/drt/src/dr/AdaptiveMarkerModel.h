@@ -111,6 +111,22 @@ class AdaptiveMarkerModel
     float severe_drc_mul = 2.00f;
     float severe_marker_mul = 1.00f;
     float severe_decay_override = -1.0f;
+
+    // Patch 3.4 — K_taper variant. When enabled, at the start of each
+    // outer iter the DRC muls are picked from a 4-tier ladder keyed
+    // on the PREVIOUS iter's total marker count:
+    //   markers > 1000:   hot=1.50, severe=2.00 (H values)
+    //   200 < markers <=1000: hot=1.25, severe=1.50 (G values)
+    //    50 < markers <=200:  hot=1.10, severe=1.25 (D values)
+    //   markers <= 50:    hot=1.00, severe=1.00 (identity)
+    // Marker mul + decay override remain at locked defaults (1.0 / -1).
+    // Rationale: strong DRC pressure helps the bulk-repair iters but
+    // creates a long cleanup tail on large designs (test10 H: 17 → 44
+    // iters). Tapering DRC pressure as markers shrink should let the
+    // cleanup tail converge as fast as UNSET while preserving the
+    // mid-route quality win.
+    // Env var: OPENROAD_DRT_ADAPTIVE_K_TAPER=1 enables.
+    bool k_taper = false;
   };
 
   AdaptiveMarkerModel(const Options& options,
@@ -209,6 +225,10 @@ class AdaptiveMarkerModel
   // Per-iter accumulators reset by writeCsvRowIfEnabled at end of iter.
   std::array<int, 16> iter_rule_counts_{};
   int iter_total_markers_ = 0;
+  // Patch 3.4 K_taper — preserved across the reset above so the next
+  // beginOuterIter() can choose its DRC mul tier from the previous
+  // iter's marker count. Set in endOuterIter BEFORE writeCsvRowIfEnabled.
+  int last_iter_total_markers_ = 0;
   int iter_weighted_score_ = 0;
   bool csv_header_written_ = false;
 

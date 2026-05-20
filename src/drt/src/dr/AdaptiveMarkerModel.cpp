@@ -73,6 +73,28 @@ void AdaptiveMarkerModel::beginOuterIter(int iter)
 {
   iter_ = iter;
 
+  // Patch 3.4 — K_taper: pick the DRC mul tier for THIS iter from the
+  // previous iter's total marker count. At iter 0 there is no prior
+  // history so we keep options_ defaults (which is fine — the policy
+  // gate suppresses any cost change at iter 0 anyway). At iter 1 we
+  // use iter 0's marker count (typically very large → top tier).
+  if (options_.k_taper && iter >= 1) {
+    const int last_n = last_iter_total_markers_;
+    if (last_n > 1000) {
+      options_.hot_drc_mul = 1.50f;
+      options_.severe_drc_mul = 2.00f;
+    } else if (last_n > 200) {
+      options_.hot_drc_mul = 1.25f;
+      options_.severe_drc_mul = 1.50f;
+    } else if (last_n > 50) {
+      options_.hot_drc_mul = 1.10f;
+      options_.severe_drc_mul = 1.25f;
+    } else {
+      options_.hot_drc_mul = 1.00f;
+      options_.severe_drc_mul = 1.00f;
+    }
+  }
+
   // Lazy-size the heat arrays on first call. We need the design's
   // top-block die box + the tech's layer count, which are stable
   // once routing starts.
@@ -109,6 +131,10 @@ void AdaptiveMarkerModel::beginOuterIter(int iter)
 void AdaptiveMarkerModel::endOuterIter()
 {
   updateHotspots();
+  // Patch 3.4 — snapshot this iter's marker total before
+  // writeCsvRowIfEnabled() resets it, so the next beginOuterIter()
+  // can read it to pick its K_taper DRC tier.
+  last_iter_total_markers_ = iter_total_markers_;
   writeCsvRowIfEnabled();
 }
 

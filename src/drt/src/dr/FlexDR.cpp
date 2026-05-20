@@ -195,6 +195,14 @@ FlexDR::FlexDR(TritonRoute* router,
     opts.severe_percentile
         = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_PERCENTILE",
                          opts.severe_percentile);
+    // Patch 3.4 — K_taper: when enabled, beginOuterIter() picks a
+    // DRC mul tier from the previous iter's marker count instead of
+    // using the static H defaults. Marker mul + decay override are
+    // untouched (still locked at H values).
+    if (const char* kt = std::getenv("OPENROAD_DRT_ADAPTIVE_K_TAPER");
+        kt != nullptr && kt[0] == '1') {
+      opts.k_taper = true;
+    }
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }
