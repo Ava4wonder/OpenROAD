@@ -218,20 +218,27 @@ AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
     }
   }
 
-  // Threshold ladder. Hotspot/severe thresholds are configurable via
-  // Options. Default 200 / 800 from current_state.md's risk cap doc.
+  // Threshold ladder. Patch 3.1c — effective threshold is the max of
+  // the static floor (options_.*_threshold) and the dynamic percentile
+  // (dynamic_*_threshold_, computed at the previous endOuterIter).
+  // Patch 3.1d — multipliers come from Options (overridable via env).
+  const int eff_severe = std::max(options_.severe_hotspot_threshold,
+                                  dynamic_severe_threshold_);
+  const int eff_hot
+      = std::max(options_.hotspot_threshold, dynamic_hot_threshold_);
   bool is_severe = false;
   bool is_hot = false;
-  if (static_cast<int>(total_heat) >= options_.severe_hotspot_threshold) {
-    policy.marker_cost_mul = 1.50f;
-    policy.drc_cost_mul = 1.25f;
-    policy.marker_decay_override
-        = std::min(0.99f, std::max(base_decay, 0.99f));
+  if (static_cast<int>(total_heat) >= eff_severe) {
+    policy.marker_cost_mul = options_.severe_marker_mul;
+    policy.drc_cost_mul = options_.severe_drc_mul;
+    if (options_.severe_decay_override > 0.0f) {
+      policy.marker_decay_override
+          = std::max(base_decay, options_.severe_decay_override);
+    }
     is_severe = true;
-  } else if (static_cast<int>(total_heat) >= options_.hotspot_threshold) {
-    policy.marker_cost_mul = 1.25f;
-    policy.drc_cost_mul = 1.10f;
-    // No decay override at the moderate level — only severe.
+  } else if (static_cast<int>(total_heat) >= eff_hot) {
+    policy.marker_cost_mul = options_.hot_marker_mul;
+    policy.drc_cost_mul = options_.hot_drc_mul;
     is_hot = true;
   }
 
@@ -356,6 +363,8 @@ void AdaptiveMarkerModel::observeOneMarker(const frMarker& marker)
 void AdaptiveMarkerModel::updateHotspots()
 {
   hotspots_.clear();
+  dynamic_hot_threshold_ = 0;
+  dynamic_severe_threshold_ = 0;
   if (rule_layer_heat_.empty()) {
     return;
   }
@@ -375,10 +384,42 @@ void AdaptiveMarkerModel::updateHotspots()
       }
     }
   }
+
+  // Patch 3.1c — compute percentile-based dynamic thresholds. Sort a
+  // copy of the tile-total array, pick the (1 - hot_percentile) and
+  // (1 - severe_percentile) quantiles. Tiles with heat = 0 dominate
+  // most ISPD designs (routing is sparse), so excluding zeros before
+  // computing percentiles gives a more useful threshold on the
+  // actually-hot subset.
+  std::vector<std::uint32_t> nonzero;
+  nonzero.reserve(tile_total.size());
+  for (auto h : tile_total) {
+    if (h > 0) {
+      nonzero.push_back(h);
+    }
+  }
+  if (!nonzero.empty() && options_.hot_percentile > 0.0f) {
+    std::sort(nonzero.begin(), nonzero.end());
+    const std::size_t n = nonzero.size();
+    const auto hot_idx = static_cast<std::size_t>(
+        n * (1.0f - std::clamp(options_.hot_percentile, 0.0f, 1.0f)));
+    const auto sev_idx = static_cast<std::size_t>(
+        n
+        * (1.0f - std::clamp(options_.severe_percentile, 0.0f, 1.0f)));
+    dynamic_hot_threshold_
+        = static_cast<int>(nonzero[std::min(hot_idx, n - 1)]);
+    dynamic_severe_threshold_
+        = static_cast<int>(nonzero[std::min(sev_idx, n - 1)]);
+  }
+
+  // Hotspot rect list — uses effective severe threshold (max of static
+  // floor + dynamic percentile).
+  const int eff_severe = std::max(options_.severe_hotspot_threshold,
+                                  dynamic_severe_threshold_);
   for (int ty = 0; ty < num_tile_y_; ++ty) {
     for (int tx = 0; tx < num_tile_x_; ++tx) {
       const std::uint32_t h = tile_total[ty * num_tile_x_ + tx];
-      if (static_cast<int>(h) >= options_.severe_hotspot_threshold) {
+      if (static_cast<int>(h) >= eff_severe) {
         odb::Rect r;
         r.init(die_ll_x_ + tx * tile_pitch_dbu_,
                die_ll_y_ + ty * tile_pitch_dbu_,

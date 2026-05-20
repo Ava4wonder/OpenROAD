@@ -150,6 +150,39 @@ FlexDR::FlexDR(TritonRoute* router,
       opts.log_policy_csv = true;
       opts.policy_log_path = policy_path;
     }
+    // Patch 3.1d — multiplier sweep config via env vars. Each defaults
+    // to the Patch 3 / 3.1b values; override any subset to sweep.
+    auto read_float_env = [](const char* name, float fallback) {
+      const char* v = std::getenv(name);
+      if (v == nullptr || v[0] == '\0') {
+        return fallback;
+      }
+      try {
+        return std::stof(std::string(v));
+      } catch (...) {
+        return fallback;
+      }
+    };
+    opts.hot_drc_mul
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_HOT_DRC_MUL", opts.hot_drc_mul);
+    opts.hot_marker_mul
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_HOT_MARKER_MUL",
+                         opts.hot_marker_mul);
+    opts.severe_drc_mul
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_DRC_MUL",
+                         opts.severe_drc_mul);
+    opts.severe_marker_mul
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_MARKER_MUL",
+                         opts.severe_marker_mul);
+    opts.severe_decay_override
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_DECAY_OVERRIDE",
+                         opts.severe_decay_override);
+    opts.hot_percentile
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_HOT_PERCENTILE",
+                         opts.hot_percentile);
+    opts.severe_percentile
+        = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_PERCENTILE",
+                         opts.severe_percentile);
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }

@@ -55,6 +55,8 @@ class AdaptiveMarkerModel
     int heat_max = 65535;
 
     // Hotspot detection thresholds — weighted heat per tile.
+    // Patch 3.1c — these are the MINIMUM (floor) thresholds. The
+    // effective threshold is max(this floor, dynamic_percentile).
     int hotspot_threshold = 200;
     int severe_hotspot_threshold = 800;
 
@@ -65,6 +67,29 @@ class AdaptiveMarkerModel
     // getWorkerPolicy invocation. Empty = disabled.
     bool log_policy_csv = false;
     std::string policy_log_path;
+
+    // Patch 3.1c — percentile-based dynamic thresholds. Fraction of
+    // worker drc_box tiles that should be classified hot / severe
+    // based on heat distribution. The dynamic threshold is computed
+    // at endOuterIter from the sorted tile-total heat array; the
+    // effective threshold is max(this dynamic value, options_.hotspot
+    // _threshold / severe_hotspot_threshold). Set to 0 to disable
+    // percentile mode and use the fixed thresholds only.
+    float hot_percentile = 0.10f;     // top 10% by heat = hot
+    float severe_percentile = 0.02f;  // top 2% by heat = severe
+
+    // Patch 3.1d — env-var-driven multiplier sweep configuration.
+    // Defaults match Patch 3 / 3.1b values; override via env vars:
+    //   OPENROAD_DRT_ADAPTIVE_HOT_DRC_MUL
+    //   OPENROAD_DRT_ADAPTIVE_HOT_MARKER_MUL
+    //   OPENROAD_DRT_ADAPTIVE_SEVERE_DRC_MUL
+    //   OPENROAD_DRT_ADAPTIVE_SEVERE_MARKER_MUL
+    //   OPENROAD_DRT_ADAPTIVE_SEVERE_DECAY_OVERRIDE
+    float hot_drc_mul = 1.10f;
+    float hot_marker_mul = 1.25f;
+    float severe_drc_mul = 1.25f;
+    float severe_marker_mul = 1.50f;
+    float severe_decay_override = 0.99f;
   };
 
   AdaptiveMarkerModel(const Options& options,
@@ -166,6 +191,15 @@ class AdaptiveMarkerModel
   mutable int iter_hot_workers_ = 0;
   mutable int iter_severe_workers_ = 0;
   mutable bool policy_csv_header_written_ = false;
+
+  // Patch 3.1c — dynamic percentile-based thresholds. Computed at
+  // endOuterIter from the sorted tile-total heat distribution. The
+  // effective threshold used in getWorkerPolicy is
+  //   max(dynamic_*, options_.*_threshold).
+  // Both dynamic values are zero until at least one endOuterIter has
+  // run (i.e. iter 0 still uses the static floors only).
+  int dynamic_hot_threshold_ = 0;
+  int dynamic_severe_threshold_ = 0;
 
   std::unordered_map<frNet*, int> net_score_;
 
