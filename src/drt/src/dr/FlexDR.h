@@ -18,6 +18,7 @@
 #include "boost/serialization/export.hpp"
 #include "db/drObj/drAccessPattern.h"
 #include "dr/AdaptiveMarkerTypes.h"  // outer_loop_plus Patch 3 — for AdaptiveWorkerPolicy
+#include "dr/ConstraintFieldTypes.h"  // outer_loop_plus Patch 4
 #include "db/drObj/drFig.h"
 #include "db/drObj/drMarker.h"
 #include "db/drObj/drNet.h"
@@ -179,6 +180,13 @@ class FlexDR
   int iter_severe_worker_count_ = 0;
   int iter_identity_worker_count_ = 0;
   std::vector<double> iter_worker_walls_ms_;
+
+  // Patch 4 — constraint-field config (default-OFF). Populated from
+  // OPENROAD_DRT_CONSTRAINT_FIELD env vars at construction. When
+  // enabled, processWorkersBatch builds a per-worker ConstraintField
+  // and appends a stats row to constraint_field_stats.csv.
+  ConstraintFieldPolicy constraint_field_policy_;
+  bool constraint_field_header_written_ = false;
 
   // distributed
   dst::Distributed* dist_;

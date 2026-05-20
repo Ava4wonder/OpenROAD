@@ -172,6 +172,44 @@ Stop pursuing a patch K if:
   * K's feature-disabled regression run differs from upstream-master
     baseline (build-green rule violation).
 
+## Patch 4 thesis — Constraint-Field-Guided Detailed Routing
+
+Patch 3 closed with a sharp design lesson (heat = sensor, DRC mul =
+actuator) and demonstrated the ceiling of policy-only optimisation
+(H_drc_xstrong locked, K_taper as a non-monotonic refinement). The
+Patch 3.5 profiling work then revealed the real runtime bottleneck:
+**iter 0+1 dominate DRT wall (76% on test9), and within those iters
+worker walls show 12× p99-to-max imbalance**. Reducing outer iter
+count or marker count alone cannot break through this — the
+expensive iters are expensive because of within-worker A* effort
+plus FlexGC repair, not because of how many iters there are.
+
+The Patch 4 thesis attacks this directly:
+
+> Move DRT partially from `route → exact check → marker → repair`
+> toward `compile geometry/rules → spatial constraint fields →
+> DRC-aware path search → exact check for certification + remaining
+> repair`.
+
+Concretely: build worker-local **constraint fields** that splat
+existing vias/cuts (and later fixed metal) into per-layer uint16_t
+risk tiles. During FlexGridGraph maze expansion, add a small risk-
+cost term so the search avoids high-risk tiles BEFORE the route is
+committed and FlexGC materialises a marker. Exact FlexGC remains
+the legality oracle. Default-OFF. Two MVP phases:
+
+  1. **Phase 4.1** — skeleton + empty fields + stats CSV (no
+     behaviour change).
+  2. **Phase 4.2** — via/cut spacing risk field, queried at via
+     expansion (`via_cost += lambda_cut * F_cut`).
+
+Strict correctness: `OPENROAD_DRT_CONSTRAINT_FIELD=0` must restore
+upstream-equivalent (or P3.3-H-equivalent) routing exactly.
+
+This is a **research/refactor branch** — separate concerns from
+Patch 3's policy-tuning track. See plan.md for full scope, phases,
+metrics, success criteria, failure modes.
+
 ## Next actions
 
   1. ✅ **Patch 3.2 tail-marker sweep** — done. H1 partially
@@ -207,11 +245,13 @@ Stop pursuing a patch K if:
      guide-induced central-congestion failure mode that DRC-only
      policy cannot break.
 
-  7. **Patch 5 redesigned**: original "rule-aware marker
-     increments" goal is now obsolete (marker mul is bad). The
-     refined goal: **rule-aware DRC-policy / marker-policy
-     separation**. E.g., a short-heavy hotspot raises DRC mul
-     strongly; a cut-spacing hotspot raises via-related cost; an
-     EOL-heavy hotspot uses a directional/stub-aware penalty.
-     Use marker history to *classify the failure mode*, then
-     choose a rule-specific actuator. See plan.md.
+  7. **Patch 4 = Constraint-Field-Guided DRT** (IN FLIGHT — new
+     active branch). Implementing Phase 4.1 skeleton + Phase 4.2
+     via/cut spacing field. Default-off (env
+     `OPENROAD_DRT_CONSTRAINT_FIELD=1`). Eval order: test9 smoke,
+     test2, test10. See plan.md for full architecture.
+
+  8. **Patch 5 / Patch 6 deprioritised**: rule-aware DRC policy +
+     layer-aware actuator. Subsumed by Patch 4 once it ships —
+     becomes a refinement (choose lambda_cut / lambda_spacing per
+     rule class) rather than a separate patch.

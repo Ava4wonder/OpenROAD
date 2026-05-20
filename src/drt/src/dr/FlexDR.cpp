@@ -4,6 +4,8 @@
 #include "dr/FlexDR.h"
 
 #include "dr/AdaptiveMarkerModel.h"
+#include "dr/ConstraintField.h"
+#include "dr/ConstraintFieldBuilder.h"
 
 #include <sys/stat.h>
 
@@ -223,6 +225,41 @@ FlexDR::FlexDR(TritonRoute* router,
     }
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
+  }
+
+  // Patch 4 — read constraint-field env vars. Default-OFF. When
+  // enabled, processWorkersBatch builds a per-worker ConstraintField
+  // and emits a row to constraint_field_stats.csv. In Phase 4.1 the
+  // field is built but not queried, so routing is unchanged.
+  if (const char* cf = std::getenv("OPENROAD_DRT_CONSTRAINT_FIELD");
+      cf != nullptr && cf[0] == '1') {
+    constraint_field_policy_.enabled = true;
+    if (const char* sd = std::getenv("OPENROAD_DRT_CONSTRAINT_FIELD_STATS_DIR");
+        sd != nullptr && sd[0] != '\0') {
+      constraint_field_policy_.stats_dir = sd;
+    }
+    if (const char* lv = std::getenv("OPENROAD_DRT_CF_VIA_LAMBDA");
+        lv != nullptr && lv[0] != '\0') {
+      try {
+        constraint_field_policy_.lambda_cut = std::stof(std::string(lv));
+      } catch (...) {
+      }
+    }
+    if (const char* ls = std::getenv("OPENROAD_DRT_CF_SPACING_LAMBDA");
+        ls != nullptr && ls[0] != '\0') {
+      try {
+        constraint_field_policy_.lambda_spacing = std::stof(std::string(ls));
+      } catch (...) {
+      }
+    }
+    if (const char* mr = std::getenv("OPENROAD_DRT_CF_MAX_RISK_COST");
+        mr != nullptr && mr[0] != '\0') {
+      try {
+        constraint_field_policy_.max_risk_cost
+            = std::stoi(std::string(mr));
+      } catch (...) {
+      }
+    }
   }
 }
 
@@ -851,6 +888,17 @@ void FlexDR::processWorkersBatch(
   if (profile_on) {
     profiles.assign(workers_batch.size(), AdaptiveWorkerProfile{});
   }
+  // Patch 4 — per-worker constraint-field build. Pre-sized stats
+  // vector mirrors the AdaptiveWorkerProfile pattern; each OMP
+  // thread writes its own index, no shared mutation. The field
+  // itself is local to the OMP iteration and discarded after the
+  // build — Phase 4.1 doesn't yet pass it back to the worker, so
+  // it has no effect on routing.
+  const bool field_on = constraint_field_policy_.enabled;
+  std::vector<ConstraintFieldStats> field_stats;
+  if (field_on) {
+    field_stats.assign(workers_batch.size(), ConstraintFieldStats{});
+  }
   const int batch_id_now = iter_active_batch_id_++;
 #pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < (int) workers_batch.size(); i++) {  // NOLINT
@@ -858,6 +906,21 @@ void FlexDR::processWorkersBatch(
       std::chrono::steady_clock::time_point w_start;
       if (profile_on) {
         w_start = std::chrono::steady_clock::now();
+      }
+      // Patch 4 — Phase 4.1 constraint-field build (worker-local).
+      // Built before the worker's main() so future phases can pass
+      // it through to FlexGridGraph maze cost. In Phase 4.1 it is
+      // discarded after stats are captured — no routing change.
+      if (field_on) {
+        ConstraintField cf;
+        ConstraintFieldBuilder builder(constraint_field_policy_, logger_);
+        builder.build(cf,
+                      workers_batch[i].get(),
+                      getDesign(),
+                      iter_,
+                      i,
+                      batch_id_now);
+        field_stats[i] = cf.stats();
       }
       workers_batch[i]->main(getDesign());
       if (profile_on) {
@@ -902,6 +965,40 @@ void FlexDR::processWorkersBatch(
     }
   }
   exception.rethrow();
+  // Patch 4 — serial flush of constraint-field stats CSV. Same
+  // pattern as the AdaptiveWorkerProfile flush below.
+  if (field_on && !field_stats.empty()) {
+    std::string path = constraint_field_policy_.stats_dir;
+    if (!path.empty() && path.back() != '/') {
+      path += '/';
+    }
+    path += "constraint_field_stats.csv";
+    std::ofstream os(path, std::ios::app);
+    if (os.is_open()) {
+      if (!constraint_field_header_written_) {
+        os << "iter,batch_id,worker_id,"
+           << "drc_x1,drc_y1,drc_x2,drc_y2,"
+           << "num_tile_x,num_tile_y,num_layers,"
+           << "num_shapes_seen,num_vias_seen,"
+           << "spacing_splats,cut_splats,"
+           << "field_nonzero_tiles,field_max_risk,"
+           << "field_mean_nonzero_risk,"
+           << "build_wall_ms,memory_bytes\n";
+        constraint_field_header_written_ = true;
+      }
+      for (const auto& s : field_stats) {
+        os << s.iter << ',' << s.batch_id << ',' << s.worker_id << ','
+           << s.drc_box.xMin() << ',' << s.drc_box.yMin() << ','
+           << s.drc_box.xMax() << ',' << s.drc_box.yMax() << ','
+           << s.num_tile_x << ',' << s.num_tile_y << ','
+           << s.num_layers << ',' << s.num_shapes_seen << ','
+           << s.num_vias_seen << ',' << s.spacing_splats << ','
+           << s.cut_splats << ',' << s.field_nonzero_tiles << ','
+           << s.field_max_risk << ',' << s.field_mean_nonzero_risk
+           << ',' << s.build_wall_ms << ',' << s.memory_bytes << '\n';
+      }
+    }
+  }
   // Patch 3.5 — emit worker rows + accumulate into iter aggregator
   // serially on the FlexDR thread (we're outside the OMP region).
   if (profile_on) {
