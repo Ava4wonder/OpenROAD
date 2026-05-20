@@ -158,6 +158,94 @@ Goal: first measurable wall or weighted-score improvement when env SET.
 
 ---
 
+## 2026-05-20 — Patch 3 + 3.1 series + sweep + ablation
+
+Patch 3 (commit `06a5dd644f`) wired AdaptiveWorkerPolicy through to
+worker `setCost`. First SET run was a slight regression: WL +58 µm,
+vias +316, iter count unchanged. Diagnosis: iter gate at `iter >= 2`
+blocked policy from acting on iters 0+1 where 99.6% of markers live.
+
+Patch 3.1a (commit `c354b40be3`) added per-call CSV instrumentation
+to prove the diagnosis: iter 0 + 1 received zero policy calls; iter 2
+received policy on 91% of workers, iter 3 on 95%, but those iters
+have only 386 + 4 markers — too late.
+
+Patch 3.1b (commit `ca91fc0ce2`) dropped the gate to `iter >= 1`.
+First positive signal: iter-1 markers down 9.3%, iter-2 down 12.7%,
+DRC clean, iter count still 4.
+
+Patch 3.1c+d (commit `47b718cc9d`) bundled:
+  - percentile-based hot/severe thresholds (top 10% / top 2% of
+    nonzero tiles by heat) with static thresholds as a floor
+  - env-var-driven multiplier overrides so a sweep can run from one
+    binary
+
+Sweep on test9 8t (7 variants):
+
+```
+Variant         hot(drc/mark)  sev(drc/mark)  i1 wscore  i2 wscore  i3
+P1 canonical    —              —              —          —          —
+A_identity      1.0/1.0        1.0/1.0        131,740    31,030     3 (2sh+1ms)
+B_mark_mild     1.0/1.25       1.0/1.50       131,860    30,320     9
+C_mark_strong   1.0/1.50       1.0/2.00       135,870    32,015     9
+D_drc_mark_mild 1.10/1.25      1.25/1.50      116,525    24,830     3 (2sh+1ms)
+E_drc_mark_strong 1.25/1.50    1.50/2.00      109,765    19,980     6 (3sh+3ms)
+F_drc_mild      1.10/1.0       1.25/1.0       115,905    24,520     3 (2sh+1ms)
+G_drc_strong ★  1.25/1.0       1.50/1.0       98,635     19,725     3 (1sh+2ms)
+```
+
+**Headline finding (DRC-only ablation):**
+  - F BEATS D on every metric (mild DRC-only > mild DRC+marker)
+  - G BEATS E on every metric (strong DRC-only > strong DRC+marker)
+  - Marker multiplier alone (B, C) regresses across the board
+  - **Marker-cost multiplier is actively harmful when paired with DRC**
+
+**Design lesson the data forces:**
+```
+Persistent frMarker heat — GOOD sensor (selects which workers).
+Marker-cost multiplier  — BAD actuator (creates detours, adds tail markers).
+DRC-cost multiplier     — USEFUL actuator (raises legality sensitivity).
+```
+
+The original "hot region → raise marker cost" intuition was wrong.
+The correct rule is "hot region → raise DRC cost, leave marker cost
+at 1.0." Historical marker heat tells you *where* to intervene; it
+shouldn't dictate *how much* to penalise markers locally — current
+legality risk (DRC cost) is the better local signal.
+
+**G best so far** (test9 8t):
+  - vs A_identity: iter-1 wscore −25.1%, iter-2 wscore −36.4%
+  - iter-3 tail: 3 markers (same count as A; rule mix shifts from
+    2 short+1 ms to 1 short+2 ms — different physical residual)
+  - DRT wall: 10:19 (best in sweep, even vs P1 canonical 10:27)
+  - WL +0.0087%, vias +0.114% vs P1 canonical (tiny cost)
+  - iter count 4+1 (unchanged)
+
+**Convergence-quality win, not iter-count win on test9.** Whether
+G translates to iter-count drop on harder designs (test10) is the
+open question.
+
+---
+
+## 2026-05-20 — Patch 3.2 tail-marker dump (in flight)
+
+Patch 3.2 (commit `7c5130e000`) added per-marker CSV dump when an
+iter's marker count <= tail_dump_threshold (default 20). Used to
+test the user-flagged hypothesis: are the 3-marker tails in
+A/D/F (2 short + 1 metal_spacing) the SAME physical markers
+(H1: one geometric knot → multiple markers)?
+
+Sweep launched: A, D, F, G with tail logging enabled. Build + 4 ×
+14 min runs in flight on H100. Results expected ~15:19 UTC.
+
+Expected next: tail.csv comparison across variants. If A/D/F share
+the same bboxes + layers + nets → H1 confirmed, tail is a localised
+deterministic residue independent of policy strength. Then either
+implement targeted late-stage repair (Patch 8+ scope), or accept
+the 4-iter floor as structural to test9 and move to test10.
+
+---
+
 ## 2026-05-20 — Patch 2.1 committed + SET verification
 
 Patch 2.1 = commit `2cdabc444d`. Added AdaptiveRuleClass::MinStep

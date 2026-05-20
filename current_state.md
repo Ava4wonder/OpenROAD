@@ -28,6 +28,8 @@ Targets:
 | Patch 2 UNSET (regression check) | 4 opt + 1 cleanup | 10:18 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical to canonical baseline |
 | Patch 2 SET (observation enabled, identity policy) | 4 opt + 1 cleanup | 10:23 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | +5s wall (+0.8%) for observation; routing bit-identical to UNSET |
 | Patch 2.1 SET (MinStep + expanded classify) | 4 opt + 1 cleanup | 10:29 | 0 | 5,412,412 ✓ | 2,284,621 ✓ | bit-identical routing; expanded switch caught 0 new markers — the 47K "Other" bucket is null-constraint markers from FlexGCWorker, not unrecognized enum cases |
+| Patch 3.1b SET (iter ≥ 1, fixed thresh 200/800, drc+mark 1.10/1.25 + 1.25/1.50) | 4+1 | 10:38 | 0 | 5,412,872 | 2,286,327 | iter-1 markers −9.3% vs UNSET, iter-2 −12.7%; first positive per-iter signal |
+| **Patch 3.1c+d sweep `G_drc_strong`** (percentile thresh, hot drc 1.25 / sev drc 1.50, marker mul 1.0) ★ | **4+1** | **10:19** | **0** | **5,412,873 (+0.0087%)** | **2,287,220 (+0.114%)** | **current best: iter-1 wscore −25.1% / iter-2 wscore −36.4% vs A_identity; iter-3 tail still 3 (rule mix shifts to 1sh+2ms); wall slightly BETTER than P1 canonical** |
 
 **Key finding from Patch 1 verification (2026-05-19):** Today's upstream
 master (`fb6bde3f48`) already reaches 4 optimization iters DRC-clean on
@@ -65,6 +67,47 @@ selection via `ISPD_DESIGN` / `ISPD_BENCH_DIR` / `ISPD_OUT_DIR`).
 H100 build location for this branch: `/work/baseline` bind-mount (the
 `OpenROAD-baseline` worktree), kept separate from `/work/redesign` which
 hosts the `redesign_rebase_v3` work.
+
+## Design lesson from the Patch 3.1c+d sweep + ablation (sharp + defensible)
+
+```
+Persistent frMarker heat:    GOOD sensor    (selects WHICH workers)
+Marker-cost multiplier:      BAD actuator   (creates detours, adds tail markers)
+DRC-cost multiplier:         USEFUL actuator (raises legality sensitivity)
+```
+
+The original "hot region → raise marker cost" intuition was empirically
+rejected by the F-vs-D and G-vs-E ablation pairs (DRC+marker uniformly
+loses to DRC-only across iter-1, iter-2, vias, and tail-markers).
+Historical marker heat tells the model **where** to intervene;
+**how strongly** to penalise comes from current DRC cost (live
+legality risk), not from stale marker history.
+
+For the contribution claim, this reframes the result:
+
+> The AdaptiveMarkerModel's useful contribution is **not "more marker
+> cost"**. It is **persistent-marker-driven regional selection for
+> stronger DRC-sensitive routing**.
+
+## Best-current-candidate config (G, test9-only)
+
+```
+percentile thresholds:   hot = top 10% of nonzero tiles by heat
+                         severe = top 2%
+                         static floor: 200 / 800
+
+hot tiles:               drc_cost_mul    = 1.25
+                         marker_cost_mul = 1.00
+                         fixed_shape_mul = 1.00
+
+severe tiles:            drc_cost_mul    = 1.50
+                         marker_cost_mul = 1.00
+                         fixed_shape_mul = 1.00
+                         marker_decay_override = 0.99 (pending ablation)
+```
+
+Code defaults still hold D's values; this is the next config to lock
+into Options once H + G_no_decay confirm and test10 supports it.
 
 ## Belief state (interpretive)
 
@@ -126,9 +169,42 @@ Stop pursuing a patch K if:
 
 ## Next actions
 
-  1. **Patch 1 verification run** (in progress queueing): test9 8t with
-     `OPENROAD_DRT_ADAPTIVE_MARKER` UNSET on the new upstream-master-based
-     binary. Expect ~7 iters / ~14m wall / 0 DRV. This both validates the
-     Patch 1 disabled-shell guarantee AND establishes the canonical
-     baseline measurement on this branch's exact build.
-  2. After Patch 1 verifies: Patch 2 (observation + CSV logging).
+  1. **Patch 3.2 tail-marker sweep** (in flight on H100): A, D, F, G
+     all rebuilt with tail-marker CSV dump enabled. Compare iter-3
+     tail bboxes + nets across variants. If A/D/F share the same
+     physical markers, H1 (one geometric knot → multiple markers)
+     is confirmed and the 4-iter floor on test9 is structural, not
+     a tuning issue.
+
+  2. **One more DRC-only ladder point: H_drc_xstrong**
+     (`hot_drc=1.50, severe_drc=2.00, marker_mul=1.0`). One run.
+     Probes whether G is already at the sweet spot or stronger DRC
+     pressure helps further without via blowup.
+
+  3. **Ablate `marker_decay_override=0.99`**: run G with the
+     override disabled (`severe_decay_override=-1`). Tests whether
+     G's gain comes from DRC mul alone or also from stronger heat
+     persistence. Removes a confounder.
+
+  4. **Run A / F / G / G_no_decay (and H if it survives test9)
+     on test10.** The minimum cross-design validation. Test9's
+     4-iter tail looks structural, so iter-count drop is unlikely
+     here regardless of policy. test10 is the design with more
+     iteration headroom; if G drops iters there, we have a real
+     end-to-end contribution.
+
+  5. **Patch 4 (guide relaxation) BLOCKED** pending step 4. G
+     already delivers strong intermediate improvement without
+     guide relaxation. Guide rewriting is more invasive and would
+     add detour cost; justified only if test10 shows a guide-
+     induced central-congestion failure mode that DRC-only policy
+     cannot break.
+
+  6. **Patch 5 redesigned**: original "rule-aware marker
+     increments" goal is now obsolete (marker mul is bad). The
+     refined goal: **rule-aware DRC-policy / marker-policy
+     separation**. E.g., a short-heavy hotspot raises DRC mul
+     strongly; a cut-spacing hotspot raises via-related cost; an
+     EOL-heavy hotspot uses a directional/stub-aware penalty.
+     Use marker history to *classify the failure mode*, then
+     choose a rule-specific actuator. See plan.md.
