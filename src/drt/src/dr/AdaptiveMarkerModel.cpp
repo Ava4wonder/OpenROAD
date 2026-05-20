@@ -192,9 +192,10 @@ void AdaptiveMarkerModel::writeTailRow(const frMarker& marker)
   os << iter_ << ',' << static_cast<int>(rule) << ',' << ctype << ','
      << marker.getLayerNum() << ',' << bb.xMin() << ',' << bb.yMin()
      << ',' << bb.xMax() << ',' << bb.yMax() << ',' << cx << ',' << cy;
-  // num_srcs + num_aggressors
-  os << ',' << marker.getSrcs().size() << ','
-     << marker.getAggressors().size();
+  // num_srcs only — getAggressors() is non-const on frMarker so it
+  // can't be called from this const-reference path. Leaving a
+  // placeholder column for schema stability; not needed for H1 test.
+  os << ',' << marker.getSrcs().size() << ',' << -1;
   // net_ids — semicolon-separated list of frcNet owner IDs
   os << ',';
   bool first = true;
