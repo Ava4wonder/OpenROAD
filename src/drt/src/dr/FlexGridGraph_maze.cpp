@@ -486,12 +486,20 @@ frCost FlexGridGraph::getNextPathCost(const FlexWavefrontGrid& currGrid,
         // OpenROAD's tech layer stack.
         const int cut_lnum
             = (dir == frDirEnum::U) ? routing_lnum + 1 : routing_lnum - 1;
-        // V1: no same-net subtraction (routing_net = nullptr).
-        // Phase 4.2.b will plumb the routing drNet through search so
-        // own-net via rows aren't self-penalised.
-        const int risk = cf->getViaRisk(cut_lnum, pt.x(), pt.y(), nullptr);
+        // Patch 4.2.c: pass the routing drNet so the field can
+        // subtract own-net contribution and we don't self-penalise.
+        const int risk
+            = cf->getViaRisk(cut_lnum, pt.x(), pt.y(), current_routing_net_);
         if (risk > 0) {
-          nextPathCost += static_cast<frCost>(risk);
+          const auto& cf_pol = drWorker_->getConstraintFieldPolicy();
+          const float scaled = cf_pol.lambda_cut * static_cast<float>(risk);
+          int add = static_cast<int>(scaled);
+          if (add > cf_pol.max_risk_cost) {
+            add = cf_pol.max_risk_cost;
+          }
+          if (add > 0) {
+            nextPathCost += static_cast<frCost>(add);
+          }
         }
       }
     }
@@ -754,6 +762,11 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
     dump_file_.open("expansions.dump");
   }
   curr_id_ = 1;
+  // outer_loop_plus Patch 4 Phase 4.2.c — stash the current routing
+  // drNet so getNextPathCost can pass it to ConstraintField::
+  // getViaRisk for same-net subtraction. Cleared on every return
+  // path (see resets at function end + bool early-returns).
+  current_routing_net_ = (nextPin != nullptr) ? nextPin->getNet() : nullptr;
   if (drWorker_->getDRIter() >= debugMazeIter) {
     std::cout << "INIT search: target pin " << nextPin->getName()
               << "\nsource points:\n";
@@ -784,6 +797,7 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
   for (auto& idx : connComps) {
     if (isDst(idx.x(), idx.y(), idx.z())) {
       path.emplace_back(idx.x(), idx.y(), idx.z());
+      current_routing_net_ = nullptr;  // Patch 4.2.c reset
       return true;
     }
     getPoint(currPt, idx.x(), idx.y());
@@ -832,12 +846,14 @@ bool FlexGridGraph::search(std::vector<FlexMazeIdx>& connComps,
     }
     if (isDst(currGrid.x(), currGrid.y(), currGrid.z())) {
       traceBackPath(currGrid, path, connComps, ccMazeIdx1, ccMazeIdx2);
+      current_routing_net_ = nullptr;  // Patch 4.2.c reset
       return true;
     }
     // expand and update wavefront
     expandWavefront(
         currGrid, dstMazeIdx1, dstMazeIdx2, centerPt, route_with_jumpers);
   }
+  current_routing_net_ = nullptr;  // Patch 4.2.c reset (no-path case)
   return false;
 }
 

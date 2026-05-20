@@ -40,6 +40,7 @@ using frLayerDirMap
 
 class FlexDRWorker;
 class AbstractDRGraphics;
+class drNet;  // outer_loop_plus Patch 4 Phase 4.2.c — pointer only
 class FlexGridGraph
 {
  public:
@@ -1067,6 +1068,11 @@ class FlexGridGraph
   frTechObject* tech_ = nullptr;
   utl::Logger* logger_ = nullptr;
   FlexDRWorker* drWorker_ = nullptr;
+  // outer_loop_plus Patch 4 Phase 4.2.c — current routing drNet set
+  // by search() entry, cleared at exit. Read by getNextPathCost so
+  // the ConstraintField can subtract this net's own contribution
+  // (same-net filtering).
+  drNet* current_routing_net_ = nullptr;
   RouterConfiguration* router_cfg_ = nullptr;
   AbstractDRGraphics* graphics_ = nullptr;  // owned by FlexDR
 
