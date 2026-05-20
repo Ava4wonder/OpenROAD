@@ -179,7 +179,21 @@ AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
   if (rule_layer_heat_.empty()) {
     return policy;
   }
-  if (iter < 2) {
+  // Patch 3.1b — iter gate lowered from `iter < 2` to `iter < 1`.
+  //
+  // The Patch 3.1a instrumentation showed: with the original gate,
+  // iters 0 and 1 received ZERO policy calls. Those two iters
+  // accounted for 99.6% of all markers on ISPD-18 test9 (92,709 +
+  // 1,618 of 94,717 total). By iter 2 only 386 markers remained;
+  // by iter 3 only 4 — too few for policy multipliers to influence
+  // outer-iter count.
+  //
+  // Iter 0 still gets identity policy (heat array is empty on the
+  // first beginOuterIter; observeGlobalMarkers runs AFTER iter 0's
+  // searchRepair). Iter 1 is the first iter where the heat map
+  // reflects real DRC data, so it's the earliest meaningful
+  // activation point.
+  if (iter < 1) {
     return policy;
   }
 
