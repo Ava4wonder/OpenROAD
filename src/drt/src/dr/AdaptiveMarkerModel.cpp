@@ -120,6 +120,10 @@ void AdaptiveMarkerModel::observeGlobalMarkers(
       observeOneMarker(*m);
     }
   }
+  // Patch 3.2 — tail dump after observation. Done here (not in
+  // observeOneMarker) because we need the total marker count up
+  // front to decide whether to dump.
+  dumpTailMarkersIfEnabled(markers);
 }
 
 void AdaptiveMarkerModel::observeGlobalMarkers(
@@ -130,6 +134,82 @@ void AdaptiveMarkerModel::observeGlobalMarkers(
       observeOneMarker(*m);
     }
   }
+  dumpTailMarkersIfEnabled(markers);
+}
+
+void AdaptiveMarkerModel::dumpTailMarkersIfEnabled(
+    const std::list<std::unique_ptr<frMarker>>& markers)
+{
+  if (!options_.log_tail_csv || options_.tail_log_path.empty()) {
+    return;
+  }
+  if (static_cast<int>(markers.size()) > options_.tail_dump_threshold) {
+    return;
+  }
+  for (const auto& m : markers) {
+    if (m != nullptr) {
+      writeTailRow(*m);
+    }
+  }
+}
+
+void AdaptiveMarkerModel::dumpTailMarkersIfEnabled(
+    const std::vector<std::unique_ptr<frMarker>>& markers)
+{
+  if (!options_.log_tail_csv || options_.tail_log_path.empty()) {
+    return;
+  }
+  if (static_cast<int>(markers.size()) > options_.tail_dump_threshold) {
+    return;
+  }
+  for (const auto& m : markers) {
+    if (m != nullptr) {
+      writeTailRow(*m);
+    }
+  }
+}
+
+void AdaptiveMarkerModel::writeTailRow(const frMarker& marker)
+{
+  const bool need_header = !tail_csv_header_written_;
+  std::ofstream os(options_.tail_log_path,
+                   need_header ? std::ios::trunc : std::ios::app);
+  if (!os.is_open()) {
+    return;
+  }
+  if (need_header) {
+    os << "iter,rule,constraint_typeid,layer,"
+          "bbox_xMin,bbox_yMin,bbox_xMax,bbox_yMax,"
+          "center_x,center_y,num_srcs,num_aggressors,net_ids\n";
+    tail_csv_header_written_ = true;
+  }
+  const AdaptiveRuleClass rule = classifyConstraint(marker.getConstraint());
+  const auto* c = marker.getConstraint();
+  const int ctype = c ? static_cast<int>(c->typeId()) : -1;
+  const odb::Rect bb = marker.getBBox();
+  const int cx = (bb.xMin() + bb.xMax()) / 2;
+  const int cy = (bb.yMin() + bb.yMax()) / 2;
+  os << iter_ << ',' << static_cast<int>(rule) << ',' << ctype << ','
+     << marker.getLayerNum() << ',' << bb.xMin() << ',' << bb.yMin()
+     << ',' << bb.xMax() << ',' << bb.yMax() << ',' << cx << ',' << cy;
+  // num_srcs + num_aggressors
+  os << ',' << marker.getSrcs().size() << ','
+     << marker.getAggressors().size();
+  // net_ids — semicolon-separated list of frcNet owner IDs
+  os << ',';
+  bool first = true;
+  for (frBlockObject* obj : marker.getSrcs()) {
+    if (obj == nullptr || obj->typeId() != frcNet) {
+      continue;
+    }
+    auto* net = static_cast<frNet*>(obj);
+    if (!first) {
+      os << ';';
+    }
+    os << net->getId();
+    first = false;
+  }
+  os << '\n';
 }
 
 void AdaptiveMarkerModel::observeGlobalMarkers(

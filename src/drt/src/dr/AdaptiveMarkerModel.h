@@ -68,6 +68,16 @@ class AdaptiveMarkerModel
     bool log_policy_csv = false;
     std::string policy_log_path;
 
+    // Patch 3.2 tail-dump — per-marker rows written when an iter's
+    // marker count <= tail_dump_threshold (small late-iter tail).
+    // Used to investigate the structural test9 residual: are the
+    // 3-marker tails across variants the SAME physical markers, or
+    // different? Answers H1 (one geometric knot → multiple markers)
+    // and H3 (pin-access residue) with just bbox + layer + net IDs.
+    bool log_tail_csv = false;
+    std::string tail_log_path;
+    int tail_dump_threshold = 20;
+
     // Patch 3.1c — percentile-based dynamic thresholds. Fraction of
     // worker drc_box tiles that should be classified hot / severe
     // based on heat distribution. The dynamic threshold is computed
@@ -155,6 +165,15 @@ class AdaptiveMarkerModel
   void observeOneMarker(const frMarker& marker);
   void writeCsvRowIfEnabled();
   std::size_t heatIdx(int rule, int layer, int ty, int tx) const;
+  // Patch 3.2 — tail-marker dump (one row per marker when iter total
+  // markers <= options_.tail_dump_threshold). Both overloads to
+  // match the observeGlobalMarkers overloads.
+  void dumpTailMarkersIfEnabled(
+      const std::list<std::unique_ptr<frMarker>>& markers);
+  void dumpTailMarkersIfEnabled(
+      const std::vector<std::unique_ptr<frMarker>>& markers);
+  void writeTailRow(const frMarker& marker);
+  mutable bool tail_csv_header_written_ = false;
 
   Options options_;
   frDesign* design_ = nullptr;

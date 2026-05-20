@@ -150,6 +150,16 @@ FlexDR::FlexDR(TritonRoute* router,
       opts.log_policy_csv = true;
       opts.policy_log_path = policy_path;
     }
+    // Patch 3.2 — tail-marker CSV, gated by separate env var. One row
+    // per marker dumped when an iter's marker count is small (default
+    // <= 20). Used to compare residual marker locations across
+    // variants.
+    if (const char* tail_path
+            = std::getenv("OPENROAD_DRT_ADAPTIVE_TAIL_LOG");
+        tail_path != nullptr && tail_path[0] != '\0') {
+      opts.log_tail_csv = true;
+      opts.tail_log_path = tail_path;
+    }
     // Patch 3.1d — multiplier sweep config via env vars. Each defaults
     // to the Patch 3 / 3.1b values; override any subset to sweep.
     auto read_float_env = [](const char* name, float fallback) {
