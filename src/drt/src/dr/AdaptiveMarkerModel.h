@@ -158,6 +158,23 @@ class AdaptiveMarkerModel
     //   3.0 = stubborn-net markers get 4× weight
     float stubborn_mult = 0.0f;
 
+    // Patch 7 — per-worker init-marker DRC mul scaling.
+    // Each worker's marker count at start of main() (init markers)
+    // is an INDEPENDENT signal of how hard the worker will be to
+    // route. P3.5 profiling showed 12× p99-to-max worker imbalance —
+    // the few workers with massive init marker counts dominate wall.
+    // P7 applies extra DRC pressure to those workers REGARDLESS of
+    // tile-heat classification.
+    //
+    // Formula:
+    //   normalized = min(init_markers / per_worker_normalizer, 1.0)
+    //   per_worker_mul = 1.0 + normalized * (severe_drc_mul - 1.0)
+    //   final_mul = max(H_policy_mul, per_worker_mul)
+    //
+    // 0 = off (default). Smaller N = more aggressive ramp.
+    // Env: OPENROAD_DRT_ADAPTIVE_PER_WORKER_NORMALIZER=<int>
+    int per_worker_normalizer = 0;
+
     // Patch 3.5 — runtime profiling. Default-OFF. Gated by env vars:
     //   OPENROAD_DRT_ADAPTIVE_PROFILE=1
     //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR=/path/to/dir (optional;

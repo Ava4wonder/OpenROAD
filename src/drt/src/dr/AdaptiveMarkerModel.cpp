@@ -280,6 +280,12 @@ AdaptiveWorkerPolicy AdaptiveMarkerModel::getWorkerPolicy(
 
   AdaptiveWorkerPolicy policy;
   policy.enabled = options_.enabled;
+  // Patch 7 — propagate per-worker normalizer + severe mul into the
+  // snapshot so the worker can refine its DRC mul after init().
+  // Always stamped (even on identity paths) so worker.main() can
+  // unconditionally read them.
+  policy.per_worker_normalizer = options_.per_worker_normalizer;
+  policy.per_worker_severe_mul = options_.severe_drc_mul;
   if (!options_.enabled) {
     return policy;
   }

@@ -211,6 +211,15 @@ FlexDR::FlexDR(TritonRoute* router,
     // Patch 6 — stubborn-net marker weight boost.
     opts.stubborn_mult = read_float_env(
         "OPENROAD_DRT_ADAPTIVE_STUBBORN_MULT", opts.stubborn_mult);
+    // Patch 7 — per-worker init-marker DRC mul scaling.
+    if (const char* pn
+        = std::getenv("OPENROAD_DRT_ADAPTIVE_PER_WORKER_NORMALIZER");
+        pn != nullptr && pn[0] != '\0') {
+      try {
+        opts.per_worker_normalizer = std::stoi(std::string(pn));
+      } catch (...) {
+      }
+    }
     // Patch 3.5 — runtime profiling. Default OFF. Three env vars:
     //   OPENROAD_DRT_ADAPTIVE_PROFILE=1      enable
     //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR    output dir (defaults to cwd)
@@ -455,6 +464,27 @@ int FlexDRWorker::main(frDesign* design)
   // markers to inform "risk" yet + corrupting initial topology was
   // a documented P4.2 failure mode) and skip workers that started
   // with 0 markers (these don't need any DRC-risk guidance).
+  // Patch 7 — per-worker init-marker DRC mul refinement. Done after
+  // init() loads getInitNumMarkers() but before route_queue() uses
+  // the policy. Mutates adaptive_policy_.drc_cost_mul in-place to
+  // raise it (never lower) when the worker has many init markers.
+  if (!skipRouting_ && adaptive_policy_.per_worker_normalizer > 0
+      && adaptive_policy_.enabled) {
+    const int n_markers = getInitNumMarkers();
+    if (n_markers > 0) {
+      const float normalized
+          = std::min(static_cast<float>(n_markers)
+                         / static_cast<float>(
+                             adaptive_policy_.per_worker_normalizer),
+                     1.0f);
+      const float pw_mul
+          = 1.0f
+            + normalized * (adaptive_policy_.per_worker_severe_mul - 1.0f);
+      if (pw_mul > adaptive_policy_.drc_cost_mul) {
+        adaptive_policy_.drc_cost_mul = pw_mul;
+      }
+    }
+  }
   if (!skipRouting_ && constraint_field_policy_.enabled) {
     const bool skip_for_iter_zero = constraint_field_policy_.skip_iter_zero
                                     && getDRIter() == 0;

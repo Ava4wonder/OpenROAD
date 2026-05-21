@@ -77,6 +77,14 @@ struct AdaptiveWorkerPolicy
   float drc_cost_mul = 1.0f;
   float marker_cost_mul = 1.0f;
   float fixed_shape_cost_mul = 1.0f;
+
+  // Patch 7 — per-worker init-marker scaling. When normalizer > 0,
+  // the worker (inside main(), after init()) recomputes its own
+  // drc_cost_mul by taking max with a per-worker mul derived from
+  // its init_num_markers + the normalizer + the severe mul carried
+  // along here. Read-only after policy snapshot is set.
+  int per_worker_normalizer = 0;
+  float per_worker_severe_mul = 1.0f;
   // marker_decay_override < 0 means "do not override"; the worker keeps the
   // upstream-scheduled decay value.
   float marker_decay_override = -1.0f;
