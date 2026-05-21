@@ -172,6 +172,38 @@ Stop pursuing a patch K if:
   * K's feature-disabled regression run differs from upstream-master
     baseline (build-green rule violation).
 
+## Main-track AdaptiveMarkerModel — TEST9 CEILING REACHED 2026-05-21
+
+Three direct attempts to push past P3.3 H on test9 all closed
+marginal or negative. P3.3 H_drc_xstrong locked at 4 opt + 1
+cleanup / 10:19 wall / DRC=0 / WL 5,413,159 / vias 2,288,021 is
+the **current AdaptiveMarkerModel main-track ceiling on test9**.
+
+| Patch | Mechanism | Best result vs H | Verdict |
+|---|---|---|---|
+| **P5** | iter-0 uniform DRC mul | all 3 variants WORSE on wall, iter-0 markers UP +1.4-5.9% | NEGATIVE |
+| **P6** | stubborn-net marker boost (×2 / ×3 / ×5) | mul=1.0: iter-2 −5 markers (−2.1%). Higher saturates. | MARGINAL |
+| **P7** | per-worker init-marker DRC mul (N=20/50/100, after V1 plumbing bug fix `df906f3aa8`) | N=50: iter-1 −33 markers (−2.75%) but iter-0 +884 (+1.0%), wall +2s | MARGINAL |
+| **P8** | rule-aware DRC mul boost | not run — pattern made outcome predictable | DROPPED |
+
+**Pattern across all three independent experiments**: every
+per-iter / per-worker / cross-iter scalar-mul perturbation
+produces sub-1% wall changes, sign-ambiguous tradeoffs, and a
+consistent iter-0 marker increase as a side effect. Outer iter
+count never moves from 5.
+
+**The structural diagnosis**: H is at a local optimum on test9
+where the marker-heat sensor + DRC-mul actuator combination has
+saturated. Further improvement requires either (a) a
+fundamentally different mechanism (non-mul actuator, explicit
+worker scheduling, net priority, ML-trained policy) or (b) a
+different design where the model has slack (test10 has 16-44
+iters → likely more room; test2 already converges faster than
+H can affect).
+
+All P5-P7 code stays on the branch behind env vars (defaults
+preserve P3.3 H behaviour exactly).
+
 ## Patch 4 — RAMPED DOWN 2026-05-21
 
 After Patch 4.3 V1 passed the convergence-safety bar on test9

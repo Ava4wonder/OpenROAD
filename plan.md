@@ -220,14 +220,55 @@ FlexDR ingests after `#pragma omp parallel for` returns.
      showed that DRC-only policy (no guide rewriting) delivers strong
      improvement; profiling later confirmed runtime is dominated by
      within-worker A* effort, not by guide-imposed paths.
-  6. **Patch 5 / Patch 6 — DEPRIORITISED**: rule-aware DRC policy +
-     layer-aware actuator. These are still on the roadmap but lower
-     priority than Patch 4. The Patch 3.5 profiling diagnosis
-     reframed the runtime problem: it's not about which rule the
-     model amplifies, it's about whether the router can see DRC risk
-     before exact markers materialise. Patch 4's constraint-field
-     layer attacks that root cause directly. Patches 5/6 (rule-aware
-     mul scaling) become refinements of Patch 4 once it ships.
+  6. **Patches 5/6/7 — RUN. ALL CLOSED MARGINAL/NEGATIVE on test9.**
+     Three independent attempts to push past P3.3 H, each isolating
+     a different lever:
+
+       * **P5 — Iter-0 uniform DRC pressure** (commit `0af4842ea2`):
+         all 3 variants (mul=1.25/1.50/2.00) strictly worse on
+         wall (+11s to +17s). iter-0 markers went UP, not down.
+         Diagnosis: model has no information at iter 0 → uniform
+         pressure forces detours → more shorts/spacing markers.
+         Closed NEGATIVE.
+
+       * **P6 — Stubborn-marker classification** (commit
+         `9443dc1dae`): boost weight of markers from nets seen in
+         consecutive iters. Best variant (mul=1.0, 2× boost):
+         iter-2 −5 markers (−2.1%). Higher boosts (2.0, 4.0)
+         saturate back to H trajectory because heat array already
+         classifies most regions as severe. Closed MARGINAL.
+
+       * **P7 — Per-worker init-marker DRC mul** (commits
+         `9aa9d3c` V1 buggy + `df906f3aa8` fix): V1 mutated
+         `adaptive_policy_.drc_cost_mul` but didn't re-apply
+         `gridGraph_.setCost`, so it was a no-op. After fix
+         (P7.b): best variant N=50 iter-1 −33 markers (−2.75%),
+         but iter-0 +884 (+1.0%) as offset. Wall +2s. Closed
+         MARGINAL.
+
+     **The pattern:** every per-iter / per-worker / cross-iter
+     policy perturbation produces **sub-1% wall changes, sign-
+     ambiguous tradeoffs, iter-0 marker count increases as a
+     side effect**. The outer iter count stays at 5. H is at a
+     **local optimum on test9** that small scalar-mul tweaks
+     can't unlock.
+
+  7. **Patch 8 — Rule-aware DRC mul boost** (NOT RUN).
+     Originally fourth in the 4-direction exploration. Dropped
+     after the P5/P6/P7 pattern made the outcome highly
+     predictable: P8 is the same KIND of scalar-mul mechanism
+     (split global mul into per-rule-class scalars). On test9
+     the dominant rule is shorts (×100 weight saturates heat),
+     so the boost would mostly fire on workers already in the
+     severe tier — equivalent to raising `severe_drc_mul` past
+     2.0, which we know triggers the iter-0 worsening pattern.
+
+  **Patch 3.3 H locked as the AdaptiveMarkerModel main-track
+  ceiling on test9** (4 opt + 1 cleanup, 10:19 wall, DRC=0).
+  Further AdaptiveMarkerModel improvements on test9 require a
+  fundamentally different mechanism (non-mul actuator, explicit
+  worker scheduling, net priority, ML-trained policy) OR a
+  different design where the model has slack.
   7. **Patch 7** — Net-score logging + weak queue priority (tie-breaker
      only; no full reorder). Unchanged scope.
 
