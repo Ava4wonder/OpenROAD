@@ -143,6 +143,21 @@ class AdaptiveMarkerModel
     // 1.0 = off). Values 1.25 / 1.50 / 2.00 to be swept.
     float iter0_drc_mul = 1.0f;
 
+    // Patch 6 — stubborn-marker classification.
+    // Track nets that produce markers in CONSECUTIVE iters. Such nets
+    // are "stubborn" — their markers signal a structural problem the
+    // standard policy isn't resolving. When stubborn_mult > 0, the
+    // weight of stubborn-net markers gets multiplied by (1 +
+    // stubborn_mult) before being splatted into the heat array. That
+    // makes stubborn-net regions classify as "severe" by the
+    // existing H policy → severe_drc_mul (2.0) fires there. The
+    // mechanism reuses the H actuator and only changes the SENSOR.
+    // Env: OPENROAD_DRT_ADAPTIVE_STUBBORN_MULT=<float>
+    //   0 = off (default)
+    //   1.0 = stubborn-net markers get 2× weight
+    //   3.0 = stubborn-net markers get 4× weight
+    float stubborn_mult = 0.0f;
+
     // Patch 3.5 — runtime profiling. Default-OFF. Gated by env vars:
     //   OPENROAD_DRT_ADAPTIVE_PROFILE=1
     //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR=/path/to/dir (optional;
@@ -268,6 +283,15 @@ class AdaptiveMarkerModel
   // beginOuterIter() can choose its DRC mul tier from the previous
   // iter's marker count. Set in endOuterIter BEFORE writeCsvRowIfEnabled.
   int last_iter_total_markers_ = 0;
+
+  // Patch 6 stubborn-marker tracking. net_last_seen_iter_ records
+  // the iter in which each net last had a marker observed; if a net
+  // appears in two consecutive iters, it's stubborn. Stubborn count
+  // is cumulative — keeps incrementing for every iter the net
+  // persists, so very-long-stubborn nets get even higher boost in
+  // future enhancements.
+  std::unordered_map<frNet*, int> net_last_seen_iter_;
+  std::unordered_map<frNet*, int> net_stubborn_count_;
   int iter_weighted_score_ = 0;
   bool csv_header_written_ = false;
 

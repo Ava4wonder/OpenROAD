@@ -437,11 +437,38 @@ void AdaptiveMarkerModel::observeOneMarker(const frMarker& marker)
   // silently mis-index.
   const int layer_idx = std::clamp<int>(layer, 0, num_layers_ - 1);
 
-  const int weight = getRuleWeight(rule);
+  int weight = getRuleWeight(rule);
 
   // Net-score accumulation (independent of tile geometry).
-  for (frNet* net : extractMarkerNets(marker)) {
-    net_score_[net] += weight;
+  // Patch 6 — stubborn-marker detection. Track whether any net
+  // associated with this marker also had a marker in the previous
+  // iter. If so, this is a stubborn marker → boost its weight so
+  // the existing H policy (severe tier at top 2% heat) is more
+  // likely to fire on stubborn-net regions. The boost is applied
+  // to the WEIGHT, which then drives both the net_score and the
+  // tile-heat splat below.
+  bool is_stubborn = false;
+  const auto marker_nets = extractMarkerNets(marker);
+  for (frNet* net : marker_nets) {
+    if (net == nullptr) {
+      continue;
+    }
+    // If this net was seen last iter, mark stubborn THIS iter.
+    auto it = net_last_seen_iter_.find(net);
+    if (it != net_last_seen_iter_.end() && it->second == iter_ - 1) {
+      is_stubborn = true;
+      ++net_stubborn_count_[net];
+    }
+    net_last_seen_iter_[net] = iter_;
+  }
+  if (is_stubborn && options_.stubborn_mult > 0.0f + 1e-6f) {
+    const float boost = 1.0f + options_.stubborn_mult;
+    weight = static_cast<int>(static_cast<float>(weight) * boost);
+  }
+  for (frNet* net : marker_nets) {
+    if (net != nullptr) {
+      net_score_[net] += weight;
+    }
   }
 
   // Tile range covered by the inflated marker bbox.

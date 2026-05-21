@@ -208,6 +208,9 @@ FlexDR::FlexDR(TritonRoute* router,
     // Patch 5 — iter-0 uniform DRC pressure.
     opts.iter0_drc_mul = read_float_env(
         "OPENROAD_DRT_ADAPTIVE_ITER0_DRC_MUL", opts.iter0_drc_mul);
+    // Patch 6 — stubborn-net marker weight boost.
+    opts.stubborn_mult = read_float_env(
+        "OPENROAD_DRT_ADAPTIVE_STUBBORN_MULT", opts.stubborn_mult);
     // Patch 3.5 — runtime profiling. Default OFF. Three env vars:
     //   OPENROAD_DRT_ADAPTIVE_PROFILE=1      enable
     //   OPENROAD_DRT_ADAPTIVE_PROFILE_DIR    output dir (defaults to cwd)
