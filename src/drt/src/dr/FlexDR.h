@@ -168,6 +168,13 @@ class FlexDR
   // and all call sites guard on it. See plan.md / current_state.md.
   std::unique_ptr<AdaptiveMarkerModel> adaptive_marker_model_;
 
+  // outer_loop_plus profiling — FlexGC sub-phase breakdown.
+  // Default OFF; when env vars set, processWorkersBatch flushes a
+  // per-FlexDRWorker per-iter row of phase walls.
+  bool flexgc_profile_enabled_ = false;
+  std::string flexgc_profile_dir_;
+  bool flexgc_profile_header_written_ = false;
+
   // distributed
   dst::Distributed* dist_;
   bool dist_on_;

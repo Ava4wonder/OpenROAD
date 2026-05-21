@@ -2,6 +2,7 @@
 // Copyright (c) 2019-2025, The OpenROAD Authors
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <list>
@@ -4171,43 +4172,106 @@ void FlexGCWorker::Impl::modifyMarkers()
 
 int FlexGCWorker::Impl::main()
 {
+  // outer_loop_plus profiling — wrap each phase with chrono. Cheap
+  // (~50ns per timestamp call) even when env var is OFF. Stats are
+  // exposed via FlexGCWorker::getStats() and dumped to a CSV by the
+  // FlexDR thread serially after each worker.main() returns.
+  using clk = std::chrono::steady_clock;
+  using ms = std::chrono::duration<double, std::milli>;
+  const auto t_call_start = clk::now();
+  ++stats_.call_count;
+  auto stamp = [&](double& acc, const clk::time_point& start) {
+    acc += ms(clk::now() - start).count();
+  };
+
   // incremental updates
   pwires_.clear();
   clearMarkers();
   if (!modifiedDRNets_.empty()) {
+    const auto t = clk::now();
     updateGCWorker();
+    stamp(stats_.update_ms, t);
   }
   if (surgicalFixEnabled_ && getDRWorker()) {
-    checkMetalShape(true);
+    {
+      const auto t = clk::now();
+      checkMetalShape(true);
+      stamp(stats_.surg_metal_shape_ms, t);
+    }
     //  minStep patching for GF14
     if (tech_->hasVia2ViaMinStep() || tech_->hasCornerSpacingConstraint()) {
+      const auto t = clk::now();
       patchMetalShape();
+      stamp(stats_.patch_metal_shape_ms, t);
     }
     if (!pwires_.empty()) {
+      const auto t = clk::now();
       updateGCWorker();
+      stamp(stats_.update_ms, t);
     }
   }
   // clear existing markers
   clearMarkers();
-  // check LEF58CornerSpacing and LEF58WidthTable ORTH
-  checkMetalCornerSpacing();
-  // check Short, NSMet, MetSpc based on max rectangles
-  checkMetalSpacing();
-  // check MinWid, MinStp, RectOnly based on polygon
-  checkMetalShape(false);
-  // check eolSpc based on polygon
-  checkMetalEndOfLine();
-  // check CShort, cutSpc, enclosure
-  checkCutSpacing();
-  // check SpacingTable Influence
-  checkMetalSpacingTableInfluence();
-  // check MINIMUMCUT
-  checkMinimumCut();
-  // check LEF58_METALWIDTHVIATABLE
-  checkMetalWidthViaTable();
-  // modify markers for pwires
-  modifyMarkers();
-  normalizeMarkerOrder();
+  {
+    // check LEF58CornerSpacing and LEF58WidthTable ORTH
+    const auto t = clk::now();
+    checkMetalCornerSpacing();
+    stamp(stats_.metal_corner_spacing_ms, t);
+  }
+  {
+    // check Short, NSMet, MetSpc based on max rectangles
+    const auto t = clk::now();
+    checkMetalSpacing();
+    stamp(stats_.metal_spacing_ms, t);
+  }
+  {
+    // check MinWid, MinStp, RectOnly based on polygon
+    const auto t = clk::now();
+    checkMetalShape(false);
+    stamp(stats_.metal_shape_ms, t);
+  }
+  {
+    // check eolSpc based on polygon
+    const auto t = clk::now();
+    checkMetalEndOfLine();
+    stamp(stats_.metal_eol_ms, t);
+  }
+  {
+    // check CShort, cutSpc, enclosure
+    const auto t = clk::now();
+    checkCutSpacing();
+    stamp(stats_.cut_spacing_ms, t);
+  }
+  {
+    // check SpacingTable Influence
+    const auto t = clk::now();
+    checkMetalSpacingTableInfluence();
+    stamp(stats_.metal_spacing_table_influence_ms, t);
+  }
+  {
+    // check MINIMUMCUT
+    const auto t = clk::now();
+    checkMinimumCut();
+    stamp(stats_.minimum_cut_ms, t);
+  }
+  {
+    // check LEF58_METALWIDTHVIATABLE
+    const auto t = clk::now();
+    checkMetalWidthViaTable();
+    stamp(stats_.metal_width_via_table_ms, t);
+  }
+  {
+    // modify markers for pwires
+    const auto t = clk::now();
+    modifyMarkers();
+    stamp(stats_.modify_markers_ms, t);
+  }
+  {
+    const auto t = clk::now();
+    normalizeMarkerOrder();
+    stamp(stats_.normalize_marker_order_ms, t);
+  }
+  stats_.total_ms += ms(clk::now() - t_call_start).count();
   return 0;
 }
 

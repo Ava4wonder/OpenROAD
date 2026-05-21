@@ -23,6 +23,31 @@ class FlexDRWorker;
 class gcNet;
 class gcPin;
 
+// outer_loop_plus profiling — per-FlexGCWorker phase-wall accumulator.
+// Each FlexGCWorker::Impl::main() invocation adds its per-phase chrono
+// deltas into this struct. Default-OFF; only populated when the FlexDR-
+// side env var is set (the chrono wrappers are always live but cheap).
+struct FlexGCStats
+{
+  // Each FlexGCWorker::Impl::main() bumps call_count once + adds time
+  // into the relevant per-phase doubles (milliseconds).
+  int call_count = 0;
+  double total_ms = 0.0;
+  double update_ms = 0.0;
+  double surg_metal_shape_ms = 0.0;
+  double patch_metal_shape_ms = 0.0;
+  double metal_corner_spacing_ms = 0.0;
+  double metal_spacing_ms = 0.0;
+  double metal_shape_ms = 0.0;
+  double metal_eol_ms = 0.0;
+  double cut_spacing_ms = 0.0;
+  double metal_spacing_table_influence_ms = 0.0;
+  double minimum_cut_ms = 0.0;
+  double metal_width_via_table_ms = 0.0;
+  double modify_markers_ms = 0.0;
+  double normalize_marker_order_ms = 0.0;
+};
+
 class FlexGCWorker
 {
  public:
@@ -57,6 +82,9 @@ class FlexGCWorker
   void init(const frDesign* design);
   int main();
   void clearPWires();
+  // outer_loop_plus profiling — per-FlexGCWorker phase wall accumulator.
+  const FlexGCStats& getStats() const;
+  void resetStats();
   // initialization from FlexPA, initPA0 --> addPAObj --> initPA1
   void initPA0(const frDesign* design);
   void initPA1();

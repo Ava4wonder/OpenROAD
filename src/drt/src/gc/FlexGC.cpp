@@ -221,6 +221,17 @@ void FlexGCWorker::clearPWires()
   impl_->pwires_.clear();
 }
 
+// outer_loop_plus profiling — delegate to Impl.
+const FlexGCStats& FlexGCWorker::getStats() const
+{
+  return impl_->getStats();
+}
+
+void FlexGCWorker::resetStats()
+{
+  impl_->resetStats();
+}
+
 bool FlexGCWorker::setTargetNet(frBlockObject* in)
 {
   auto& owner2nets = impl_->owner2nets_;

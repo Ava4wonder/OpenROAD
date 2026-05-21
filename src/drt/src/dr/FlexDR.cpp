@@ -198,6 +198,16 @@ FlexDR::FlexDR(TritonRoute* router,
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }
+  // outer_loop_plus profiling — FlexGC sub-phase breakdown CSV.
+  // Default OFF; only fires when OPENROAD_DRT_FLEXGC_PROFILE=1.
+  if (const char* gp = std::getenv("OPENROAD_DRT_FLEXGC_PROFILE");
+      gp != nullptr && gp[0] == '1') {
+    flexgc_profile_enabled_ = true;
+    if (const char* gpd = std::getenv("OPENROAD_DRT_FLEXGC_PROFILE_DIR");
+        gpd != nullptr && gpd[0] != '\0') {
+      flexgc_profile_dir_ = gpd;
+    }
+  }
 }
 
 FlexDR::~FlexDR() = default;
@@ -814,10 +824,25 @@ void FlexDR::processWorkersBatch(
 {
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
   ThreadException exception;
+  // outer_loop_plus profiling — env-gated FlexGC sub-phase wall capture.
+  // Pre-sized vector keyed by OMP loop index; each thread writes its
+  // own slot, no shared mutation. Flushed to CSV serially after the
+  // OMP parallel-for joins.
+  const bool flexgc_profile_on = flexgc_profile_enabled_;
+  std::vector<FlexGCStats> flexgc_stats;
+  if (flexgc_profile_on) {
+    flexgc_stats.assign(workers_batch.size(), FlexGCStats{});
+  }
 #pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < (int) workers_batch.size(); i++) {  // NOLINT
     try {
+      if (flexgc_profile_on && workers_batch[i]->getGCWorker() != nullptr) {
+        workers_batch[i]->getGCWorker()->resetStats();
+      }
       workers_batch[i]->main(getDesign());
+      if (flexgc_profile_on && workers_batch[i]->getGCWorker() != nullptr) {
+        flexgc_stats[i] = workers_batch[i]->getGCWorker()->getStats();
+      }
 #pragma omp critical
       {
         if (router_cfg_->VERBOSE > 0) {
@@ -829,6 +854,45 @@ void FlexDR::processWorkersBatch(
     }
   }
   exception.rethrow();
+  // outer_loop_plus profiling — serial CSV flush. Append rows; lazy
+  // header on first write of the run.
+  if (flexgc_profile_on) {
+    std::string path = flexgc_profile_dir_;
+    if (!path.empty() && path.back() != '/') {
+      path += '/';
+    }
+    path += "flexgc_phase_breakdown.csv";
+    std::ofstream os(path, std::ios::app);
+    if (os.is_open()) {
+      if (!flexgc_profile_header_written_) {
+        os << "iter,worker_id,call_count,total_ms,update_ms,"
+              "surg_metal_shape_ms,patch_metal_shape_ms,"
+              "metal_corner_spacing_ms,metal_spacing_ms,metal_shape_ms,"
+              "metal_eol_ms,cut_spacing_ms,"
+              "metal_spacing_table_influence_ms,minimum_cut_ms,"
+              "metal_width_via_table_ms,modify_markers_ms,"
+              "normalize_marker_order_ms\n";
+        flexgc_profile_header_written_ = true;
+      }
+      for (std::size_t i = 0; i < flexgc_stats.size(); ++i) {
+        const auto& s = flexgc_stats[i];
+        // Skip uninteresting rows (no GC calls) to keep file small.
+        if (s.call_count == 0) {
+          continue;
+        }
+        os << iter_ << ',' << i << ',' << s.call_count << ','
+           << s.total_ms << ',' << s.update_ms << ','
+           << s.surg_metal_shape_ms << ',' << s.patch_metal_shape_ms
+           << ',' << s.metal_corner_spacing_ms << ','
+           << s.metal_spacing_ms << ',' << s.metal_shape_ms << ','
+           << s.metal_eol_ms << ',' << s.cut_spacing_ms << ','
+           << s.metal_spacing_table_influence_ms << ','
+           << s.minimum_cut_ms << ',' << s.metal_width_via_table_ms
+           << ',' << s.modify_markers_ms << ','
+           << s.normalize_marker_order_ms << '\n';
+      }
+    }
+  }
 }
 
 void FlexDR::processWorkersBatchDistributed(

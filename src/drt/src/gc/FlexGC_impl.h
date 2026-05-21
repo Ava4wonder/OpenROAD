@@ -118,6 +118,12 @@ class FlexGCWorker::Impl
   void init(const frDesign* design);
   int main();
   void end();
+  // outer_loop_plus profiling — per-phase wall accumulator. mutable
+  // because main() is conceptually non-const but the Impl's main()
+  // signature is non-const so we can just keep it as a regular
+  // member.
+  const FlexGCStats& getStats() const { return stats_; }
+  void resetStats() { stats_ = FlexGCStats{}; }
   // initialization from FlexPA, initPA0 --> addPAObj --> initPA1
   void initPA0(const frDesign* design);
   void initPA1();
@@ -140,6 +146,12 @@ class FlexGCWorker::Impl
   std::vector<std::unique_ptr<frMarker>> markers_;
   std::map<MarkerId, frMarker*> mapMarkers_;
   std::vector<std::unique_ptr<drPatchWire>> pwires_;
+
+  // outer_loop_plus profiling — per-phase wall accumulator. Bumped
+  // by FlexGCWorker::Impl::main() via chrono around each phase.
+  // Default-constructed (all zeros); resetStats() callers can zero
+  // it explicitly between iters.
+  FlexGCStats stats_;
 
   FlexGCWorkerRegionQuery rq_;
   bool printMarker_;
