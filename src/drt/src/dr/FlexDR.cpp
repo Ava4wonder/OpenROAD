@@ -465,13 +465,17 @@ int FlexDRWorker::main(frDesign* design)
   // a documented P4.2 failure mode) and skip workers that started
   // with 0 markers (these don't need any DRC-risk guidance).
   // Patch 7 — per-worker init-marker DRC mul refinement. Done after
-  // init() loads getInitNumMarkers() but before route_queue() uses
-  // the policy. Mutates adaptive_policy_.drc_cost_mul in-place to
-  // raise it (never lower) when the worker has many init markers.
+  // init() loads getInitNumMarkers() and AFTER init() has already
+  // pushed workerDRCCost_/etc into gridGraph_ via gridGraph_.setCost.
+  // To actually change routing we therefore MUST: (1) scale
+  // workerDRCCost_ in place, (2) re-call gridGraph_.setCost so the
+  // gridGraph picks up the new value. Otherwise the mutation has no
+  // effect — that's the bug that made P7's first sweep
+  // (commit 9aa9d3...) produce bit-identical output.
   if (!skipRouting_ && adaptive_policy_.per_worker_normalizer > 0
       && adaptive_policy_.enabled) {
     const int n_markers = getInitNumMarkers();
-    if (n_markers > 0) {
+    if (n_markers > 0 && adaptive_policy_.drc_cost_mul > 0.0f) {
       const float normalized
           = std::min(static_cast<float>(n_markers)
                          / static_cast<float>(
@@ -480,8 +484,14 @@ int FlexDRWorker::main(frDesign* design)
       const float pw_mul
           = 1.0f
             + normalized * (adaptive_policy_.per_worker_severe_mul - 1.0f);
-      if (pw_mul > adaptive_policy_.drc_cost_mul) {
+      if (pw_mul > adaptive_policy_.drc_cost_mul + 1e-6f) {
+        const float scale = pw_mul / adaptive_policy_.drc_cost_mul;
+        workerDRCCost_ = static_cast<frUInt4>(std::lround(
+            static_cast<float>(workerDRCCost_) * scale));
         adaptive_policy_.drc_cost_mul = pw_mul;
+        gridGraph_.setCost(workerDRCCost_,
+                           workerMarkerCost_,
+                           workerFixedShapeCost_);
       }
     }
   }
