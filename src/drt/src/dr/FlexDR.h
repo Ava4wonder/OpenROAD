@@ -188,6 +188,12 @@ class FlexDR
   ConstraintFieldPolicy constraint_field_policy_;
   bool constraint_field_header_written_ = false;
 
+  // Patch 9 — OMP scheduling reform flag. Default-OFF. When set via
+  // OPENROAD_DRT_ADAPTIVE_OMP_SORT=1, processWorkersBatch pre-sorts
+  // workers heaviest-first before the OMP loop. See
+  // processWorkersBatch for the predictor used per iter.
+  bool omp_sort_enabled_ = false;
+
   // distributed
   dst::Distributed* dist_;
   bool dist_on_;

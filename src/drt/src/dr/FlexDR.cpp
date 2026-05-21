@@ -211,6 +211,11 @@ FlexDR::FlexDR(TritonRoute* router,
     // Patch 6 — stubborn-net marker weight boost.
     opts.stubborn_mult = read_float_env(
         "OPENROAD_DRT_ADAPTIVE_STUBBORN_MULT", opts.stubborn_mult);
+    // Patch 9 — OMP scheduling reform.
+    if (const char* os = std::getenv("OPENROAD_DRT_ADAPTIVE_OMP_SORT");
+        os != nullptr && os[0] == '1') {
+      omp_sort_enabled_ = true;
+    }
     // Patch 7 — per-worker init-marker DRC mul scaling.
     if (const char* pn
         = std::getenv("OPENROAD_DRT_ADAPTIVE_PER_WORKER_NORMALIZER");
@@ -979,6 +984,47 @@ void FlexDR::processWorkersBatch(
     std::vector<std::unique_ptr<FlexDRWorker>>& workers_batch,
     IterationProgress& iter_prog)
 {
+  // Patch 9 — OMP scheduling reform. Pre-sort workers heaviest-first
+  // so the OMP dynamic scheduler starts heavy work immediately,
+  // collapsing the straggler tail. P3.3-H profiling on test9 showed
+  // 11-17% imbalance overhead on iters 0 and 1 (max worker 5+ sec
+  // while p99 is ~400ms). Sort keys:
+  //   iter 0: queryGuide(routeBox).size() — guide count proxies the
+  //     amount of routing work in this region (no markers exist yet)
+  //   iter >= 1: queryMarker(drcBox).size() — direct marker count is
+  //     the strongest available predictor of wall.
+  // Default-OFF (preserves canonical behaviour bit-identical when
+  // env unset). Env: OPENROAD_DRT_ADAPTIVE_OMP_SORT=1.
+  if (omp_sort_enabled_ && workers_batch.size() > 1) {
+    auto* rq = getDesign()->getRegionQuery();
+    std::vector<int> keys(workers_batch.size(), 0);
+    if (iter_ == 0) {
+      for (std::size_t i = 0; i < workers_batch.size(); ++i) {
+        std::vector<frGuide*> result;
+        rq->queryGuide(workers_batch[i]->getRouteBox(), result);
+        keys[i] = static_cast<int>(result.size());
+      }
+    } else {
+      for (std::size_t i = 0; i < workers_batch.size(); ++i) {
+        std::vector<frMarker*> result;
+        rq->queryMarker(workers_batch[i]->getDrcBox(), result);
+        keys[i] = static_cast<int>(result.size());
+      }
+    }
+    // Sort indices by key DESCENDING, then apply permutation.
+    std::vector<std::size_t> idx(workers_batch.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::stable_sort(idx.begin(), idx.end(),
+                     [&](std::size_t a, std::size_t b) {
+                       return keys[a] > keys[b];
+                     });
+    std::vector<std::unique_ptr<FlexDRWorker>> sorted_batch;
+    sorted_batch.reserve(workers_batch.size());
+    for (std::size_t i : idx) {
+      sorted_batch.push_back(std::move(workers_batch[i]));
+    }
+    workers_batch = std::move(sorted_batch);
+  }
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
   ThreadException exception;
   // Patch 3.5 — per-worker profile collection. Pre-sized to the batch
