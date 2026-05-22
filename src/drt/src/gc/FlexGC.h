@@ -46,6 +46,14 @@ struct FlexGCStats
   double metal_width_via_table_ms = 0.0;
   double modify_markers_ms = 0.0;
   double normalize_marker_order_ms = 0.0;
+
+  // EOL_GC.P.1 V1 — when OPENROAD_DRT_EOL_KERNELS=1, the kernel
+  // code path bumps eol_kernel_calls + eol_kernels_ms so we can
+  // verify the path is taken and compare its wall to the baseline.
+  // metal_eol_ms still accumulates the total (both paths) so the
+  // header-level comparison stays meaningful.
+  long eol_kernel_calls = 0;
+  double eol_kernels_ms = 0.0;
 };
 
 class FlexGCWorker

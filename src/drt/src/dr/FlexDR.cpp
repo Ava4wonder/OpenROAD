@@ -871,7 +871,9 @@ void FlexDR::processWorkersBatch(
               "metal_eol_ms,cut_spacing_ms,"
               "metal_spacing_table_influence_ms,minimum_cut_ms,"
               "metal_width_via_table_ms,modify_markers_ms,"
-              "normalize_marker_order_ms\n";
+              "normalize_marker_order_ms,"
+              // EOL_GC.P.1 V1 fields
+              "eol_kernel_calls,eol_kernels_ms\n";
         flexgc_profile_header_written_ = true;
       }
       for (std::size_t i = 0; i < flexgc_stats.size(); ++i) {
@@ -889,7 +891,8 @@ void FlexDR::processWorkersBatch(
            << s.metal_spacing_table_influence_ms << ','
            << s.minimum_cut_ms << ',' << s.metal_width_via_table_ms
            << ',' << s.modify_markers_ms << ','
-           << s.normalize_marker_order_ms << '\n';
+           << s.normalize_marker_order_ms << ','
+           << s.eol_kernel_calls << ',' << s.eol_kernels_ms << '\n';
       }
     }
   }

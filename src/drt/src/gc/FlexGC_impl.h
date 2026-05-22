@@ -341,6 +341,13 @@ class FlexGCWorker::Impl
 
   void checkMetalEndOfLine();
   void checkMetalEndOfLine_main(gcPin* pin);
+  // EOL_GC.P.1 V1 — alternate code path that collects candidate
+  // edges into a flat vector first, then dispatches the SAME
+  // per-constraint checks. Semantically equivalent to the legacy
+  // _main path; framework-only V1 sets up the data model for V2+
+  // to batch-query the spatial index. Gated by
+  // OPENROAD_DRT_EOL_KERNELS=1.
+  void checkMetalEndOfLine_main_kernels(gcPin* pin);
   void checkMetalEndOfLine_eol(gcSegment* edge, frConstraint* constraint);
   void checkMetalEndOfLine_eol_TN(gcSegment* edge, frConstraint* constraint);
   bool qualifiesAsEol(gcSegment* edge,

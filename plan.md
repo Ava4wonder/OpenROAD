@@ -213,6 +213,123 @@ this branch. The relevant numbers for `outer_loop_plus` are:
     that's a future merge of two independent branches once each proves
     out on its own.
 
+## EOL_GC research direction — kernel-projection EOL checking
+
+(Added 2026-05-22 after FlexGC profile run on test9 P3.3 H.)
+
+### Motivation
+
+`flexgc_phase_breakdown.csv` from the test9 P3.3 H profile run
+showed the FlexGC time budget concentrates on two phases:
+
+  * `checkMetalEndOfLine` (EOL) — **41.2 % of FlexGC CPU**
+    (278.9 sec of 677.1 sec total across all OMP threads)
+  * `updateGCWorker` (incremental state refresh) — 36.5 %
+    (247.4 sec)
+
+cutSpacing is only 0.8 %, corner-spacing / spacing-table-influence
+/ minimum-cut / width-via-table are all < 0.1 %. **EOL is the
+single biggest GC sub-phase by a wide margin.**
+
+FlexGC is ~14 % of total DRT wall (677 sec CPU / 8 OMP threads ≈
+85 sec of GC wall vs 614 sec total DRT wall). So even halving GC
+buys ~7 % DRT wall — meaningful, not transformative. EOL alone
+is roughly 5.8 % of DRT wall (35.4 sec wall of EOL → ~5.8 % of
+total).
+
+### Research direction
+
+Restructure EOL checking from
+```
+for each EOL edge:
+  for each EOL constraint:
+    find nearby objects, then check pairwise predicate
+```
+to a kernel-projection model
+```
+for each EOL edge:
+  generate one or more axis-aligned anisotropic kernel rectangles
+  (forward, side, end-to-end, corner-conditioned, same-net mask,
+   fixed-shape mask)
+for each routing shape:
+  query spatial index for kernels intersecting the shape
+  apply final scalar predicate on the (kernel, shape) hit pairs
+```
+
+Formally:
+```
+Violation = (EOLKernel(e) ∩ ShapeIndex) ∖ ExceptionMask(e)
+```
+
+Where `EOLKernel(e) = e ⊕ B_EOL` is morphological dilation with
+rule-induced anisotropic structuring element `B_EOL`. Since PDK
+rules are Manhattan/orthogonal dominant, `B_EOL` is a small set
+of axis-aligned rectangles — **NOT** a rasterized bitmap, exact
+DBU integer rectangle algebra throughout.
+
+### Why this may help
+
+  * Per-edge per-constraint setup overhead amortised when kernels
+    are pre-built in one pass.
+  * Spatial index can do batch-query of a kernel set against the
+    shape index instead of N independent single-rect queries.
+  * Same-net + fixed-shape exception masks become explicit data
+    instead of branches inside the inner predicate, allowing
+    better branch prediction / SIMD opportunities.
+  * Constraint-family dispatch lifted out of the inner loop.
+
+### Why this may NOT help much
+
+  * FlexGC is only 14 % of DRT wall; EOL is 41 % of FlexGC; so
+    EOL is ~6 % of DRT wall. Best-case 50 % EOL speedup → ~3 %
+    DRT wall on test9.
+  * The existing code already uses boost::polygon rtree for
+    spatial queries — restructuring may not fundamentally change
+    the work, just shift where it's spent.
+  * Risk of correctness regression: EOL has subtle exception
+    masks (same-net continuation, corner cases, parallel-within
+    rules); refactoring risks subtle bugs.
+
+### Proposal sequence
+
+  * **EOL_GC.P.1** — Kernel-data-model scaffolding (THIS PATCH):
+    introduce an `EolKernel` struct (edge + constraint +
+    derived bbox kernel) and a `checkMetalEndOfLine_kernels`
+    code path gated by `OPENROAD_DRT_EOL_KERNELS=1`. V1 uses
+    SAME inner predicates as the existing path — semantically
+    equivalent, just reorders the loop and pre-builds kernel
+    list. Measures EOL wall against baseline. If wall is
+    unchanged but ms-per-kernel drops slightly, framework is in
+    place for V2+ to do real batching. If wall increases, revert.
+  * EOL_GC.P.2 — Replace per-kernel single rtree query with a
+    batched multi-rect query (one rtree traversal per kernel
+    family) + early-exit when kernels are mutually contained.
+  * EOL_GC.P.3 — Move ExceptionMask (same-net continuation +
+    fixed-shape exceptions) to explicit data structures
+    queried once per shape instead of branched per pair.
+  * EOL_GC.P.4 — Update-incremental kernels: on routing changes,
+    invalidate only the dirty kernels instead of full rebuild
+    (this would also attack the 36.5 % spent in
+    `updateGCWorker`).
+
+Strict correctness for all V1: env-OFF preserves exact baseline
+FlexGC trajectory + final DRC. V1 instrumentation includes
+`eol_kernels_ms` accumulator alongside the existing
+`metal_eol_ms` in FlexGCStats so we can compare apples-to-apples.
+
+### Success criteria for P.1 V1
+
+  * Final DRC = 0 (no semantic regression)
+  * Trajectory match (within ±10 markers per iter — H itself
+    shows minor run-to-run noise)
+  * EOL phase wall ± 5 % (the loop restructure itself is small)
+  * Framework wired correctly: the kernel-list data model
+    exists, env-toggleable, ready for V2 batching
+
+If V1 passes, the question becomes: **does V2's true batching
+buy meaningful wall?** That's the test of whether this whole
+direction is worth pursuing further.
+
 ## Thread-safety rule
 
 ```

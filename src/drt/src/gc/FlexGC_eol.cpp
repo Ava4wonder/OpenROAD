@@ -2,7 +2,9 @@
 // Copyright (c) 2019-2025, The OpenROAD Authors
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <tuple>
 #include <utility>
@@ -1265,8 +1267,29 @@ void FlexGCWorker::Impl::checkMetalEndOfLine_ext(
   }
 }
 
+namespace {
+// EOL_GC.P.1 V1 — env-var-gated dispatch to the kernel data-model
+// code path. Cached at first access (C++11 magic-static thread-safe).
+bool eolKernelsEnabled()
+{
+  static const bool enabled = []() {
+    const char* v = std::getenv("OPENROAD_DRT_EOL_KERNELS");
+    return v != nullptr && v[0] == '1';
+  }();
+  return enabled;
+}
+}  // namespace
+
 void FlexGCWorker::Impl::checkMetalEndOfLine_main(gcPin* pin)
 {
+  // EOL_GC.P.1 V1 — early dispatch to the kernel path when enabled.
+  // The new path collects candidate edges first then iterates the
+  // same per-constraint dispatch. Default-OFF preserves canonical
+  // legacy behaviour exactly.
+  if (eolKernelsEnabled()) {
+    checkMetalEndOfLine_main_kernels(pin);
+    return;
+  }
   auto poly = pin->getPolygon();
   auto layerNum = poly->getLayerNum();
   auto layer = getTech()->getLayer(layerNum);
@@ -1317,6 +1340,80 @@ void FlexGCWorker::Impl::checkMetalEndOfLine_main(gcPin* pin)
       }
     }
   }
+}
+
+void FlexGCWorker::Impl::checkMetalEndOfLine_main_kernels(gcPin* pin)
+{
+  // EOL_GC.P.1 V1 — kernel-data-model scaffolding.
+  //
+  // Restructures the per-edge per-constraint loop into a
+  // collect-then-dispatch pattern. V1 keeps the inner check fns
+  // identical to the legacy path; the only semantic difference is
+  // the order of iteration (which produces no behavioural change
+  // since the inner fns are independent per (edge, con)).
+  //
+  // Future versions (P.1.V2+) will: pre-compute the kernel
+  // query-rectangles into a flat vector, batch-query the rtree
+  // once per kernel-family, and apply the exception masks
+  // (same-net / fixed-shape) as explicit filters instead of
+  // branches inside the inner predicate.
+  using clk = std::chrono::steady_clock;
+  using millis = std::chrono::duration<double, std::milli>;
+  const auto t_start = clk::now();
+
+  auto poly = pin->getPolygon();
+  auto layerNum = poly->getLayerNum();
+  auto layer = getTech()->getLayer(layerNum);
+  auto& cons = layer->getEolSpacing();
+  auto lef58Cons = layer->getLef58SpacingEndOfLineConstraints();
+  auto keepoutCons = layer->getLef58EolKeepOutConstraints();
+  auto extCons = layer->getLef58EolExtConstraints();
+  if (cons.empty() && lef58Cons.empty() && keepoutCons.empty()
+      && extCons.empty()) {
+    return;
+  }
+
+  const bool isVertical = layer->isVertical();
+
+  // Phase 1: collect candidate edges (apply ignoreLongSideEOL
+  // upfront, ONCE per edge, instead of per edge × constraint).
+  std::vector<gcSegment*> candidate_edges;
+  for (auto& edges : pin->getPolygonEdges()) {
+    for (auto& edge : edges) {
+      if (ignoreLongSideEOL_
+          && layer->getLayerNum() > 2) {
+        const auto d = edge->getDir();
+        if ((d == frDirEnum::N || d == frDirEnum::S) && isVertical) {
+          continue;
+        }
+        if ((d == frDirEnum::E || d == frDirEnum::W) && !isVertical) {
+          continue;
+        }
+      }
+      candidate_edges.push_back(edge.get());
+    }
+  }
+
+  // Phase 2: dispatch. Same per-constraint dispatch as legacy
+  // path; the data model is now "candidate-edge list × constraint
+  // family" which is the substrate for V2's batched rtree query.
+  for (auto* edge : candidate_edges) {
+    for (auto con : cons) {
+      checkMetalEndOfLine_eol(edge, con);
+    }
+    for (auto con : lef58Cons) {
+      checkMetalEndOfLine_eol(edge, con);
+    }
+    for (auto con : keepoutCons) {
+      checkMetalEOLkeepout_main(edge, con);
+    }
+    for (auto con : extCons) {
+      checkMetalEndOfLine_ext(edge, con);
+    }
+  }
+
+  stats_.eol_kernels_ms += millis(clk::now() - t_start).count();
+  stats_.eol_kernel_calls += static_cast<long>(candidate_edges.size());
 }
 
 void FlexGCWorker::Impl::checkMetalEndOfLine()
