@@ -393,6 +393,188 @@ class PerIterSeams
   mutable std::mutex mutex_;
   std::vector<frCoord> curr_xs_, curr_ys_;
   std::vector<frCoord> prev_xs_, prev_ys_;
+
+ public:
+  // E1 — accessors so CrossSeamRepair can read this iter's accumulated
+  // seam coords WITHOUT swapping them to prev (snapshotAsPrev would
+  // empty curr_).
+  std::vector<frCoord> getCurrXsSorted() const
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto v = curr_xs_;
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return v;
+  }
+  std::vector<frCoord> getCurrYsSorted() const
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto v = curr_ys_;
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return v;
+  }
+};
+
+// Forward decl — boundaryDiagRuleClassName is defined below; needed
+// here for CrossSeamRepair::endIterAnalysis() rule classification.
+const char* boundaryDiagRuleClassName(frConstraintTypeEnum t);
+
+// CrossSeamRepair (CSR) E1 — selection-only stage. Gated by env
+// OPENROAD_DRT_CSR_DIR. Called at end of each optimizationFlow iter:
+// walks topBlock markers, applies the cross-worker different-net
+// seam-spacing predicate, emits per-marker selection CSV. NO repair
+// workers in E1; this is the candidate-coverage gate experiment.
+//
+// Predicate (plan §6 stage A):
+//   1. marker has >=2 distinct frNet srcs (different-net)
+//   2. marker rule_class is spacing-like / short-like / eol-like / cut-like
+//   3. marker bbox center is within seam_band_dbu of some iter's worker
+//      seam (PerIterSeams::curr_xs_/curr_ys_)
+class CrossSeamRepair
+{
+ public:
+  static CrossSeamRepair& instance()
+  {
+    static CrossSeamRepair inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_CSR_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    dir_ = v;
+    enabled_ = true;
+    mkdir(dir_.c_str(), 0777);
+  }
+  bool enabled() const { return enabled_; }
+  void closeOnEnd()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (out_.is_open()) {
+      out_.flush();
+      out_.close();
+    }
+  }
+  static bool isSpacingLikeRule(const char* rule_class)
+  {
+    if (rule_class == nullptr) {
+      return false;
+    }
+    std::string s(rule_class);
+    return s.find("short") != std::string::npos
+           || s.find("spc") != std::string::npos
+           || s.find("Spc") != std::string::npos
+           || s.find("eol") != std::string::npos
+           || s.find("Eol") != std::string::npos
+           || s.find("cut") != std::string::npos
+           || s.find("Cut") != std::string::npos;
+  }
+  void endIterAnalysis(int iter,
+                       frBlock* topBlock,
+                       const std::vector<frCoord>& seam_xs_sorted,
+                       const std::vector<frCoord>& seam_ys_sorted,
+                       frCoord seam_band_dbu)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (last_iter_ != iter) {
+      if (out_.is_open()) {
+        out_.flush();
+        out_.close();
+      }
+      const std::string path
+          = dir_ + "/csr_e1_iter" + std::to_string(iter) + ".csv";
+      out_.open(path);
+      out_ << "iter,marker_idx,layer,rule_class,bbox_xmin,bbox_ymin,"
+              "bbox_xmax,bbox_ymax,num_distinct_nets,is_diff_net,"
+              "rule_spacing_like,dist_to_nearest_seam_dbu,is_near_seam,"
+              "is_csr_candidate\n";
+      last_iter_ = iter;
+    }
+    auto distToSeam = [&](frCoord c,
+                          const std::vector<frCoord>& v) -> frCoord {
+      if (v.empty()) {
+        return std::numeric_limits<frCoord>::max();
+      }
+      auto it = std::lower_bound(v.begin(), v.end(), c);
+      frCoord best = std::numeric_limits<frCoord>::max();
+      if (it != v.end()) {
+        best = std::min(best, *it - c);
+      }
+      if (it != v.begin()) {
+        best = std::min(best, c - *(it - 1));
+      }
+      return best;
+    };
+    int idx = -1;
+    const auto& markers = topBlock->getMarkers();
+    for (const auto& mu : markers) {
+      ++idx;
+      const auto& mk = *mu;
+      const auto bb = mk.getBBox();
+      const frLayerNum ln = mk.getLayerNum();
+      const char* rc = "unknown";
+      if (mk.getConstraint() != nullptr) {
+        rc = boundaryDiagRuleClassName(mk.getConstraint()->typeId());
+      }
+      std::set<frNet*> nets;
+      for (auto* src : mk.getSrcs()) {
+        if (src == nullptr) {
+          continue;
+        }
+        frNet* n = nullptr;
+        switch (src->typeId()) {
+          case frcNet:
+            n = static_cast<frNet*>(src);
+            break;
+          case frcInstTerm:
+            n = static_cast<frInstTerm*>(src)->getNet();
+            break;
+          case frcBTerm:
+            n = static_cast<frBTerm*>(src)->getNet();
+            break;
+          default:
+            break;
+        }
+        if (n != nullptr) {
+          nets.insert(n);
+        }
+      }
+      const int ndn = static_cast<int>(nets.size());
+      const bool is_diff_net = ndn >= 2;
+      const bool rule_ok = isSpacingLikeRule(rc);
+      const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+      const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+      const frCoord dx = distToSeam(cx, seam_xs_sorted);
+      const frCoord dy = distToSeam(cy, seam_ys_sorted);
+      const frCoord d_seam = std::min(dx, dy);
+      const bool is_near_seam = (d_seam <= seam_band_dbu);
+      const bool is_candidate = is_diff_net && rule_ok && is_near_seam;
+      out_ << iter << "," << idx << "," << ln << "," << rc << "," << bb.xMin()
+           << "," << bb.yMin() << "," << bb.xMax() << "," << bb.yMax() << ","
+           << ndn << "," << (is_diff_net ? 1 : 0) << ","
+           << (rule_ok ? 1 : 0) << "," << d_seam << ","
+           << (is_near_seam ? 1 : 0) << "," << (is_candidate ? 1 : 0) << "\n";
+    }
+    out_.flush();
+  }
+
+ private:
+  std::mutex mutex_;
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::string dir_;
+  std::ofstream out_;
+  int last_iter_ = -1;
 };
 
 // P4.0 — classify marker bbox centroid against routeBox edges. K=200 DBU
@@ -1775,6 +1957,8 @@ void FlexDR::processWorkersBatch(
   if (MarkerDiagDump::instance().enabled()) {
     MarkerDiagDump::instance().setIterBatch(iter_, boundary_diag_batch_id_);
   }
+  // CSR E1 — init env-gate.
+  CrossSeamRepair::instance().initFromEnv();
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
   // P4.0 BoundaryDiag — assign a per-worker monotonic id within this
   // batch and populate the global WorkerBoxRegistry so the per-marker
@@ -2459,6 +2643,21 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
 
   if (!iter_) {
     removeGCell2BoundaryPin();
+  }
+  // CSR E1 — selection-only analysis at iter end. Walks all markers,
+  // applies cross-worker different-net spacing-like predicate against
+  // this iter's accumulated seam coords from PerIterSeams. Per-iter
+  // CSV emitted. NO repair workers in E1; this is the candidate
+  // coverage gate experiment (need >=50% of seam_spacing covered).
+  if (CrossSeamRepair::instance().enabled()) {
+    const auto xs = PerIterSeams::instance().getCurrXsSorted();
+    const auto ys = PerIterSeams::instance().getCurrYsSorted();
+    CrossSeamRepair::instance().endIterAnalysis(
+        iter_,
+        getDesign()->getTopBlock(),
+        xs,
+        ys,
+        /*seam_band_dbu=*/router_cfg_->DRCSAFEDIST);
   }
 }
 
