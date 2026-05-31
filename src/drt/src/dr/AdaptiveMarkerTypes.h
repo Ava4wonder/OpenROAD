@@ -87,6 +87,13 @@ struct AdaptiveWorkerPolicy
   // the struct layout that workers consume.
   bool use_rule_aware_marker_increment = false;
   bool use_layer_aware_cost = false;
+
+  // P4.A — diagnostic-only: the BBH-tier multiplier that was combined
+  // (via max) with the H-tier drc_cost_mul to produce the final
+  // drc_cost_mul. 1.0 = no BBH bump (worker not in a hot boundary
+  // band, or BBH disabled). The integration site uses
+  // drc_cost_mul only; bbh_mul is kept for CSV diagnostics.
+  float bbh_mul = 1.0f;
 };
 
 // Per-worker output. Returned by FlexDRWorker after main(). FlexDR ingests

@@ -32,6 +32,7 @@ add_library(drt_lib
   src/dr/FlexDR_conn.cpp
   src/dr/FlexDR_init.cpp
   src/dr/FlexDR.cpp
+  src/dr/ObjLocality.cpp
   src/dr/FlexDRFlow.cpp
   src/db/drObj/drNet.cpp
   src/dr/FlexDR_maze.cpp

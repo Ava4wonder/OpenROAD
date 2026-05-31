@@ -111,6 +111,22 @@ class AdaptiveMarkerModel
     float severe_drc_mul = 2.00f;
     float severe_marker_mul = 1.00f;
     float severe_decay_override = -1.0f;
+
+    // P4.A — Adaptive Boundary-Band Heat (BBH). Default OFF: when
+    // bbh_enabled = false, the BBH code paths are inert and the model
+    // remains bit-identical to P3.3 H. The "stitch" classification is
+    // a geometric proxy (marker center within bbh_band_width_dbu of
+    // any worker-grid line). Per-layer heat is accumulated separately
+    // from layer_heat_ into bbh_heat_, with its own per-iter
+    // percentile thresholds. The BBH-tier mul is combined with the
+    // H-tier mul via max() (NOT multiplicative), so a tile that is
+    // either H-hot or BBH-severe takes the WORSE of the two.
+    bool bbh_enabled = false;
+    float bbh_band_width_dbu = 200.0f;
+    float bbh_hot_drc_mul = 1.50f;
+    float bbh_severe_drc_mul = 2.00f;
+    float bbh_hot_percentile = 0.10f;
+    float bbh_severe_percentile = 0.02f;
   };
 
   AdaptiveMarkerModel(const Options& options,
@@ -144,6 +160,12 @@ class AdaptiveMarkerModel
   void observeGlobalMarkers(const std::vector<frMarker>& markers);
   void observeWorkerStats(const AdaptiveWorkerStats& stats);
 
+  // P4.A — feed a single marker that has been classified by the
+  // FlexDR caller as a "stitch" (its bbox center lies within
+  // options_.bbh_band_width_dbu of a worker-grid line). Mutates
+  // bbh_heat_; no-op when !options_.bbh_enabled.
+  void observeStitchMarker(const frMarker& marker);
+
   // Read paths — safe to call from any thread provided no concurrent
   // mutation (which is guaranteed by the integration contract: workers
   // call this BEFORE main() returns, so the FlexDR thread is blocked
@@ -176,6 +198,8 @@ class AdaptiveMarkerModel
   void observeOneMarker(const frMarker& marker);
   void writeCsvRowIfEnabled();
   std::size_t heatIdx(int rule, int layer, int ty, int tx) const;
+  // P4.A — index into the 3D bbh_heat_ array: [layer][ty][tx].
+  std::size_t bbhHeatIdx(int layer, int ty, int tx) const;
   // Patch 3.2 — tail-marker dump (one row per marker when iter total
   // markers <= options_.tail_dump_threshold). Both overloads to
   // match the observeGlobalMarkers overloads.
@@ -230,6 +254,20 @@ class AdaptiveMarkerModel
   // run (i.e. iter 0 still uses the static floors only).
   int dynamic_hot_threshold_ = 0;
   int dynamic_severe_threshold_ = 0;
+
+  // P4.A — Boundary-Band Heat (BBH). 3D heat array indexed
+  // [layer][ty][tx], same tile dimensions as the existing per-(rule,
+  // layer) heat array. Only accumulates from markers the FlexDR
+  // caller has classified as "stitch" (within bbh_band_width_dbu of
+  // any worker routeBox edge / grid line). Dynamic thresholds are
+  // computed at endOuterIter from this array's distribution and used
+  // by getWorkerPolicy.
+  std::vector<std::uint16_t> bbh_heat_;
+  int dynamic_bbh_hot_threshold_ = 0;
+  int dynamic_bbh_severe_threshold_ = 0;
+  int total_stitch_markers_observed_ = 0;
+  mutable int iter_bbh_hot_workers_ = 0;
+  mutable int iter_bbh_severe_workers_ = 0;
 
   std::unordered_map<frNet*, int> net_score_;
 

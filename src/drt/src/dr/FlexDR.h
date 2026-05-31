@@ -168,6 +168,13 @@ class FlexDR
   // and all call sites guard on it. See plan.md / current_state.md.
   std::unique_ptr<AdaptiveMarkerModel> adaptive_marker_model_;
 
+  // P4.0 BoundaryDiag — monotonic batch counter shared between the
+  // per-worker BoundaryDiagDump and the per-marker MarkerDiagDump so
+  // rows can be joined on (iter, batch_id, worker_id). Bumped only when
+  // OPENROAD_DRT_BOUNDARY_DIAG_DIR is set; otherwise the increments
+  // never fire and the field stays at 0.
+  int boundary_diag_batch_id_ = 0;
+
   // distributed
   dst::Distributed* dist_;
   bool dist_on_;
@@ -601,6 +608,71 @@ class FlexDRWorker
   std::vector<frMarker> bestMarkers_;
   FlexDRWorkerRegionQuery rq_;
   std::vector<frNonDefaultRule*> ndrs_;
+
+ public:
+  // P4.0 BoundaryDiag — per-worker diagnostic counters. Populated by
+  // unconditional hooks in initNet_boundary / initNets / endRemoveNets_pathSeg
+  // / endAddNets_merge (all cheap integer ++) plus FlexDRWorker::main()
+  // (pre-cleanup near_boundary computation, OMP thread stash). Emitted to
+  // CSV only when OPENROAD_DRT_BOUNDARY_DIAG_DIR is set; with the env var
+  // unset the counters are still incremented but never read, so the
+  // observable trajectory is bit-identical to upstream.
+  struct BoundaryDiagStats
+  {
+    int num_nets = 0;
+    int num_true_pins = 0;        // term + instTerm pins inside routeBox
+    int num_boundary_pins = 0;    // crossing routeBox edges (extBounds)
+    int num_boundary_nets = 0;    // distinct nets with >=1 boundary pin
+    int num_ext_connfigs = 0;     // total external drConnFig objects
+    int num_ext_pathsegs = 0;
+    int num_ext_vias = 0;
+    int num_ext_patchwires = 0;
+    int markers_in = 0;           // initial DRC markers fed to worker
+    int markers_out = 0;          // markers after worker routing
+    int markers_out_near_boundary = 0;  // post-route markers within K of edge
+    int boundary_points_removed = 0;
+    int boundary_merge_attempts = 0;
+    int boundary_merge_success_h = 0;
+    int boundary_merge_success_v = 0;
+    // Layer-indexed histograms (index = frLayerNum). Grown lazily.
+    std::vector<int> boundary_pin_layer_hist;
+    std::vector<int> ext_connfig_layer_hist;
+    // Emit-time stash (single-threaded read in FlexDR::endWorkersBatch).
+    int emit_thread_num = -1;
+    int emit_batch_id = -1;
+    int emit_iter = -1;
+    int emit_worker_id = -1;
+    bool emit_pending = false;
+  };
+
+  const BoundaryDiagStats& getBoundaryDiagStats() const
+  {
+    return boundary_stats_;
+  }
+  BoundaryDiagStats& mutableBoundaryDiagStats() { return boundary_stats_; }
+  std::set<frNet*>& mutableBoundaryCrossingNets()
+  {
+    return boundary_crossing_nets_;
+  }
+  std::set<frNet*>& mutableExtConnFigNets() { return ext_connfig_nets_; }
+  const std::set<frNet*>& getBoundaryCrossingNets() const
+  {
+    return boundary_crossing_nets_;
+  }
+  const std::set<frNet*>& getExtConnFigNets() const
+  {
+    return ext_connfig_nets_;
+  }
+
+ private:
+  BoundaryDiagStats boundary_stats_;
+  // P4.0 BoundaryDiag — per-worker net-membership sets used by the per-marker
+  // dump to flag each marker's source nets. Populated unconditionally by the
+  // initNet_boundary / initNets hooks (cheap; sets stay empty when no
+  // boundary/ext data is present). Read only when BoundaryDiagDump is
+  // enabled.
+  std::set<frNet*> boundary_crossing_nets_;
+  std::set<frNet*> ext_connfig_nets_;
 
   // persistent gc worker
   std::unique_ptr<FlexGCWorker> gcWorker_;

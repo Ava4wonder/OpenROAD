@@ -1373,6 +1373,29 @@ void FlexDRWorker::initNet_boundary(
     pinCnt_++;
     dNet->addPin(std::move(dPin));
   }
+  // P4.0 BoundaryDiag — unconditional counter updates (cheap, no behavior
+  // change). Tally boundary pins, register the frNet* as a
+  // boundary-crossing net, and bump the per-layer histogram. Emitted to
+  // CSV only when OPENROAD_DRT_BOUNDARY_DIAG_DIR is set; the work here
+  // runs regardless so the default-off path still touches the same data
+  // (no branching on env-var inside the hot loop).
+  if (!extBounds.empty()) {
+    auto& bd = mutableBoundaryDiagStats();
+    bd.num_boundary_pins += static_cast<int>(extBounds.size());
+    bd.num_boundary_nets += 1;
+    boundary_crossing_nets_.insert(dNet->getFrNet());
+    for (const auto& [pr, area] : extBounds) {
+      const auto lNum = pr.second;
+      if (lNum < 0) {
+        continue;
+      }
+      const size_t li = static_cast<size_t>(lNum);
+      if (bd.boundary_pin_layer_hist.size() <= li) {
+        bd.boundary_pin_layer_hist.resize(li + 1, 0);
+      }
+      bd.boundary_pin_layer_hist[li] += 1;
+    }
+  }
 }
 
 void FlexDRWorker::initNet_addNet(std::unique_ptr<drNet> in)
@@ -1617,6 +1640,61 @@ void FlexDRWorker::initNets(const frDesign* design)
     if (net->hasNDR()) {
       ndrs_.emplace_back(net->getNondefaultRule());
     }
+  }
+  // P4.0 BoundaryDiag — unconditional census of nets / true pins / ext
+  // route objects after initNets has finished. Populates the
+  // ext_connfig_nets_ membership set used by the per-marker dump to
+  // flag each marker's source nets. Cheap integer work; cost is the
+  // O(num_ext_connfigs) walk of each drNet's extConnFigs vector.
+  {
+    auto& bd = mutableBoundaryDiagStats();
+    bd.num_nets = static_cast<int>(nets_.size());
+    int true_pin_total = 0;
+    for (const auto& dnet : nets_) {
+      frNet* fnet = dnet->getFrNet();
+      if (fnet != nullptr) {
+        true_pin_total += static_cast<int>(fnet->getInstTerms().size());
+      }
+      const auto& ext_figs = dnet->getExtConnFigs();
+      if (ext_figs.empty()) {
+        continue;
+      }
+      if (fnet != nullptr) {
+        ext_connfig_nets_.insert(fnet);
+      }
+      for (const auto& cf : ext_figs) {
+        if (cf == nullptr) {
+          continue;
+        }
+        bd.num_ext_connfigs += 1;
+        frLayerNum lNum = -1;
+        switch (cf->typeId()) {
+          case drcPathSeg:
+            bd.num_ext_pathsegs += 1;
+            lNum = static_cast<drPathSeg*>(cf.get())->getLayerNum();
+            break;
+          case drcVia:
+            bd.num_ext_vias += 1;
+            // drVia has no single layerNum; skip the histogram entry.
+            break;
+          case drcPatchWire:
+            bd.num_ext_patchwires += 1;
+            lNum = static_cast<drPatchWire*>(cf.get())->getLayerNum();
+            break;
+          default:
+            break;
+        }
+        if (lNum < 0) {
+          continue;
+        }
+        const size_t li = static_cast<size_t>(lNum);
+        if (bd.ext_connfig_layer_hist.size() <= li) {
+          bd.ext_connfig_layer_hist.resize(li + 1, 0);
+        }
+        bd.ext_connfig_layer_hist[li] += 1;
+      }
+    }
+    bd.num_true_pins = true_pin_total;
   }
 }
 

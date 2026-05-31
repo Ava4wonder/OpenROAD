@@ -108,6 +108,8 @@ void FlexDRWorker::endRemoveNets_pathSeg(
         // only insert true boundary point
         if (end.y() >= routeBox.yMin()) {
           boundPts.insert(std::make_pair(boundPt, lNum));
+          // P4.0 BoundaryDiag — bottom vertical boundary point recorded.
+          mutableBoundaryDiagStats().boundary_points_removed += 1;
         }
       }
       // top seg to ext
@@ -139,6 +141,8 @@ void FlexDRWorker::endRemoveNets_pathSeg(
         // only insert true boundary piont
         if (condition2) {
           boundPts.insert(std::make_pair(boundPt, lNum));
+          // P4.0 BoundaryDiag — top vertical boundary point recorded.
+          mutableBoundaryDiagStats().boundary_points_removed += 1;
         }
       }
       if (save_updates_) {
@@ -189,6 +193,8 @@ void FlexDRWorker::endRemoveNets_pathSeg(
         // only insert true boundary point
         if (end.x() >= routeBox.xMin()) {
           boundPts.insert(std::make_pair(boundPt, lNum));
+          // P4.0 BoundaryDiag — left horizontal boundary point recorded.
+          mutableBoundaryDiagStats().boundary_points_removed += 1;
         }
       }
       // right seg to ext
@@ -220,6 +226,8 @@ void FlexDRWorker::endRemoveNets_pathSeg(
         // only insert true boundary point
         if (condition2) {
           boundPts.insert(std::make_pair(boundPt, lNum));
+          // P4.0 BoundaryDiag — right horizontal boundary point recorded.
+          mutableBoundaryDiagStats().boundary_points_removed += 1;
         }
       }
       if (save_updates_) {
@@ -365,6 +373,9 @@ void FlexDRWorker::endAddNets_merge(
   bool hasPatchMetal = false;
   auto regionQuery = design->getRegionQuery();
   for (auto& [pt, lNum] : boundPts) {
+    // P4.0 BoundaryDiag — count every merge attempt (one per boundary
+    // point per net). The two success branches below add to _h / _v.
+    mutableBoundaryDiagStats().boundary_merge_attempts += 1;
     hasPatchMetal = false;
     bool skip = false;
     result.clear();
@@ -469,6 +480,8 @@ void FlexDRWorker::endAddNets_merge(
       }
       net->addShape(std::move(uShape));
       regionQuery->addDRObj(rptr);
+      // P4.0 BoundaryDiag — horizontal merge success.
+      mutableBoundaryDiagStats().boundary_merge_success_h += 1;
     }
     if ((int) vertPathSegs.size() == 2 && horzPathSegs.empty() && !hasPatchMetal
         && vertPathSegs[0]->isTapered() == vertPathSegs[1]->isTapered()) {
@@ -511,6 +524,8 @@ void FlexDRWorker::endAddNets_merge(
       }
       net->addShape(std::move(uShape));
       regionQuery->addDRObj(rptr);
+      // P4.0 BoundaryDiag — vertical merge success.
+      mutableBoundaryDiagStats().boundary_merge_success_v += 1;
     }
   }
 }

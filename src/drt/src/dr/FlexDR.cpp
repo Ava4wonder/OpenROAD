@@ -4,6 +4,7 @@
 #include "dr/FlexDR.h"
 
 #include "dr/AdaptiveMarkerModel.h"
+#include "dr/ObjLocality.h"  // P4.0 BoundaryDiag — locality classifier
 
 #include <sys/stat.h>
 
@@ -22,6 +23,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -35,9 +37,14 @@
 #include "boost/archive/text_oarchive.hpp"
 #include "boost/io/ios_state.hpp"
 #include "boost/polygon/polygon.hpp"
+#include "db/drObj/drFig.h"
+#include "db/drObj/drShape.h"
+#include "db/drObj/drVia.h"
 #include "db/infra/KDTree.hpp"
 #include "db/infra/frTime.h"
 #include "db/obj/frBlockObject.h"
+#include "db/obj/frBTerm.h"
+#include "db/obj/frMarker.h"
 #include "db/obj/frShape.h"
 #include "db/obj/frVia.h"
 #include "distributed/RoutingJobDescription.h"
@@ -68,6 +75,546 @@ using odb::dbTechLayerType;
 BOOST_CLASS_EXPORT(drt::RoutingJobDescription)
 
 namespace drt {
+
+namespace {
+
+// P4.0 BoundaryDiag — per-worker boundary-diagnostics CSV writer.
+// Gated by OPENROAD_DRT_BOUNDARY_DIAG_DIR=<dir>; emits one CSV per
+// iteration (boundary_diag_iter<N>.csv) with one row per
+// FlexDRWorker::main() call. Row is written single-threaded in
+// FlexDR::endWorkersBatch() AFTER FlexDRWorker::end() runs, so the
+// merge / boundary-points counters (populated by endRemoveNets and
+// endAddNets_merge) are populated by the time we emit. Mutex-locked
+// append is conservative; with single-threaded emit only the file-open
+// path strictly needs it.
+class BoundaryDiagDump
+{
+ public:
+  static BoundaryDiagDump& instance()
+  {
+    static BoundaryDiagDump inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_BOUNDARY_DIAG_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    dir_ = v;
+    enabled_ = true;
+    mkdir(dir_.c_str(), 0777);  // best-effort
+  }
+  bool enabled() const { return enabled_; }
+  void setIterBatch(int iter, int batch_id)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    current_iter_ = iter;
+    current_batch_ = batch_id;
+    if (last_open_iter_ != iter) {
+      if (out_.is_open()) {
+        out_.flush();
+        out_.close();
+      }
+      const std::string path
+          = dir_ + "/boundary_diag_iter" + std::to_string(iter) + ".csv";
+      out_.open(path);
+      out_ << "iter,batch_id,thread,worker_id,route_xmin,route_ymin,"
+              "route_xmax,route_ymax,num_nets,num_true_pins,"
+              "num_boundary_pins,num_boundary_nets,num_ext_connfigs,"
+              "num_ext_pathsegs,num_ext_vias,num_ext_patchwires,"
+              "markers_in,markers_out,markers_out_near_boundary,"
+              "boundary_points_removed,boundary_merge_attempts,"
+              "boundary_merge_success_h,boundary_merge_success_v,"
+              "boundary_pin_layer_histogram,ext_connfig_layer_histogram\n";
+      last_open_iter_ = iter;
+    }
+  }
+  int currentIter() const { return current_iter_; }
+  int currentBatch() const { return current_batch_; }
+  void appendRow(const std::string& row)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (out_.is_open()) {
+      out_ << row;
+    }
+  }
+  void closeOnEnd()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (out_.is_open()) {
+      out_.flush();
+      out_.close();
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::string dir_;
+  int current_iter_ = -1;
+  int current_batch_ = 0;
+  int last_open_iter_ = -1;
+  std::ofstream out_;
+};
+
+// P4.0 BoundaryDiag — per-marker CSV writer. Shares
+// OPENROAD_DRT_BOUNDARY_DIAG_DIR with BoundaryDiagDump. Emits one row
+// per marker per worker per iter into <dir>/marker_diag_iter<N>.csv.
+// Written from inside the OMP-parallel FlexDRWorker::main() — the
+// mutex-locked appendRows() guards the write.
+class MarkerDiagDump
+{
+ public:
+  static MarkerDiagDump& instance()
+  {
+    static MarkerDiagDump inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_BOUNDARY_DIAG_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    dir_ = v;
+    enabled_ = true;
+    mkdir(dir_.c_str(), 0777);  // best-effort
+  }
+  bool enabled() const { return enabled_; }
+  void setIterBatch(int iter, int batch_id)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    current_iter_ = iter;
+    current_batch_ = batch_id;
+    if (last_open_iter_ != iter) {
+      if (out_.is_open()) {
+        out_.flush();
+        out_.close();
+      }
+      const std::string path
+          = dir_ + "/marker_diag_iter" + std::to_string(iter) + ".csv";
+      out_.open(path);
+      // P4.0 schema: 34 columns. 3-way local/boundary/ext per-type bucket
+      // matching the ObjLocality classifier.
+      out_ << "iter,batch_id,thread,worker_id,"
+              "marker_idx,marker_layer,marker_rule_class,"
+              "bbox_xmin,bbox_ymin,bbox_xmax,bbox_ymax,"
+              "distance_to_boundary,"
+              "routebox_side,"
+              "touches_boundary_crossing_net,"
+              "src_has_ext_connfig,src_has_boundary_pin,"
+              "nearby_total,"
+              "nearby_pathseg_local,nearby_pathseg_boundary,nearby_pathseg_ext,"
+              "nearby_via_local,nearby_via_boundary,nearby_via_ext,"
+              "nearby_patch_local,nearby_patch_boundary,nearby_patch_ext,"
+              "nearby_pair_type,"
+              "nearby_crosses_ownership,"
+              "nearby_distinct_nets,"
+              "first_net_id,"
+              "same_net_self_violation,"
+              "neighbor_worker_id,"
+              "owner_local_movable,owner_ext_movable_by_neighbor,"
+              // SeamClassifier v5 — F10 root-cause type + ownership class
+              "nearby_min_width_dbu,nearby_max_width_dbu,"
+              "both_vias_crossing,"
+              "dist_to_prev_seam_dbu,"
+              "root_cause_type,ownership_class\n";
+      last_open_iter_ = iter;
+    }
+  }
+  int currentIter() const { return current_iter_; }
+  int currentBatch() const { return current_batch_; }
+  void appendRows(const std::string& rows)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (out_.is_open()) {
+      out_ << rows;
+    }
+  }
+  void closeOnEnd()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (out_.is_open()) {
+      out_.flush();
+      out_.close();
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::string dir_;
+  int current_iter_ = -1;
+  int current_batch_ = 0;
+  int last_open_iter_ = -1;
+  std::ofstream out_;
+};
+
+// P4.0 BoundaryDiag — global registry mapping routeBox 4-tuple to its
+// worker's emit_worker_id. Used to resolve neighbor_worker_id in the
+// per-marker CSV: at marker emit time we compute the routeBox of the
+// would-be neighbor across the marker's routebox_side and look it up
+// here. Returns -1 when no worker exists at that position (chip edge,
+// non-uniform tiling, or worker absent from this batch). Populated
+// single-threaded in FlexDR::processWorkersBatch BEFORE the OMP loop
+// runs; read read-only from inside the parallel marker emit. Mutex is
+// kept for safety but in practice the writes are complete before any
+// read fires.
+class WorkerBoxRegistry
+{
+ public:
+  static WorkerBoxRegistry& instance()
+  {
+    static WorkerBoxRegistry inst;
+    return inst;
+  }
+  void clear()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    map_.clear();
+  }
+  void registerWorker(const odb::Rect& rb, int worker_id)
+  {
+    const auto key = makeKey(rb);
+    std::lock_guard<std::mutex> lk(mutex_);
+    map_[key] = worker_id;
+  }
+  int lookup(const odb::Rect& rb) const
+  {
+    const auto key = makeKey(rb);
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = map_.find(key);
+    return (it == map_.end()) ? -1 : it->second;
+  }
+
+ private:
+  using Key = std::tuple<frCoord, frCoord, frCoord, frCoord>;
+  static Key makeKey(const odb::Rect& rb)
+  {
+    return std::make_tuple(rb.xMin(), rb.yMin(), rb.xMax(), rb.yMax());
+  }
+  mutable std::mutex mutex_;
+  std::map<Key, int> map_;
+};
+
+// SeamClassifier v5 (F10 panel D/F) — per-iter snapshot of worker-grid
+// seam coordinates. addRouteBox() is called once per worker (during
+// processWorkersBatch::registerWorker). snapshotAsPrev() is called at
+// the start of each new iter in optimizationFlow — it folds the
+// just-finished iter's seams into prev_xs_/prev_ys_ and clears curr_.
+// distToPrev(cx, cy) returns the L-inf distance from a point to the
+// nearest previous-iter routeBox boundary line (used to flag
+// reroute-jog interior markers in the per-marker CSV).
+class PerIterSeams
+{
+ public:
+  static PerIterSeams& instance()
+  {
+    static PerIterSeams inst;
+    return inst;
+  }
+  void clearAll()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    curr_xs_.clear();
+    curr_ys_.clear();
+    prev_xs_.clear();
+    prev_ys_.clear();
+  }
+  void addRouteBox(const odb::Rect& rb)
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    curr_xs_.push_back(rb.xMin());
+    curr_xs_.push_back(rb.xMax());
+    curr_ys_.push_back(rb.yMin());
+    curr_ys_.push_back(rb.yMax());
+  }
+  void snapshotAsPrev()
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    prev_xs_ = curr_xs_;
+    prev_ys_ = curr_ys_;
+    std::sort(prev_xs_.begin(), prev_xs_.end());
+    std::sort(prev_ys_.begin(), prev_ys_.end());
+    prev_xs_.erase(std::unique(prev_xs_.begin(), prev_xs_.end()),
+                   prev_xs_.end());
+    prev_ys_.erase(std::unique(prev_ys_.begin(), prev_ys_.end()),
+                   prev_ys_.end());
+    curr_xs_.clear();
+    curr_ys_.clear();
+  }
+  frCoord distToPrev(frCoord cx, frCoord cy) const
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (prev_xs_.empty() && prev_ys_.empty()) {
+      return std::numeric_limits<frCoord>::max();
+    }
+    auto nearest = [](const std::vector<frCoord>& v, frCoord c) -> frCoord {
+      if (v.empty()) {
+        return std::numeric_limits<frCoord>::max();
+      }
+      auto it = std::lower_bound(v.begin(), v.end(), c);
+      frCoord best = std::numeric_limits<frCoord>::max();
+      if (it != v.end()) {
+        best = std::min(best, *it - c);
+      }
+      if (it != v.begin()) {
+        best = std::min(best, c - *(it - 1));
+      }
+      return best;
+    };
+    return std::min(nearest(prev_xs_, cx), nearest(prev_ys_, cy));
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<frCoord> curr_xs_, curr_ys_;
+  std::vector<frCoord> prev_xs_, prev_ys_;
+};
+
+// P4.0 — classify marker bbox centroid against routeBox edges. K=200 DBU
+// band; corner band returns a diagonal token. Pure function.
+const char* boundaryDiagRouteBoxSide(const odb::Rect& bb,
+                                     const odb::Rect& routeBox,
+                                     const frCoord k_band)
+{
+  const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+  const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+  const frCoord d_w = std::abs(cx - routeBox.xMin());
+  const frCoord d_e = std::abs(cx - routeBox.xMax());
+  const frCoord d_s = std::abs(cy - routeBox.yMin());
+  const frCoord d_n = std::abs(cy - routeBox.yMax());
+  const bool near_w = d_w <= k_band;
+  const bool near_e = d_e <= k_band;
+  const bool near_s = d_s <= k_band;
+  const bool near_n = d_n <= k_band;
+  if (near_n && near_e) {
+    return "NE";
+  }
+  if (near_n && near_w) {
+    return "NW";
+  }
+  if (near_s && near_e) {
+    return "SE";
+  }
+  if (near_s && near_w) {
+    return "SW";
+  }
+  if (near_n) {
+    return "N";
+  }
+  if (near_s) {
+    return "S";
+  }
+  if (near_e) {
+    return "E";
+  }
+  if (near_w) {
+    return "W";
+  }
+  return "INTERIOR";
+}
+
+// P4.0 — given a routeBox + side token, compute the routeBox of the
+// hypothetical neighbor across that seam. Uniform-tiling assumption
+// (stride = routeBox dimensions). Diagonal sides shift both axes.
+odb::Rect boundaryDiagNeighborBox(const odb::Rect& routeBox, const char* side)
+{
+  const frCoord w = routeBox.xMax() - routeBox.xMin();
+  const frCoord h = routeBox.yMax() - routeBox.yMin();
+  frCoord dx = 0;
+  frCoord dy = 0;
+  if (side[0] == 'N') {
+    dy = +h;
+  } else if (side[0] == 'S') {
+    dy = -h;
+  } else if (side[0] == 'E') {
+    dx = +w;
+  } else if (side[0] == 'W') {
+    dx = -w;
+  }
+  if (side[0] != '\0' && side[1] != '\0') {
+    if (side[1] == 'E') {
+      dx = +w;
+    } else if (side[1] == 'W') {
+      dx = -w;
+    }
+  }
+  return odb::Rect(routeBox.xMin() + dx,
+                   routeBox.yMin() + dy,
+                   routeBox.xMax() + dx,
+                   routeBox.yMax() + dy);
+}
+
+// P4.0 — short-name lookup for frConstraintTypeEnum (marker_rule_class
+// column in the per-marker CSV).
+const char* boundaryDiagRuleClassName(frConstraintTypeEnum t)
+{
+  switch (t) {
+    case frConstraintTypeEnum::frcShortConstraint:
+      return "short";
+    case frConstraintTypeEnum::frcAreaConstraint:
+      return "minArea";
+    case frConstraintTypeEnum::frcMinWidthConstraint:
+      return "minWidth";
+    case frConstraintTypeEnum::frcSpacingConstraint:
+      return "spc";
+    case frConstraintTypeEnum::frcSpacingEndOfLineConstraint:
+      return "eol";
+    case frConstraintTypeEnum::frcSpacingEndOfLineParallelEdgeConstraint:
+      return "eolParEdge";
+    case frConstraintTypeEnum::frcSpacingTableConstraint:
+      return "spcTable";
+    case frConstraintTypeEnum::frcSpacingTablePrlConstraint:
+      return "spcTablePrl";
+    case frConstraintTypeEnum::frcSpacingTableTwConstraint:
+      return "spcTableTw";
+    case frConstraintTypeEnum::frcLef58SpacingTableConstraint:
+      return "lef58SpcTable";
+    case frConstraintTypeEnum::frcLef58CutSpacingTableConstraint:
+      return "lef58CutSpcTable";
+    case frConstraintTypeEnum::frcLef58CutSpacingTablePrlConstraint:
+      return "lef58CutSpcTablePrl";
+    case frConstraintTypeEnum::frcLef58CutSpacingTableLayerConstraint:
+      return "lef58CutSpcTableLayer";
+    case frConstraintTypeEnum::frcLef58CutSpacingConstraint:
+      return "lef58CutSpc";
+    case frConstraintTypeEnum::frcLef58CutSpacingParallelWithinConstraint:
+      return "lef58CutSpcParWithin";
+    case frConstraintTypeEnum::frcLef58CutSpacingAdjacentCutsConstraint:
+      return "lef58CutSpcAdjCuts";
+    case frConstraintTypeEnum::frcLef58CutSpacingLayerConstraint:
+      return "lef58CutSpcLayer";
+    case frConstraintTypeEnum::frcCutSpacingConstraint:
+      return "cutSpc";
+    case frConstraintTypeEnum::frcMinStepConstraint:
+      return "minStep";
+    case frConstraintTypeEnum::frcLef58MinStepConstraint:
+      return "lef58MinStep";
+    case frConstraintTypeEnum::frcMinimumcutConstraint:
+      return "minCut";
+    case frConstraintTypeEnum::frcOffGridConstraint:
+      return "offGrid";
+    case frConstraintTypeEnum::frcMinEnclosedAreaConstraint:
+      return "minEnclArea";
+    case frConstraintTypeEnum::frcLef58CornerSpacingConstraint:
+      return "lef58CornerSpc";
+    case frConstraintTypeEnum::frcLef58CornerSpacingConcaveCornerConstraint:
+      return "lef58CornerSpcConcave";
+    case frConstraintTypeEnum::frcLef58CornerSpacingConvexCornerConstraint:
+      return "lef58CornerSpcConvex";
+    case frConstraintTypeEnum::frcLef58CornerSpacingSpacingConstraint:
+      return "lef58CornerSpcSpc";
+    case frConstraintTypeEnum::frcLef58CornerSpacingSpacing1DConstraint:
+      return "lef58CornerSpcSpc1D";
+    case frConstraintTypeEnum::frcLef58CornerSpacingSpacing2DConstraint:
+      return "lef58CornerSpcSpc2D";
+    case frConstraintTypeEnum::frcLef58SpacingEndOfLineConstraint:
+      return "lef58Eol";
+    case frConstraintTypeEnum::frcLef58SpacingEndOfLineWithinConstraint:
+      return "lef58EolWithin";
+    case frConstraintTypeEnum::
+        frcLef58SpacingEndOfLineWithinEndToEndConstraint:
+      return "lef58EolE2E";
+    case frConstraintTypeEnum::
+        frcLef58SpacingEndOfLineWithinEncloseCutConstraint:
+      return "lef58EolEncloseCut";
+    case frConstraintTypeEnum::
+        frcLef58SpacingEndOfLineWithinParallelEdgeConstraint:
+      return "lef58EolParEdge";
+    case frConstraintTypeEnum::
+        frcLef58SpacingEndOfLineWithinMaxMinLengthConstraint:
+      return "lef58EolMaxMinLen";
+    case frConstraintTypeEnum::frcLef58SpacingWrongDirConstraint:
+      return "lef58SpcWrongDir";
+    case frConstraintTypeEnum::frcLef58CutClassConstraint:
+      return "lef58CutClass";
+    case frConstraintTypeEnum::frcNonSufficientMetalConstraint:
+      return "nsmetal";
+    case frConstraintTypeEnum::frcSpacingSamenetConstraint:
+      return "spcSamenet";
+    case frConstraintTypeEnum::frcLef58RightWayOnGridOnlyConstraint:
+      return "lef58RightWayOnGrid";
+    case frConstraintTypeEnum::frcLef58RectOnlyConstraint:
+      return "lef58RectOnly";
+    case frConstraintTypeEnum::frcRecheckConstraint:
+      return "recheck";
+    case frConstraintTypeEnum::frcSpacingTableInfluenceConstraint:
+      return "spcTableInf";
+    case frConstraintTypeEnum::frcLef58EolExtensionConstraint:
+      return "lef58EolExt";
+    case frConstraintTypeEnum::frcLef58EolKeepOutConstraint:
+      return "lef58EolKeepOut";
+    case frConstraintTypeEnum::frcLef58MinimumCutConstraint:
+      return "lef58MinCut";
+    case frConstraintTypeEnum::frcMetalWidthViaConstraint:
+      return "metalWidthVia";
+    case frConstraintTypeEnum::frcLef58AreaConstraint:
+      return "lef58Area";
+    case frConstraintTypeEnum::frcLef58KeepOutZoneConstraint:
+      return "lef58KeepOutZone";
+    case frConstraintTypeEnum::frcLef58TwoWiresForbiddenSpcConstraint:
+      return "lef58TwoWiresForbSpc";
+    case frConstraintTypeEnum::frcLef58ForbiddenSpcConstraint:
+      return "lef58ForbSpc";
+    case frConstraintTypeEnum::frcLef58EnclosureConstraint:
+      return "lef58Encl";
+    case frConstraintTypeEnum::frcSpacingRangeConstraint:
+      return "spcRange";
+    case frConstraintTypeEnum::frcLef58MaxSpacingConstraint:
+      return "lef58MaxSpc";
+    case frConstraintTypeEnum::frcSpacingTableOrth:
+      return "spcTableOrth";
+    case frConstraintTypeEnum::frcLef58WidthTableOrth:
+      return "lef58WidthTableOrth";
+  }
+  return "unknown";
+}
+
+// P4.0 — pack a layer-indexed histogram into a "L<n>:<c>|..." string,
+// skipping zero entries. Empty string when no nonzero entries.
+std::string packLayerHistogram(const std::vector<int>& hist)
+{
+  std::string out;
+  for (size_t i = 0; i < hist.size(); ++i) {
+    if (hist[i] == 0) {
+      continue;
+    }
+    if (!out.empty()) {
+      out += '|';
+    }
+    out += 'L';
+    out += std::to_string(i);
+    out += ':';
+    out += std::to_string(hist[i]);
+  }
+  return out;
+}
+
+}  // namespace
 
 using utl::ThreadException;
 
@@ -195,6 +742,26 @@ FlexDR::FlexDR(TritonRoute* router,
     opts.severe_percentile
         = read_float_env("OPENROAD_DRT_ADAPTIVE_SEVERE_PERCENTILE",
                          opts.severe_percentile);
+    // P4.A — Adaptive Boundary-Band Heat (BBH). Default OFF (so all
+    // values absent → unique_ptr created with bbh_enabled = false →
+    // bit-identical to P3.3 H). Activation requires
+    // OPENROAD_DRT_BBH=1 alongside the umbrella
+    // OPENROAD_DRT_ADAPTIVE_MARKER=1 gate; the inner options are then
+    // overridable via env.
+    if (const char* bbh_env = std::getenv("OPENROAD_DRT_BBH");
+        bbh_env != nullptr && bbh_env[0] == '1') {
+      opts.bbh_enabled = true;
+      opts.bbh_band_width_dbu = read_float_env(
+          "OPENROAD_DRT_BBH_BAND_WIDTH_DBU", opts.bbh_band_width_dbu);
+      opts.bbh_hot_drc_mul = read_float_env("OPENROAD_DRT_BBH_HOT_DRC_MUL",
+                                            opts.bbh_hot_drc_mul);
+      opts.bbh_severe_drc_mul = read_float_env(
+          "OPENROAD_DRT_BBH_SEVERE_DRC_MUL", opts.bbh_severe_drc_mul);
+      opts.bbh_hot_percentile = read_float_env(
+          "OPENROAD_DRT_BBH_HOT_PERCENTILE", opts.bbh_hot_percentile);
+      opts.bbh_severe_percentile = read_float_env(
+          "OPENROAD_DRT_BBH_SEVERE_PERCENTILE", opts.bbh_severe_percentile);
+    }
     adaptive_marker_model_
         = std::make_unique<AdaptiveMarkerModel>(opts, design_, logger_);
   }
@@ -292,6 +859,10 @@ int FlexDRWorker::main(frDesign* design)
                     routeBox_.yMax() * micronPerDBU);
   }
   initMarkers(design);
+  // P4.0 BoundaryDiag — capture initial marker count (unconditional;
+  // cheap; no observable behavior change). markers_out and
+  // markers_out_near_boundary are populated below before cleanup().
+  mutableBoundaryDiagStats().markers_in = getInitNumMarkers();
   if (getDRIter() && getInitNumMarkers() == 0 && !needRecheck_) {
     skipRouting_ = true;
   }
@@ -351,6 +922,382 @@ int FlexDRWorker::main(frDesign* design)
   }
   high_resolution_clock::time_point t2 = high_resolution_clock::now();
   const int num_markers = getNumMarkers();
+  // P4.0 BoundaryDiag — pre-cleanup work. cleanup() clears markers_, so
+  // anything that needs the post-route marker geometry must run here.
+  // Two pieces:
+  //   (1) compute markers_out / markers_out_near_boundary into the stats.
+  //   (2) if MarkerDiagDump is enabled, emit one CSV row per marker.
+  // The per-worker CSV row is emitted later in FlexDR::endWorkersBatch()
+  // AFTER FlexDRWorker::end() runs so the merge / boundary-points
+  // counters (populated by endRemoveNets / endAddNets_merge) are nonzero
+  // by then. Pre-cleanup stash: emit_thread_num + emit_iter + emit_batch_id.
+  if (BoundaryDiagDump::instance().enabled()) {
+    auto& bd = mutableBoundaryDiagStats();
+    bd.markers_out = num_markers;
+    constexpr frCoord kBoundaryDist = 200;
+    int near_boundary = 0;
+    for (const auto& mk : markers_) {
+      const auto bb = mk.getBBox();
+      const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+      const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+      const frCoord dx_min = std::min(std::abs(cx - routeBox_.xMin()),
+                                      std::abs(cx - routeBox_.xMax()));
+      const frCoord dy_min = std::min(std::abs(cy - routeBox_.yMin()),
+                                      std::abs(cy - routeBox_.yMax()));
+      const frCoord edge_dist = std::min(dx_min, dy_min);
+      if (edge_dist <= kBoundaryDist) {
+        ++near_boundary;
+      }
+    }
+    bd.markers_out_near_boundary = near_boundary;
+    bd.emit_thread_num = omp_get_thread_num();
+    bd.emit_iter = BoundaryDiagDump::instance().currentIter();
+    bd.emit_batch_id = BoundaryDiagDump::instance().currentBatch();
+    bd.emit_pending = true;
+  }
+  // P4.0 BoundaryDiag — per-marker CSV. One row per marker; gated by the
+  // same env var as BoundaryDiagDump but written from the OMP-parallel
+  // path here (the dump uses a mutex-locked appendRows). worker_id is
+  // assigned in FlexDR::processWorkersBatch BEFORE main() runs; we skip
+  // emit when emit_worker_id == -1 (env var unset path).
+  if (MarkerDiagDump::instance().enabled() && !markers_.empty()
+      && mutableBoundaryDiagStats().emit_worker_id != -1) {
+    const int worker_id = mutableBoundaryDiagStats().emit_worker_id;
+    std::stringstream ms;
+    for (size_t mi = 0; mi < markers_.size(); ++mi) {
+      const auto& mk = markers_[mi];
+      const auto bb = mk.getBBox();
+      // L-infinity distance from bbox to nearest routeBox edge. Negative
+      // (outside) clipped to 0.
+      const frCoord dx_left = bb.xMin() - routeBox_.xMin();
+      const frCoord dx_right = routeBox_.xMax() - bb.xMax();
+      const frCoord dy_bot = bb.yMin() - routeBox_.yMin();
+      const frCoord dy_top = routeBox_.yMax() - bb.yMax();
+      frCoord dist = std::min(std::min(dx_left, dx_right),
+                              std::min(dy_bot, dy_top));
+      if (dist < 0) {
+        dist = 0;
+      }
+      const char* rule_class = "unknown";
+      if (mk.getConstraint() != nullptr) {
+        rule_class = boundaryDiagRuleClassName(mk.getConstraint()->typeId());
+      }
+      // Resolve source frNets via typeId() dispatch (frcInstTerm/frcBTerm/
+      // frcNet). Other types contribute no net membership.
+      int touches_boundary_net = 0;
+      int src_has_ext = 0;
+      int src_has_bpin = 0;
+      std::set<frNet*> distinct_nets;
+      int first_net_id = -1;
+      for (auto* src : mk.getSrcs()) {
+        if (src == nullptr) {
+          continue;
+        }
+        frNet* net = nullptr;
+        switch (src->typeId()) {
+          case frcNet:
+            net = static_cast<frNet*>(src);
+            break;
+          case frcInstTerm:
+            net = static_cast<frInstTerm*>(src)->getNet();
+            break;
+          case frcBTerm:
+            net = static_cast<frBTerm*>(src)->getNet();
+            break;
+          default:
+            break;
+        }
+        if (net == nullptr) {
+          continue;
+        }
+        if (distinct_nets.insert(net).second && first_net_id == -1) {
+          first_net_id = net->getId();
+        }
+        if (boundary_crossing_nets_.count(net) != 0u) {
+          touches_boundary_net = 1;
+          src_has_bpin = 1;
+        }
+        if (ext_connfig_nets_.count(net) != 0u) {
+          src_has_ext = 1;
+        }
+      }
+      const int distinct_net_count = static_cast<int>(distinct_nets.size());
+      const int same_net_self_violation = (distinct_net_count == 1) ? 1 : 0;
+      // Per-marker region query against the worker's local drConnFig
+      // rtree. Bloat marker bbox by 1 routing-track pitch (fallback 200
+      // DBU). Query same layer only.
+      int nearby_total = 0;
+      int nearby_pathseg_local = 0;
+      int nearby_pathseg_boundary = 0;
+      int nearby_pathseg_ext = 0;
+      int nearby_via_local = 0;
+      int nearby_via_boundary = 0;
+      int nearby_via_ext = 0;
+      int nearby_patch_local = 0;
+      int nearby_patch_boundary = 0;
+      int nearby_patch_ext = 0;
+      // SeamClassifier v5 — width signature across nearby pathSegs
+      // (-1 sentinel before any pathseg seen).
+      frCoord nearby_min_width_dbu = -1;
+      frCoord nearby_max_width_dbu = -1;
+      std::set<std::string> nearby_tokens;
+      std::set<drNet*> nearby_distinct_nets_set;
+      int nearby_local_or_boundary_any = 0;
+      int nearby_ext_any = 0;
+      {
+        const frLayerNum mk_layer = mk.getLayerNum();
+        const int num_layers = static_cast<int>(getTech()->getLayers().size());
+        if (mk_layer >= 0 && mk_layer < num_layers) {
+          frCoord pitch = 0;
+          if (auto* layer = getTech()->getLayer(mk_layer); layer != nullptr) {
+            pitch = static_cast<frCoord>(layer->getPitch());
+          }
+          if (pitch <= 0) {
+            pitch = 200;  // safe fallback
+          }
+          odb::Rect bloated(bb.xMin() - pitch,
+                            bb.yMin() - pitch,
+                            bb.xMax() + pitch,
+                            bb.yMax() + pitch);
+          std::vector<drConnFig*> figs;
+          getWorkerRegionQuery().query(bloated, mk_layer, figs);
+          // Cache ext-vector pointer per drNet to avoid rescans.
+          std::map<drNet*, const std::vector<std::unique_ptr<drConnFig>>*>
+              ext_lists;
+          for (auto* cf : figs) {
+            if (cf == nullptr) {
+              continue;
+            }
+            ++nearby_total;
+            drNet* dnet = cf->getNet();
+            if (dnet != nullptr) {
+              nearby_distinct_nets_set.insert(dnet);
+            }
+            bool is_ext = false;
+            if (dnet != nullptr) {
+              auto it = ext_lists.find(dnet);
+              if (it == ext_lists.end()) {
+                it = ext_lists
+                         .emplace(dnet, &dnet->getExtConnFigs())
+                         .first;
+              }
+              for (const auto& up : *it->second) {
+                if (up.get() == cf) {
+                  is_ext = true;
+                  break;
+                }
+              }
+            }
+            const ObjLocality loc
+                = classifyObj(cf, routeBox_, getExtBox(), getDrcBox(), is_ext);
+            const char* loc_tok = objLocalityToken(loc);
+            const char* type_tok = nullptr;
+            switch (cf->typeId()) {
+              case drcPathSeg:
+                type_tok = "pathseg";
+                if (loc == ObjLocality::LOCAL_ROUTE) {
+                  ++nearby_pathseg_local;
+                } else if (loc == ObjLocality::BOUNDARY_TOUCHING) {
+                  ++nearby_pathseg_boundary;
+                } else if (loc == ObjLocality::EXT_CONTEXT) {
+                  ++nearby_pathseg_ext;
+                }
+                {
+                  // SeamClassifier v5 — capture width signature.
+                  auto* ps = static_cast<drPathSeg*>(cf);
+                  const frCoord w = ps->getStyle().getWidth();
+                  if (w > 0) {
+                    if (nearby_min_width_dbu < 0
+                        || w < nearby_min_width_dbu) {
+                      nearby_min_width_dbu = w;
+                    }
+                    if (w > nearby_max_width_dbu) {
+                      nearby_max_width_dbu = w;
+                    }
+                  }
+                }
+                break;
+              case drcVia:
+                type_tok = "via";
+                if (loc == ObjLocality::LOCAL_ROUTE) {
+                  ++nearby_via_local;
+                } else if (loc == ObjLocality::BOUNDARY_TOUCHING) {
+                  ++nearby_via_boundary;
+                } else if (loc == ObjLocality::EXT_CONTEXT) {
+                  ++nearby_via_ext;
+                }
+                break;
+              case drcPatchWire:
+                type_tok = "patch";
+                if (loc == ObjLocality::LOCAL_ROUTE) {
+                  ++nearby_patch_local;
+                } else if (loc == ObjLocality::BOUNDARY_TOUCHING) {
+                  ++nearby_patch_boundary;
+                } else if (loc == ObjLocality::EXT_CONTEXT) {
+                  ++nearby_patch_ext;
+                }
+                break;
+              default:
+                break;
+            }
+            if (type_tok != nullptr) {
+              std::string tok = type_tok;
+              tok += '.';
+              tok += loc_tok;
+              nearby_tokens.insert(tok);
+              if (loc == ObjLocality::EXT_CONTEXT) {
+                nearby_ext_any = 1;
+              } else if (loc == ObjLocality::LOCAL_ROUTE
+                         || loc == ObjLocality::BOUNDARY_TOUCHING) {
+                nearby_local_or_boundary_any = 1;
+              }
+            }
+          }
+        }
+      }
+      std::string nearby_pair_type;
+      if (nearby_tokens.empty()) {
+        nearby_pair_type = "none";
+      } else {
+        bool first_tok = true;
+        for (const auto& tok : nearby_tokens) {
+          if (!first_tok) {
+            nearby_pair_type += "+";
+          }
+          nearby_pair_type += tok;
+          first_tok = false;
+        }
+      }
+      const int nearby_crosses_ownership
+          = (nearby_local_or_boundary_any != 0 && nearby_ext_any != 0) ? 1 : 0;
+      const int nearby_distinct_nets
+          = static_cast<int>(nearby_distinct_nets_set.size());
+      // routebox_side: K=200 DBU band; corner zone yields a diagonal.
+      constexpr frCoord kSideBand = 200;
+      const char* side = boundaryDiagRouteBoxSide(bb, routeBox_, kSideBand);
+      // neighbor_worker_id: lookup in the global registry using the
+      // routeBox shifted across the marker's side. INTERIOR -> -1.
+      int neighbor_worker_id = -1;
+      if (side[0] != 'I') {  // not "INTERIOR"
+        const odb::Rect nb_box = boundaryDiagNeighborBox(routeBox_, side);
+        neighbor_worker_id = WorkerBoxRegistry::instance().lookup(nb_box);
+      }
+      // owner_local_movable: this worker has a drNet for at least one of
+      // the marker's source frNets with a non-empty routeConnFigs.
+      int owner_local_movable = 0;
+      for (frNet* fnet : distinct_nets) {
+        if (fnet == nullptr) {
+          continue;
+        }
+        const std::vector<drNet*>* dr_nets = getDRNets(fnet);
+        if (dr_nets == nullptr) {
+          continue;
+        }
+        for (drNet* dn : *dr_nets) {
+          if (dn != nullptr && !dn->getRouteConnFigs().empty()) {
+            owner_local_movable = 1;
+            break;
+          }
+        }
+        if (owner_local_movable != 0) {
+          break;
+        }
+      }
+      // owner_ext_movable_by_neighbor: generous first cut per spec.
+      // If src_has_ext is set and any source frNet is not special, the
+      // neighbor worker COULD rip the local copy. P4.0b refinement may
+      // query the registry for the neighbor's routeConnFigs directly.
+      int owner_ext_movable_by_neighbor = 0;
+      if (src_has_ext != 0) {
+        for (frNet* fnet : distinct_nets) {
+          if (fnet == nullptr) {
+            continue;
+          }
+          if (ext_connfig_nets_.count(fnet) == 0u) {
+            continue;
+          }
+          if (!fnet->isSpecial()) {
+            owner_ext_movable_by_neighbor = 1;
+            break;
+          }
+        }
+      }
+      // SeamClassifier v5 — derive F10 root-cause type + ownership
+      // class from the BoundaryDiag fields already computed above. No
+      // additional region queries; pure derivation.
+      const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+      const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+      const frCoord dist_to_prev_seam_dbu
+          = PerIterSeams::instance().distToPrev(cx, cy);
+      const frCoord nearby_min_width_dbu_out
+          = (nearby_min_width_dbu < 0) ? 0 : nearby_min_width_dbu;
+      const frCoord nearby_max_width_dbu_out
+          = (nearby_max_width_dbu < 0) ? 0 : nearby_max_width_dbu;
+      const int both_vias_crossing
+          = (nearby_via_local > 0 && nearby_via_ext > 0) ? 1 : 0;
+      const bool same_net_nearby = (nearby_distinct_nets <= 1);
+      const bool cross = (nearby_crosses_ownership != 0);
+      const bool widths_differ
+          = (nearby_min_width_dbu > 0
+             && nearby_max_width_dbu > nearby_min_width_dbu);
+      const std::string rule_s(rule_class);
+      const bool is_cut_rule
+          = (rule_s.find("Cut") != std::string::npos)
+            || (rule_s.find("cutSpc") != std::string::npos)
+            || (rule_s.find("cut") != std::string::npos);
+      const bool has_via_either
+          = (nearby_via_local + nearby_via_boundary + nearby_via_ext > 0);
+      const bool has_pathseg_either
+          = (nearby_pathseg_local + nearby_pathseg_boundary
+             + nearby_pathseg_ext
+             > 0);
+      int root_cause_type = 99;  // OTHER
+      if (cross) {
+        if (both_vias_crossing || is_cut_rule) {
+          root_cause_type = 4;  // via-at-pin / via cut spacing
+        } else if (has_via_either && has_pathseg_either) {
+          root_cause_type = 2;  // layer disagreement (via vs metal)
+        } else if (same_net_nearby && widths_differ) {
+          root_cause_type = 3;  // width / NDR mismatch
+        } else if (same_net_nearby) {
+          root_cause_type = 1;  // y-mismatch (default cross-worker
+                                // same-net same-width residual)
+        } else {
+          root_cause_type = 99;  // different-net OTHER
+        }
+      }
+      constexpr frCoord kReroutePrx = 4000;  // 2 x MTSAFEDIST
+      const char* ownership_class = "interior";
+      if (cross && same_net_nearby) {
+        ownership_class = "stitch_short";
+      } else if (cross && !same_net_nearby) {
+        ownership_class = "seam_spacing";
+      } else if (!cross && dist_to_prev_seam_dbu < kReroutePrx) {
+        ownership_class = "reroute_jog";
+      }
+      // Emit row. Column order MUST match the header above.
+      ms << MarkerDiagDump::instance().currentIter() << ","
+         << MarkerDiagDump::instance().currentBatch() << ","
+         << omp_get_thread_num() << "," << worker_id << "," << mi << ","
+         << mk.getLayerNum() << "," << rule_class << "," << bb.xMin() << ","
+         << bb.yMin() << "," << bb.xMax() << "," << bb.yMax() << "," << dist
+         << "," << side << "," << touches_boundary_net << "," << src_has_ext
+         << "," << src_has_bpin << "," << nearby_total << ","
+         << nearby_pathseg_local << "," << nearby_pathseg_boundary << ","
+         << nearby_pathseg_ext << "," << nearby_via_local << ","
+         << nearby_via_boundary << "," << nearby_via_ext << ","
+         << nearby_patch_local << "," << nearby_patch_boundary << ","
+         << nearby_patch_ext << "," << nearby_pair_type << ","
+         << nearby_crosses_ownership << "," << nearby_distinct_nets << ","
+         << first_net_id << "," << same_net_self_violation << ","
+         << neighbor_worker_id << "," << owner_local_movable << ","
+         << owner_ext_movable_by_neighbor << ","
+         << nearby_min_width_dbu_out << "," << nearby_max_width_dbu_out << ","
+         << both_vias_crossing << "," << dist_to_prev_seam_dbu << ","
+         << root_cause_type << "," << ownership_class << "\n";
+    }
+    MarkerDiagDump::instance().appendRows(ms.str());
+  }
   cleanup();
   high_resolution_clock::time_point t3 = high_resolution_clock::now();
 
@@ -812,7 +1759,43 @@ void FlexDR::processWorkersBatch(
     std::vector<std::unique_ptr<FlexDRWorker>>& workers_batch,
     IterationProgress& iter_prog)
 {
+  // P4.0 BoundaryDiag — initialize the two CSV writers once (env-gated),
+  // then bump the shared batch counter and update the per-iter file
+  // handle. Both singletons share OPENROAD_DRT_BOUNDARY_DIAG_DIR and the
+  // boundary_diag_batch_id_ counter so per-marker rows JOIN cleanly to
+  // per-worker rows on (iter, batch_id, worker_id). When the env var is
+  // unset both initFromEnv() calls leave .enabled() false and all
+  // subsequent calls into the dumps are no-ops.
+  BoundaryDiagDump::instance().initFromEnv();
+  if (BoundaryDiagDump::instance().enabled()) {
+    ++boundary_diag_batch_id_;
+    BoundaryDiagDump::instance().setIterBatch(iter_, boundary_diag_batch_id_);
+  }
+  MarkerDiagDump::instance().initFromEnv();
+  if (MarkerDiagDump::instance().enabled()) {
+    MarkerDiagDump::instance().setIterBatch(iter_, boundary_diag_batch_id_);
+  }
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
+  // P4.0 BoundaryDiag — assign a per-worker monotonic id within this
+  // batch and populate the global WorkerBoxRegistry so the per-marker
+  // CSV can resolve neighbor_worker_id. Cleared at batch start so each
+  // batch sees only its own workers (acceptable: stitch markers always
+  // emit in the same batch that produced them). Skipped entirely when
+  // the env var is unset, leaving emit_worker_id at its default -1 — the
+  // per-marker emit guards on that to short-circuit.
+  if (BoundaryDiagDump::instance().enabled()) {
+    WorkerBoxRegistry::instance().clear();
+    for (int i = 0; i < (int) workers_batch.size(); i++) {
+      const int wid = (boundary_diag_batch_id_ << 16) | (i & 0xffff);
+      workers_batch[i]->mutableBoundaryDiagStats().emit_worker_id = wid;
+      WorkerBoxRegistry::instance().registerWorker(
+          workers_batch[i]->getRouteBox(), wid);
+      // SeamClassifier v5 — record curr-iter seam coords for use by
+      // NEXT iter's distToPrev queries (after snapshotAsPrev in
+      // optimizationFlow).
+      PerIterSeams::instance().addRouteBox(workers_batch[i]->getRouteBox());
+    }
+  }
   ThreadException exception;
 #pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < (int) workers_batch.size(); i++) {  // NOLINT
@@ -907,6 +1890,37 @@ void FlexDR::endWorkersBatch(
     }
     if (worker->isCongested()) {
       increaseClipsize_ = true;
+    }
+    // P4.0 BoundaryDiag — emit per-worker CSV row HERE, AFTER end() has
+    // populated boundary_points_removed / boundary_merge_attempts /
+    // boundary_merge_success_h / boundary_merge_success_v. Pre-cleanup
+    // data (markers_out, markers_out_near_boundary, emit_thread_num,
+    // emit_iter, emit_batch_id) was stashed by FlexDRWorker::main()
+    // before cleanup() cleared markers_. The v4 lesson: emitting from
+    // main() (pre-end) leaves the merge counters at 0; that's why this
+    // dump lives in endWorkersBatch instead of the worker's main.
+    if (BoundaryDiagDump::instance().enabled()) {
+      const auto& bd = worker->getBoundaryDiagStats();
+      if (bd.emit_pending) {
+        const auto& rb = worker->getRouteBox();
+        std::stringstream bs;
+        bs << bd.emit_iter << "," << bd.emit_batch_id << ","
+           << bd.emit_thread_num << "," << bd.emit_worker_id << ","
+           << rb.xMin() << "," << rb.yMin() << "," << rb.xMax() << ","
+           << rb.yMax() << "," << bd.num_nets << "," << bd.num_true_pins
+           << "," << bd.num_boundary_pins << "," << bd.num_boundary_nets
+           << "," << bd.num_ext_connfigs << "," << bd.num_ext_pathsegs
+           << "," << bd.num_ext_vias << "," << bd.num_ext_patchwires << ","
+           << bd.markers_in << "," << bd.markers_out << ","
+           << bd.markers_out_near_boundary << ","
+           << bd.boundary_points_removed << ","
+           << bd.boundary_merge_attempts << ","
+           << bd.boundary_merge_success_h << ","
+           << bd.boundary_merge_success_v << ","
+           << packLayerHistogram(bd.boundary_pin_layer_hist) << ","
+           << packLayerHistogram(bd.ext_connfig_layer_hist) << "\n";
+        BoundaryDiagDump::instance().appendRow(bs.str());
+      }
     }
   }
   workers_batch.clear();
@@ -1378,6 +2392,10 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   if (graphics_) {
     graphics_->startIter(iter_, router_cfg_);
   }
+  // SeamClassifier v5 — fold last iter's seams into prev so this iter's
+  // marker emit can compute dist_to_prev_seam_dbu. Iter 0 has nothing
+  // to fold; distToPrev returns INT_MAX → reroute_jog never fires.
+  PerIterSeams::instance().snapshotAsPrev();
   auto gCellPatterns = getDesign()->getTopBlock()->getGCellPatterns();
   auto& xgp = gCellPatterns.at(0);
   auto& ygp = gCellPatterns.at(1);
@@ -1522,8 +2540,77 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
   // then updates the hotspot list and writes a CSV row when
   // OPENROAD_DRT_ADAPTIVE_MARKER_LOG is set.
   if (adaptive_marker_model_) {
-    adaptive_marker_model_->observeGlobalMarkers(
-        getDesign()->getTopBlock()->getMarkers());
+    const auto& markers_list = getDesign()->getTopBlock()->getMarkers();
+    adaptive_marker_model_->observeGlobalMarkers(markers_list);
+
+    // P4.A — geometric stitch classification. A marker is "stitch" if
+    // its bbox center is within bbh_band_width_dbu of any worker-grid
+    // line. Worker grid lines are derived from args.size + args.offset
+    // and the design's gcell pattern; this is a design-general proxy
+    // (same approach used by the archived P4.1 trial). The classified
+    // markers are fed to observeStitchMarker. When BBH is disabled
+    // this loop is skipped entirely to preserve bit-identical
+    // behaviour.
+    const auto& adaptive_opts = adaptive_marker_model_->getOptions();
+    if (adaptive_opts.bbh_enabled && !markers_list.empty()) {
+      auto gCellPatterns = getDesign()->getTopBlock()->getGCellPatterns();
+      if (gCellPatterns.size() >= 2) {
+        const auto& xgp = gCellPatterns.at(0);
+        const auto& ygp = gCellPatterns.at(1);
+        const long long gcell_spacing_x
+            = static_cast<long long>(xgp.getSpacing());
+        const long long gcell_spacing_y
+            = static_cast<long long>(ygp.getSpacing());
+        const long long gcell_start_x
+            = static_cast<long long>(xgp.getStartCoord());
+        const long long gcell_start_y
+            = static_cast<long long>(ygp.getStartCoord());
+        const long long stride_x
+            = static_cast<long long>(args.size) * gcell_spacing_x;
+        const long long stride_y
+            = static_cast<long long>(args.size) * gcell_spacing_y;
+        const long long origin_x
+            = gcell_start_x
+              + static_cast<long long>(args.offset) * gcell_spacing_x;
+        const long long origin_y
+            = gcell_start_y
+              + static_cast<long long>(args.offset) * gcell_spacing_y;
+        const long long band = static_cast<long long>(
+            std::lround(adaptive_opts.bbh_band_width_dbu));
+        if (stride_x > 0 && stride_y > 0) {
+          for (const auto& m : markers_list) {
+            if (m == nullptr) {
+              continue;
+            }
+            const odb::Rect bb = m->getBBox();
+            const long long cx
+                = (static_cast<long long>(bb.xMin())
+                   + static_cast<long long>(bb.xMax()))
+                  / 2;
+            const long long cy
+                = (static_cast<long long>(bb.yMin())
+                   + static_cast<long long>(bb.yMax()))
+                  / 2;
+            // Distance from (cx, cy) to the nearest worker-grid line.
+            // Positive modulo across all signs.
+            auto pos_mod = [](long long a, long long b) {
+              long long r = a % b;
+              return r < 0 ? r + b : r;
+            };
+            const long long mx = pos_mod(cx - origin_x, stride_x);
+            const long long my = pos_mod(cy - origin_y, stride_y);
+            const long long dx_to_grid = std::min(mx, stride_x - mx);
+            const long long dy_to_grid = std::min(my, stride_y - my);
+            const bool is_stitch
+                = std::min(dx_to_grid, dy_to_grid) <= band;
+            if (is_stitch) {
+              adaptive_marker_model_->observeStitchMarker(*m);
+            }
+          }
+        }
+      }
+    }
+
     adaptive_marker_model_->endOuterIter();
   }
   debugPrint(logger_,
@@ -1690,6 +2777,10 @@ void FlexDR::end(bool done)
     msg << std::endl << std::endl;
     logger_->report("{}", msg.str());
   }
+  // P4.0 BoundaryDiag — flush + close both CSVs at FlexDR::end. Safe to
+  // call when env var unset (no-op when not enabled).
+  BoundaryDiagDump::instance().closeOnEnd();
+  MarkerDiagDump::instance().closeOnEnd();
 }
 
 std::vector<FlexDR::SearchRepairArgs> strategy(const frUInt4 shapeCost,
