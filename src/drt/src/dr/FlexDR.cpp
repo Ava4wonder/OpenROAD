@@ -2882,7 +2882,11 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
     // removeGCell2BoundaryPin() above, so createWorker's iter-0
     // branch would crash, and (b) iter 0 uses RipUpMode::ALL so
     // CSR's targeted repair semantics don't apply.
-    if (CrossSeamRepair::instance().repairEnabled() && iter_ != 0) {
+    // CSR E4.1 — restrict repair to iter 1 ONLY. Hypothesis: iter 2+ CSR
+    // commits contribute to the residual-class shift that triggers
+    // guides_tiles + stubborn_tiles escalation in iter 3+. Iter 1 is
+    // where the bulk of seam_spacing lives (60% of iter-1 viols).
+    if (CrossSeamRepair::instance().repairEnabled() && iter_ == 1) {
       const frCoord kMergeT = 8000;        // ~2 GCells
       const frCoord kMaxBox = 14000;       // ~4 GCells per side
       auto jobs = CrossSeamRepair::instance().buildRepairJobs(
