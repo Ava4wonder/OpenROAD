@@ -452,8 +452,22 @@ class CrossSeamRepair
     dir_ = v;
     enabled_ = true;
     mkdir(dir_.c_str(), 0777);
+    // E2 — separate gate: OPENROAD_DRT_CSR_REPAIR=1 enables actual
+    // repair-worker spawn (in addition to the E1 selection-only CSV).
+    // When unset (or set to '0'), CSR is read-only (E1 mode).
+    const char* r = std::getenv("OPENROAD_DRT_CSR_REPAIR");
+    if (r != nullptr && r[0] != '\0' && r[0] != '0') {
+      repair_enabled_ = true;
+    }
+    // E2 — open per-job CSV writer.
+    const std::string job_path = dir_ + "/csr_e2_jobs.csv";
+    e2_jobs_out_.open(job_path);
+    e2_jobs_out_ << "iter,cluster_id,layer,box_xmin,box_ymin,box_xmax,"
+                    "box_ymax,num_markers_in_cluster,markers_pre,"
+                    "markers_post,committed,crosses_seam\n";
   }
   bool enabled() const { return enabled_; }
+  bool repairEnabled() const { return enabled_ && repair_enabled_; }
   void closeOnEnd()
   {
     std::lock_guard<std::mutex> lk(mutex_);
@@ -568,12 +582,57 @@ class CrossSeamRepair
     out_.flush();
   }
 
+  // E2 — per-iter repair-worker spawn pipeline. Called by
+  // FlexDR::optimizationFlow AFTER the batch loop, BEFORE the iter
+  // completes. Builds clusters → repair boxes → returns jobs for
+  // FlexDR to spawn via createWorker. Stateless (returns a fresh
+  // vector each call).
+  struct RepairJob
+  {
+    int cluster_id;
+    odb::Rect box;
+    frLayerNum layer;
+    int num_markers_in_cluster;
+    bool crosses_seam;
+  };
+  std::vector<RepairJob> buildRepairJobs(
+      int iter,
+      frBlock* topBlock,
+      const std::vector<frCoord>& seam_xs_sorted,
+      const std::vector<frCoord>& seam_ys_sorted,
+      frCoord drc_safe_dist_dbu,
+      frCoord merge_t_dbu,
+      frCoord max_box_dbu);
+  void recordJobResult(int iter,
+                       int cluster_id,
+                       frLayerNum layer,
+                       const odb::Rect& box,
+                       int num_markers_in_cluster,
+                       int markers_pre,
+                       int markers_post,
+                       bool committed,
+                       bool crosses_seam)
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (e2_jobs_out_.is_open()) {
+      e2_jobs_out_ << iter << "," << cluster_id << "," << layer << ","
+                   << box.xMin() << "," << box.yMin() << "," << box.xMax()
+                   << "," << box.yMax() << "," << num_markers_in_cluster
+                   << "," << markers_pre << "," << markers_post << ","
+                   << (committed ? 1 : 0) << "," << (crosses_seam ? 1 : 0)
+                   << "\n";
+      e2_jobs_out_.flush();
+    }
+  }
+
  private:
   std::mutex mutex_;
   bool initialized_ = false;
   bool enabled_ = false;
+  bool repair_enabled_ = false;
   std::string dir_;
   std::ofstream out_;
+  std::ofstream e2_jobs_out_;
   int last_iter_ = -1;
 };
 
@@ -774,6 +833,167 @@ const char* boundaryDiagRuleClassName(frConstraintTypeEnum t)
       return "lef58WidthTableOrth";
   }
   return "unknown";
+}
+
+// CSR E2 — build per-iter repair-job list. Walks topBlock markers,
+// re-applies the E1 predicate (cross-worker different-net spacing-like
+// near-seam), greedily buckets by (layer, cx/merge_t, cy/merge_t),
+// builds bbox-union → bloat by MTSAFEDIST → cap to max_box_dbu →
+// snap to box. Verifies cross-seam (box must contain at least one
+// seam_x or seam_y line). Returns jobs in deterministic order
+// (sorted by cluster_id which is itself ordered by first-marker idx).
+std::vector<CrossSeamRepair::RepairJob>
+CrossSeamRepair::buildRepairJobs(
+    int iter,
+    frBlock* topBlock,
+    const std::vector<frCoord>& seam_xs_sorted,
+    const std::vector<frCoord>& seam_ys_sorted,
+    frCoord drc_safe_dist_dbu,
+    frCoord merge_t_dbu,
+    frCoord max_box_dbu)
+{
+  std::vector<RepairJob> jobs;
+  // Step 1 — collect candidates (re-apply E1 predicate; topBlock markers
+  // are the post-iter state).
+  struct Cand
+  {
+    int idx;
+    odb::Rect bb;
+    frLayerNum ln;
+  };
+  std::vector<Cand> cands;
+  auto distToSeam = [](frCoord c, const std::vector<frCoord>& v) -> frCoord {
+    if (v.empty()) {
+      return std::numeric_limits<frCoord>::max();
+    }
+    auto it = std::lower_bound(v.begin(), v.end(), c);
+    frCoord best = std::numeric_limits<frCoord>::max();
+    if (it != v.end()) {
+      best = std::min(best, *it - c);
+    }
+    if (it != v.begin()) {
+      best = std::min(best, c - *(it - 1));
+    }
+    return best;
+  };
+  int idx = -1;
+  const auto& markers = topBlock->getMarkers();
+  for (const auto& mu : markers) {
+    ++idx;
+    const auto& mk = *mu;
+    const auto bb = mk.getBBox();
+    const frLayerNum ln = mk.getLayerNum();
+    const char* rc = "unknown";
+    if (mk.getConstraint() != nullptr) {
+      rc = boundaryDiagRuleClassName(mk.getConstraint()->typeId());
+    }
+    if (!isSpacingLikeRule(rc)) {
+      continue;
+    }
+    std::set<frNet*> nets;
+    for (auto* src : mk.getSrcs()) {
+      if (src == nullptr) {
+        continue;
+      }
+      frNet* n = nullptr;
+      switch (src->typeId()) {
+        case frcNet:
+          n = static_cast<frNet*>(src);
+          break;
+        case frcInstTerm:
+          n = static_cast<frInstTerm*>(src)->getNet();
+          break;
+        case frcBTerm:
+          n = static_cast<frBTerm*>(src)->getNet();
+          break;
+        default:
+          break;
+      }
+      if (n != nullptr) {
+        nets.insert(n);
+      }
+    }
+    if (nets.size() < 2) {
+      continue;
+    }
+    const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+    const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+    const frCoord d_seam
+        = std::min(distToSeam(cx, seam_xs_sorted),
+                   distToSeam(cy, seam_ys_sorted));
+    if (d_seam > drc_safe_dist_dbu) {
+      continue;
+    }
+    cands.push_back({idx, bb, ln});
+  }
+  if (cands.empty()) {
+    return jobs;
+  }
+  // Step 2 — cluster by (layer, bucket_x, bucket_y) using merge_t_dbu.
+  std::map<std::tuple<frLayerNum, int, int>, std::vector<int>> bucket;
+  for (size_t i = 0; i < cands.size(); ++i) {
+    const auto& c = cands[i];
+    const frCoord cx = (c.bb.xMin() + c.bb.xMax()) / 2;
+    const frCoord cy = (c.bb.yMin() + c.bb.yMax()) / 2;
+    const int bx = cx / merge_t_dbu;
+    const int by = cy / merge_t_dbu;
+    bucket[{c.ln, bx, by}].push_back(static_cast<int>(i));
+  }
+  // Step 3 — build repair box per cluster.
+  int cid = -1;
+  for (const auto& [key, idxs] : bucket) {
+    ++cid;
+    const frLayerNum ln = std::get<0>(key);
+    odb::Rect box(cands[idxs[0]].bb);
+    for (int ii : idxs) {
+      box.merge(cands[ii].bb);
+    }
+    // Bloat by MTSAFEDIST (2 * drc_safe_dist_dbu approximation; we use
+    // a separate parameter for cleanliness).
+    constexpr frCoord kBloat = 2000;  // MTSAFEDIST
+    box = odb::Rect(box.xMin() - kBloat,
+                    box.yMin() - kBloat,
+                    box.xMax() + kBloat,
+                    box.yMax() + kBloat);
+    // Cap box dimensions.
+    if (box.dx() > max_box_dbu) {
+      const frCoord cx = (box.xMin() + box.xMax()) / 2;
+      box.set_xlo(cx - max_box_dbu / 2);
+      box.set_xhi(cx + max_box_dbu / 2);
+    }
+    if (box.dy() > max_box_dbu) {
+      const frCoord cy = (box.yMin() + box.yMax()) / 2;
+      box.set_ylo(cy - max_box_dbu / 2);
+      box.set_yhi(cy + max_box_dbu / 2);
+    }
+    // Cross-seam check — box must contain at least one seam_x OR
+    // seam_y line. Otherwise the box is fully inside one prior worker
+    // and CSR provides no joint-visibility benefit; skip.
+    bool crosses_seam = false;
+    {
+      auto it = std::lower_bound(
+          seam_xs_sorted.begin(), seam_xs_sorted.end(), box.xMin());
+      if (it != seam_xs_sorted.end() && *it < box.xMax()) {
+        crosses_seam = true;
+      }
+    }
+    if (!crosses_seam) {
+      auto it = std::lower_bound(
+          seam_ys_sorted.begin(), seam_ys_sorted.end(), box.yMin());
+      if (it != seam_ys_sorted.end() && *it < box.yMax()) {
+        crosses_seam = true;
+      }
+    }
+    if (!crosses_seam) {
+      continue;  // skip non-cross-seam clusters
+    }
+    jobs.push_back({cid,
+                    box,
+                    ln,
+                    static_cast<int>(idxs.size()),
+                    crosses_seam});
+  }
+  return jobs;
 }
 
 // P4.0 — pack a layer-indexed histogram into a "L<n>:<c>|..." string,
@@ -2644,11 +2864,8 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   if (!iter_) {
     removeGCell2BoundaryPin();
   }
-  // CSR E1 — selection-only analysis at iter end. Walks all markers,
-  // applies cross-worker different-net spacing-like predicate against
-  // this iter's accumulated seam coords from PerIterSeams. Per-iter
-  // CSV emitted. NO repair workers in E1; this is the candidate
-  // coverage gate experiment (need >=50% of seam_spacing covered).
+  // CSR E1 — selection-only analysis at iter end. ALWAYS runs when
+  // OPENROAD_DRT_CSR_DIR is set; gated by enabled().
   if (CrossSeamRepair::instance().enabled()) {
     const auto xs = PerIterSeams::instance().getCurrXsSorted();
     const auto ys = PerIterSeams::instance().getCurrYsSorted();
@@ -2658,6 +2875,46 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
         xs,
         ys,
         /*seam_band_dbu=*/router_cfg_->DRCSAFEDIST);
+    // CSR E2 — repair-worker spawn. Gated by an additional env var
+    // OPENROAD_DRT_CSR_REPAIR=1. Builds repair jobs, spawns workers
+    // serially, commits only if local marker count improves.
+    // SKIP iter 0: (a) gcell2BoundaryPin_ was just cleared by
+    // removeGCell2BoundaryPin() above, so createWorker's iter-0
+    // branch would crash, and (b) iter 0 uses RipUpMode::ALL so
+    // CSR's targeted repair semantics don't apply.
+    if (CrossSeamRepair::instance().repairEnabled() && iter_ != 0) {
+      const frCoord kMergeT = 8000;        // ~2 GCells
+      const frCoord kMaxBox = 14000;       // ~4 GCells per side
+      auto jobs = CrossSeamRepair::instance().buildRepairJobs(
+          iter_,
+          getDesign()->getTopBlock(),
+          xs,
+          ys,
+          /*drc_safe_dist_dbu=*/router_cfg_->DRCSAFEDIST,
+          /*merge_t_dbu=*/kMergeT,
+          /*max_box_dbu=*/kMaxBox);
+      for (const auto& job : jobs) {
+        auto worker = createWorker(0, 0, args, job.box);
+        const int rc = worker->main(getDesign());
+        if (rc != 0) {
+          CrossSeamRepair::instance().recordJobResult(
+              iter_, job.cluster_id, job.layer, job.box,
+              job.num_markers_in_cluster, -1, -1, false, job.crosses_seam);
+          continue;
+        }
+        const int pre = worker->getInitNumMarkers();
+        const int post = worker->getNumMarkers();
+        bool committed = false;
+        if (post < pre) {
+          worker->end(getDesign());
+          committed = true;
+        }
+        CrossSeamRepair::instance().recordJobResult(
+            iter_, job.cluster_id, job.layer, job.box,
+            job.num_markers_in_cluster, pre, post, committed,
+            job.crosses_seam);
+      }
+    }
   }
 }
 
