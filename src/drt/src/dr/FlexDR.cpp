@@ -2893,8 +2893,15 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
           /*drc_safe_dist_dbu=*/router_cfg_->DRCSAFEDIST,
           /*merge_t_dbu=*/kMergeT,
           /*max_box_dbu=*/kMaxBox);
+      // CSR E4 — override RipUpMode to DRC for repair workers. Iter 1/2
+      // strategies use RipUpMode::ALL which rips ALL nets in route_box;
+      // that is overkill for surgical seam-spacing repair. DRC mode
+      // only rips nets associated with markers in drcBox — exactly what
+      // CSR needs (targeted, marker-driven ripup of the involved nets).
+      SearchRepairArgs repair_args = args;
+      repair_args.ripupMode = RipUpMode::DRC;
       for (const auto& job : jobs) {
-        auto worker = createWorker(0, 0, args, job.box);
+        auto worker = createWorker(0, 0, repair_args, job.box);
         const int rc = worker->main(getDesign());
         if (rc != 0) {
           CrossSeamRepair::instance().recordJobResult(
