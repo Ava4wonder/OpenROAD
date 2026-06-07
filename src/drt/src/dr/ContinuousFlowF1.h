@@ -202,12 +202,14 @@ class RegionQueue
 class F1Dispatcher
 {
  public:
-  F1Dispatcher(FlexDR* parent, const FlexDR::SearchRepairArgs& args);
+  F1Dispatcher(FlexDR* parent,
+               const FlexDR::SearchRepairArgs& args,
+               FlexDR::IterationProgress& iter_prog);
   ~F1Dispatcher();
 
   // Run the continuous flow until termination. Blocks the calling
-  // thread until done. M3 skeleton: seeds the queue, spins worker
-  // threads, returns when queue empty + idle.
+  // thread until done. Updates iter_prog at end so downstream
+  // progress-report code sees consistent counters.
   void run();
 
   // Stats / debugging.
@@ -226,10 +228,12 @@ class F1Dispatcher
 
   FlexDR* parent_;
   const FlexDR::SearchRepairArgs& args_;
+  FlexDR::IterationProgress& iter_prog_;
   std::unique_ptr<WorkerPool> pool_;
   RegionQueue queue_;
   InFlightConflictIndex inflight_;
   std::atomic<int> regions_processed_{0};
+  std::atomic<int> regions_pushed_repairs_{0};
   std::atomic<int> in_flight_count_{0};
   std::atomic<bool> shutdown_{false};
 };
@@ -238,7 +242,9 @@ class F1Dispatcher
 // Public entry point — called from FlexDR::optimizationFlow when
 // OPENROAD_DRT_F1_CONTINUOUS_QUEUE=1 is set.
 // ============================================================
-void runContinuousFlowF1(FlexDR* parent, const FlexDR::SearchRepairArgs& args);
+void runContinuousFlowF1(FlexDR* parent,
+                         const FlexDR::SearchRepairArgs& args,
+                         FlexDR::IterationProgress& iter_prog);
 
 }  // namespace f1
 }  // namespace drt

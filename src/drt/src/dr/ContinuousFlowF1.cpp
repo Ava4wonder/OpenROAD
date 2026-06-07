@@ -172,8 +172,10 @@ std::size_t RegionQueue::size() const
 // F1Dispatcher (M3 SKELETON)
 // ============================================================
 
-F1Dispatcher::F1Dispatcher(FlexDR* parent, const FlexDR::SearchRepairArgs& args)
-    : parent_(parent), args_(args)
+F1Dispatcher::F1Dispatcher(FlexDR* parent,
+                           const FlexDR::SearchRepairArgs& args,
+                           FlexDR::IterationProgress& iter_prog)
+    : parent_(parent), args_(args), iter_prog_(iter_prog)
 {
   pool_ = std::make_unique<WorkerPool>(parent_);
 }
@@ -227,30 +229,75 @@ void F1Dispatcher::seedInitialTiles()
 }
 
 void F1Dispatcher::scanAndPushRepairs(int /*thread_id*/,
-                                      const Region& /*region*/)
+                                      const Region& region)
 {
-  // M3 SKELETON — body intentionally empty. M4 will:
-  //
-  //   1. Scan the just-committed region's routeBox + 1-GCell halo
-  //      for new markers via getRegionQuery()->query(...) on each
-  //      layer's marker rtree.
-  //
-  //   2. Cluster markers using CrossSeamRepair::buildRepairJobs
-  //      (already exists and works on iter-0's 92k+ markers).
-  //
-  //   3. For each cluster decide:
-  //        - touches region boundary edge → wide-halo CSR-style region
-  //          (halo = DRCSAFEDIST + MTSAFEDIST + 4000, priority high)
-  //        - interior → normal repair region
-  //          (halo = DRCSAFEDIST, priority = marker count)
-  //
-  //   4. Push to queue_.
-  //
-  // The plumbing in M3 is already in place to call this from the
-  // worker loop after end(); empty body just means "no new regions
-  // queued", so the dispatcher will drain the initial tiles and
-  // terminate — equivalent to iter-0-only routing. That's the M3
-  // smoke gate: did it route all initial tiles correctly?
+  // M4 — after a worker commits, scan its routeBox + 1-GCell halo
+  // for markers and push new Regions:
+  //   - boundary cluster (touches edge of routeBox): wide CSR-style halo,
+  //     high priority (marker_count × 10) — repairs the cross-worker
+  //     boundary race that routeBox-only MIS deliberately allows
+  //   - interior cluster: narrow halo, priority = marker count
+  auto* topBlock = parent_->getDesign()->getTopBlock();
+  auto* cfg = parent_->getRouterCfg();
+  const frCoord kHaloPad = cfg->MTSAFEDIST;
+  const frCoord kBoundaryTol = cfg->MTSAFEDIST;
+  const frCoord kClusterT = 8000;  // ~2 GCells per cluster bucket
+
+  // Scan markers whose bbox intersects region.route_box + kHaloPad.
+  // Linear over all markers; M4.1 will replace with frRegionQuery for
+  // designs > 50k markers where this dominates.
+  const odb::Rect scan_box(region.route_box.xMin() - kHaloPad,
+                           region.route_box.yMin() - kHaloPad,
+                           region.route_box.xMax() + kHaloPad,
+                           region.route_box.yMax() + kHaloPad);
+
+  std::map<std::tuple<frLayerNum, int, int>, std::vector<odb::Rect>> buckets;
+  for (const auto& mu : topBlock->getMarkers()) {
+    const odb::Rect bb = mu->getBBox();
+    if (!scan_box.intersects(bb)) {
+      continue;
+    }
+    const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+    const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+    const auto key
+        = std::make_tuple(mu->getLayerNum(),
+                          static_cast<int>(cx / kClusterT),
+                          static_cast<int>(cy / kClusterT));
+    buckets[key].push_back(bb);
+  }
+  if (buckets.empty()) {
+    return;
+  }
+
+  const frCoord wide_halo
+      = cfg->DRCSAFEDIST + cfg->MTSAFEDIST + 4000;
+  const frCoord narrow_halo = cfg->DRCSAFEDIST;
+
+  int pushed_here = 0;
+  for (auto& [key, group] : buckets) {
+    odb::Rect cluster_bb = group.front();
+    for (const auto& bb : group) {
+      cluster_bb.merge(bb);
+    }
+    const bool touches_boundary
+        = cluster_bb.xMin() <= region.route_box.xMin() + kBoundaryTol
+          || cluster_bb.xMax() >= region.route_box.xMax() - kBoundaryTol
+          || cluster_bb.yMin() <= region.route_box.yMin() + kBoundaryTol
+          || cluster_bb.yMax() >= region.route_box.yMax() - kBoundaryTol;
+    const frCoord halo = touches_boundary ? wide_halo : narrow_halo;
+    Region r;
+    r.route_box = odb::Rect(cluster_bb.xMin() - halo,
+                            cluster_bb.yMin() - halo,
+                            cluster_bb.xMax() + halo,
+                            cluster_bb.yMax() + halo);
+    r.halo_dbu = halo;
+    r.marker_count = static_cast<int>(group.size());
+    r.priority = r.marker_count * (touches_boundary ? 10 : 1);
+    r.wide_halo_for_repair = touches_boundary;
+    queue_.push(std::move(r));
+    ++pushed_here;
+  }
+  regions_pushed_repairs_.fetch_add(pushed_here);
 }
 
 void F1Dispatcher::workerThreadMain(int thread_id)
@@ -283,10 +330,13 @@ void F1Dispatcher::workerThreadMain(int thread_id)
     pool_->returnToPool(std::move(worker));
     inflight_.release(thread_id);
     regions_processed_.fetch_add(1);
-    in_flight_count_.fetch_sub(1);
 
-    // M4: scan + push repair regions.
+    // M4 — scan + push BEFORE decrementing in_flight, so the
+    // termination check can't false-trigger between "this region is
+    // done" and "the repair regions I want to push are visible to the
+    // queue". Termination is: queue.size()==0 AND in_flight_count==0.
     scanAndPushRepairs(thread_id, region);
+    in_flight_count_.fetch_sub(1);
   }
 }
 
@@ -323,18 +373,31 @@ void F1Dispatcher::run()
     t.join();
   }
 
+  // iter_prog must be populated so downstream progress / div-by-zero
+  // code in searchRepair sees consistent counters. We model the
+  // entire F.1 continuous-flow phase as one logical iter where
+  // total = cnt = processed regions.
+  const int processed = regions_processed_.load();
+  iter_prog_.total_num_workers = std::max(1, processed);
+  iter_prog_.cnt_done_workers = std::max(1, processed);
+
   parent_->getLogger()->report(
       "[F.1 cont] dispatcher done: processed {} regions "
-      "(pushed {}, popped {})",
-      regions_processed_.load(), queue_.pushed(), queue_.popped());
+      "(initial-tile + repair pushes: {}; popped {})",
+      processed, queue_.pushed(), queue_.popped());
+  parent_->getLogger()->report(
+      "[F.1 cont] M4 repair regions pushed: {}",
+      regions_pushed_repairs_.load());
 }
 
 // ============================================================
 // Public entry point
 // ============================================================
-void runContinuousFlowF1(FlexDR* parent, const FlexDR::SearchRepairArgs& args)
+void runContinuousFlowF1(FlexDR* parent,
+                         const FlexDR::SearchRepairArgs& args,
+                         FlexDR::IterationProgress& iter_prog)
 {
-  F1Dispatcher dispatcher(parent, args);
+  F1Dispatcher dispatcher(parent, args, iter_prog);
   dispatcher.run();
 }
 

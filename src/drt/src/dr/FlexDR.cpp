@@ -3070,7 +3070,7 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       graphics_->startIter(iter_, router_cfg_);
     }
     PerIterSeams::instance().snapshotAsPrev();
-    f1::runContinuousFlowF1(this, args);
+    f1::runContinuousFlowF1(this, args, iter_prog);
     if (!iter_) {
       removeGCell2BoundaryPin();
     }
