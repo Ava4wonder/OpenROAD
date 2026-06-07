@@ -113,6 +113,49 @@ class WorkerPool
 };
 
 // ============================================================
+// SpatialLockGrid (M5.0) — per-region locks, not global lock
+// ============================================================
+//
+// Replaces M4.2's global shared_mutex with a fine-grained per-cell
+// lock grid. Two workers whose extended regions (routeBox bloated
+// by DRC read margin) cover disjoint cells run fully in parallel.
+// Only workers whose regions actually share cells serialize on the
+// shared subset.
+//
+// Lock acquisition order = sorted-by-cell-index, so multiple-lock
+// dispatch can't deadlock. Release is reverse order.
+//
+// Cell sizing: grid is N×N over the design die area, with N chosen
+// so each cell is ~one worker-tile across. For ibex this puts ~64
+// cells/worker (~16 lock acquires per worker after rounding); for
+// test9 it puts ~4-9 cells/worker. Total locks O(N²) — cheap.
+class SpatialLockGrid
+{
+ public:
+  // `die_area` in DBU; `cells_per_axis` is the N of the N×N grid.
+  SpatialLockGrid(const odb::Rect& die_area, int cells_per_axis);
+
+  // Acquire all cell locks overlapping `region`. Returns indices held.
+  // Sorted ascending so caller can sleep through contention safely.
+  // Thread-safe; blocks until all locks held.
+  std::vector<int> acquireRegion(const odb::Rect& region);
+
+  // Release previously-held indices.
+  void releaseRegion(const std::vector<int>& held);
+
+  int numCells() const { return n_ * n_; }
+
+ private:
+  std::vector<int> cellsCovering(const odb::Rect& region) const;
+
+  odb::Rect die_;
+  int n_;
+  frCoord cell_w_;
+  frCoord cell_h_;
+  std::vector<std::unique_ptr<std::mutex>> locks_;
+};
+
+// ============================================================
 // InFlightConflictIndex (M2) — spatial index of in-flight routeBoxes
 // ============================================================
 //
@@ -237,11 +280,10 @@ class F1Dispatcher
   std::atomic<int> regions_pushed_repairs_{0};
   std::atomic<int> in_flight_count_{0};
   std::atomic<bool> shutdown_{false};
-  // M4.2 design-DB R/W lock — main() takes shared (read) lock, end()
-  // takes unique (write) lock. Prevents the SIGSEGV in initNetObjs
-  // when worker A.main() reads frNet X while worker B.end() mutates
-  // it. Phase 3 will replace with per-net versioning.
-  std::shared_mutex design_mu_;
+  // M5.0 per-region spatial lock grid. Two workers with disjoint
+  // (routeBox + DRC halo) regions never contend; only their shared
+  // cells serialize. Replaces M4.2's global shared_mutex.
+  std::unique_ptr<SpatialLockGrid> lock_grid_;
 };
 
 // ============================================================

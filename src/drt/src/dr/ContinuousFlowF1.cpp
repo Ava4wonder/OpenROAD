@@ -54,6 +54,70 @@ void WorkerPool::returnToPool(std::unique_ptr<FlexDRWorker> worker)
 }
 
 // ============================================================
+// SpatialLockGrid (M5.0)
+// ============================================================
+
+SpatialLockGrid::SpatialLockGrid(const odb::Rect& die_area,
+                                  int cells_per_axis)
+    : die_(die_area), n_(cells_per_axis)
+{
+  if (n_ < 1) {
+    n_ = 1;
+  }
+  cell_w_ = std::max<frCoord>(1, (die_.xMax() - die_.xMin()) / n_);
+  cell_h_ = std::max<frCoord>(1, (die_.yMax() - die_.yMin()) / n_);
+  locks_.reserve(n_ * n_);
+  for (int i = 0; i < n_ * n_; ++i) {
+    locks_.emplace_back(std::make_unique<std::mutex>());
+  }
+}
+
+std::vector<int> SpatialLockGrid::cellsCovering(
+    const odb::Rect& region) const
+{
+  // Clamp to die; cells outside the design need no lock.
+  const frCoord rx_lo = std::max(region.xMin(), die_.xMin());
+  const frCoord ry_lo = std::max(region.yMin(), die_.yMin());
+  const frCoord rx_hi = std::min(region.xMax(), die_.xMax());
+  const frCoord ry_hi = std::min(region.yMax(), die_.yMax());
+  if (rx_hi <= rx_lo || ry_hi <= ry_lo) {
+    return {};
+  }
+  const int x_lo = std::max(0, (int) ((rx_lo - die_.xMin()) / cell_w_));
+  const int y_lo = std::max(0, (int) ((ry_lo - die_.yMin()) / cell_h_));
+  const int x_hi
+      = std::min(n_ - 1, (int) ((rx_hi - die_.xMin() - 1) / cell_w_));
+  const int y_hi
+      = std::min(n_ - 1, (int) ((ry_hi - die_.yMin() - 1) / cell_h_));
+  std::vector<int> indices;
+  indices.reserve((x_hi - x_lo + 1) * (y_hi - y_lo + 1));
+  for (int y = y_lo; y <= y_hi; ++y) {
+    for (int x = x_lo; x <= x_hi; ++x) {
+      indices.push_back(y * n_ + x);
+    }
+  }
+  return indices;
+}
+
+std::vector<int> SpatialLockGrid::acquireRegion(const odb::Rect& region)
+{
+  auto indices = cellsCovering(region);
+  std::sort(indices.begin(), indices.end());
+  for (int idx : indices) {
+    locks_[idx]->lock();
+  }
+  return indices;
+}
+
+void SpatialLockGrid::releaseRegion(const std::vector<int>& held)
+{
+  // Release in reverse order (mirror of acquire).
+  for (auto it = held.rbegin(); it != held.rend(); ++it) {
+    locks_[*it]->unlock();
+  }
+}
+
+// ============================================================
 // InFlightConflictIndex (M2)
 // ============================================================
 
@@ -178,6 +242,13 @@ F1Dispatcher::F1Dispatcher(FlexDR* parent,
     : parent_(parent), args_(args), iter_prog_(iter_prog)
 {
   pool_ = std::make_unique<WorkerPool>(parent_);
+  // M5.0 — initialize SpatialLockGrid sized to give ~few-cells-per-
+  // worker on whatever design we are routing. 32×32 is a reasonable
+  // default for ibex (small die → small cells, ~3 GCells each) and
+  // for large designs like test9 (large die → bigger cells, still
+  // many cells per worker). M5.1 will make it adaptive.
+  const odb::Rect die = parent_->getDesign()->getTopBlock()->getBBox();
+  lock_grid_ = std::make_unique<SpatialLockGrid>(die, 32);
 }
 
 F1Dispatcher::~F1Dispatcher() = default;
@@ -347,23 +418,27 @@ void F1Dispatcher::workerThreadMain(int thread_id)
 
     in_flight_count_.fetch_add(1);
     auto worker = pool_->acquire(region.route_box, args_);
+    // M5.0 — acquire per-cell locks covering routeBox bloated by the
+    // DRC-read margin. Workers with disjoint extended regions never
+    // contend; only shared cells serialize. Both main() and end() run
+    // under the same lock set: reads stay consistent (no concurrent
+    // writer in our cells) and writes don't race with concurrent reads.
+    auto* cfg = parent_->getRouterCfg();
+    const odb::Rect read_region(
+        region.route_box.xMin() - cfg->DRCSAFEDIST,
+        region.route_box.yMin() - cfg->DRCSAFEDIST,
+        region.route_box.xMax() + cfg->DRCSAFEDIST,
+        region.route_box.yMax() + cfg->DRCSAFEDIST);
+    auto held = lock_grid_->acquireRegion(read_region);
     int rc = 0;
     bool commit = false;
-    {
-      // M4.2: main() reads design DB extensively (initNetObjs,
-      // initFixedObjs, etc.). Take a shared lock so multiple workers
-      // can read in parallel but block while any end() is in flight.
-      std::shared_lock<std::shared_mutex> g(design_mu_);
-      rc = worker->main(parent_->getDesign());
-      commit = (rc == 0
-                && worker->getNumMarkers() < worker->getInitNumMarkers());
-    }
+    rc = worker->main(parent_->getDesign());
+    commit = (rc == 0
+              && worker->getNumMarkers() < worker->getInitNumMarkers());
     if (commit) {
-      // M4.2: end() mutates design DB; take exclusive lock so no
-      // concurrent reader sees a torn write.
-      std::unique_lock<std::shared_mutex> g(design_mu_);
       worker->end(parent_->getDesign());
     }
+    lock_grid_->releaseRegion(held);
     pool_->returnToPool(std::move(worker));
     inflight_.release(thread_id);
     regions_processed_.fetch_add(1);
