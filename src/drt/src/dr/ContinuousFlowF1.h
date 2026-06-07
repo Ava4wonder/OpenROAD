@@ -40,6 +40,7 @@ namespace drt {
 
 class FlexDRWorker;
 class frDesign;
+class frNet;
 class RouterConfiguration;
 
 namespace f1 {
@@ -110,6 +111,45 @@ class WorkerPool
   std::atomic<int> acquired_{0};
   std::atomic<int> returned_{0};
   // Phase 2.1: std::mutex pool_mu_; std::vector<...> free_workers_;
+};
+
+// ============================================================
+// NetLockTable (M6) — per-frNet mutex
+// ============================================================
+//
+// Replaces M5.0's per-cell spatial lock with per-net synchronization.
+// Two workers whose extended regions touch DISJOINT net sets never
+// contend (most worker pairs in dense designs). Only workers sharing
+// at least one net serialise — and only on those nets.
+//
+// Net enumeration per region uses frRegionQuery::queryDRObj + cast to
+// frPathSeg / frVia / frPatchWire to extract net. O(log N + objs_in
+// _region) per worker.
+//
+// Lock acquisition is sorted by frNet pointer address — deadlock-free.
+class NetLockTable
+{
+ public:
+  void initialise(frDesign* design);
+
+  // Enumerate nets with at least one drObj inside `region`. Result
+  // is sorted by frNet pointer (deadlock-safe acquisition order).
+  std::vector<frNet*> netsInRegion(frDesign* design,
+                                    const odb::Rect& region) const;
+
+  // Acquire mutexes for all nets in sorted order. Returns the held
+  // mutexes (caller uses release to unlock in reverse). Thread-safe;
+  // blocks until all held.
+  std::vector<std::mutex*> acquireNets(const std::vector<frNet*>& sorted);
+  void releaseNets(const std::vector<std::mutex*>& held);
+
+  int numNetsRegistered() const
+  {
+    return static_cast<int>(net_locks_.size());
+  }
+
+ private:
+  std::unordered_map<frNet*, std::unique_ptr<std::mutex>> net_locks_;
 };
 
 // ============================================================
@@ -280,10 +320,14 @@ class F1Dispatcher
   std::atomic<int> regions_pushed_repairs_{0};
   std::atomic<int> in_flight_count_{0};
   std::atomic<bool> shutdown_{false};
-  // M5.0 per-region spatial lock grid. Two workers with disjoint
-  // (routeBox + DRC halo) regions never contend; only their shared
-  // cells serialize. Replaces M4.2's global shared_mutex.
+  // M5.0 spatial grid (kept as fallback / diag; M6 sup­ersedes for
+  // correctness).
   std::unique_ptr<SpatialLockGrid> lock_grid_;
+  // M6 per-net mutex table. Default synchronisation path: workers
+  // acquire mutexes on nets they touch (via queryDRObj) before
+  // main/end, release after. Two workers with disjoint net sets run
+  // truly in parallel.
+  std::unique_ptr<NetLockTable> net_locks_;
 };
 
 // ============================================================

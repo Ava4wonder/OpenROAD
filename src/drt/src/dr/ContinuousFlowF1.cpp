@@ -18,10 +18,15 @@
 
 #include <chrono>
 #include <thread>
+#include <unordered_set>
 
 #include "FlexDR.h"
+#include "db/obj/frNet.h"
+#include "db/obj/frShape.h"
+#include "db/obj/frVia.h"
 #include "frBaseTypes.h"
 #include "frDesign.h"
+#include "frRegionQuery.h"
 #include "global.h"  // RouterConfiguration
 #include "utl/Logger.h"
 
@@ -51,6 +56,68 @@ void WorkerPool::returnToPool(std::unique_ptr<FlexDRWorker> worker)
   returned_.fetch_add(1);
   // M1: destruct. Phase 2.1: stash for reuse.
   worker.reset();
+}
+
+// ============================================================
+// NetLockTable (M6)
+// ============================================================
+
+void NetLockTable::initialise(frDesign* design)
+{
+  auto* topBlock = design->getTopBlock();
+  for (auto& net : topBlock->getNets()) {
+    net_locks_[net.get()] = std::make_unique<std::mutex>();
+  }
+}
+
+std::vector<frNet*> NetLockTable::netsInRegion(
+    frDesign* design,
+    const odb::Rect& region) const
+{
+  std::vector<frBlockObject*> objs;
+  design->getRegionQuery()->queryDRObj(region, objs);
+  std::unordered_set<frNet*> seen;
+  for (auto* obj : objs) {
+    frNet* net = nullptr;
+    if (auto* p = dynamic_cast<frPathSeg*>(obj)) {
+      net = p->getNet();
+    } else if (auto* v = dynamic_cast<frVia*>(obj)) {
+      net = v->getNet();
+    } else if (auto* w = dynamic_cast<frPatchWire*>(obj)) {
+      net = w->getNet();
+    }
+    if (net != nullptr) {
+      seen.insert(net);
+    }
+  }
+  std::vector<frNet*> sorted(seen.begin(), seen.end());
+  // Sort by pointer address for deadlock-free acquisition.
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
+}
+
+std::vector<std::mutex*> NetLockTable::acquireNets(
+    const std::vector<frNet*>& sorted)
+{
+  std::vector<std::mutex*> held;
+  held.reserve(sorted.size());
+  for (frNet* net : sorted) {
+    auto it = net_locks_.find(net);
+    if (it == net_locks_.end()) {
+      continue;  // net not registered (created post-init); skip
+    }
+    it->second->lock();
+    held.push_back(it->second.get());
+  }
+  return held;
+}
+
+void NetLockTable::releaseNets(const std::vector<std::mutex*>& held)
+{
+  // Release in reverse acquisition order.
+  for (auto it = held.rbegin(); it != held.rend(); ++it) {
+    (*it)->unlock();
+  }
 }
 
 // ============================================================
@@ -242,13 +309,17 @@ F1Dispatcher::F1Dispatcher(FlexDR* parent,
     : parent_(parent), args_(args), iter_prog_(iter_prog)
 {
   pool_ = std::make_unique<WorkerPool>(parent_);
-  // M5.0 — initialize SpatialLockGrid sized to give ~few-cells-per-
-  // worker on whatever design we are routing. 32×32 is a reasonable
-  // default for ibex (small die → small cells, ~3 GCells each) and
-  // for large designs like test9 (large die → bigger cells, still
-  // many cells per worker). M5.1 will make it adaptive.
+  // M5.0 — kept for diagnostic comparison; unused on the M6 path.
   const odb::Rect die = parent_->getDesign()->getTopBlock()->getBBox();
   lock_grid_ = std::make_unique<SpatialLockGrid>(die, 32);
+  // M6 — per-net mutex table. One mutex per design net, registered
+  // once at dispatcher startup. Worker enumeration via queryDRObj +
+  // dynamic_cast to frShape / frVia variants.
+  net_locks_ = std::make_unique<NetLockTable>();
+  net_locks_->initialise(parent_->getDesign());
+  parent_->getLogger()->report(
+      "[F.1 cont] M6 NetLockTable registered {} nets",
+      net_locks_->numNetsRegistered());
 }
 
 F1Dispatcher::~F1Dispatcher() = default;
@@ -418,18 +489,20 @@ void F1Dispatcher::workerThreadMain(int thread_id)
 
     in_flight_count_.fetch_add(1);
     auto worker = pool_->acquire(region.route_box, args_);
-    // M5.0 — acquire per-cell locks covering routeBox bloated by the
-    // DRC-read margin. Workers with disjoint extended regions never
-    // contend; only shared cells serialize. Both main() and end() run
-    // under the same lock set: reads stay consistent (no concurrent
-    // writer in our cells) and writes don't race with concurrent reads.
+    // M6 — per-net mutex acquisition. Enumerate nets via queryDRObj
+    // over the worker's READ region (routeBox + extBox + DRCSAFEDIST
+    // margin). Acquire sorted by frNet pointer for deadlock safety.
+    // Hold across main() AND end() so reads cannot race against
+    // another worker's concurrent end() commit on the same net.
     auto* cfg = parent_->getRouterCfg();
     const odb::Rect read_region(
-        region.route_box.xMin() - cfg->DRCSAFEDIST,
-        region.route_box.yMin() - cfg->DRCSAFEDIST,
-        region.route_box.xMax() + cfg->DRCSAFEDIST,
-        region.route_box.yMax() + cfg->DRCSAFEDIST);
-    auto held = lock_grid_->acquireRegion(read_region);
+        region.route_box.xMin() - cfg->MTSAFEDIST - cfg->DRCSAFEDIST,
+        region.route_box.yMin() - cfg->MTSAFEDIST - cfg->DRCSAFEDIST,
+        region.route_box.xMax() + cfg->MTSAFEDIST + cfg->DRCSAFEDIST,
+        region.route_box.yMax() + cfg->MTSAFEDIST + cfg->DRCSAFEDIST);
+    const auto nets
+        = net_locks_->netsInRegion(parent_->getDesign(), read_region);
+    auto held = net_locks_->acquireNets(nets);
     int rc = 0;
     bool commit = false;
     rc = worker->main(parent_->getDesign());
@@ -438,7 +511,7 @@ void F1Dispatcher::workerThreadMain(int thread_id)
     if (commit) {
       worker->end(parent_->getDesign());
     }
-    lock_grid_->releaseRegion(held);
+    net_locks_->releaseNets(held);
     pool_->returnToPool(std::move(worker));
     inflight_.release(thread_id);
     regions_processed_.fetch_add(1);
