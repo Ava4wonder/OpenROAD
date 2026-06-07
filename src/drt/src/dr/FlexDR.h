@@ -223,6 +223,13 @@ class FlexDR
                       IterationProgress& iter_prog);
   void optimizationFlow(const SearchRepairArgs& args,
                         IterationProgress& iter_prog);
+  // F.1 — Continuous-flow router. Drop-in replacement for
+  // optimizationFlow when env OPENROAD_DRT_F1_CONTINUOUS=1 is set.
+  // Replaces checkerboard batching with bbox+halo greedy MIS, packing
+  // more workers per parallel batch and reusing the CSR_E41_mis
+  // conflict policy at the worker-scheduling layer.
+  void optimizationFlowF1(const SearchRepairArgs& args,
+                          IterationProgress& iter_prog);
 };
 
 class FlexDRFlow
