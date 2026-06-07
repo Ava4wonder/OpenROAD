@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <shared_mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -236,6 +237,11 @@ class F1Dispatcher
   std::atomic<int> regions_pushed_repairs_{0};
   std::atomic<int> in_flight_count_{0};
   std::atomic<bool> shutdown_{false};
+  // M4.2 design-DB R/W lock — main() takes shared (read) lock, end()
+  // takes unique (write) lock. Prevents the SIGSEGV in initNetObjs
+  // when worker A.main() reads frNet X while worker B.end() mutates
+  // it. Phase 3 will replace with per-net versioning.
+  std::shared_mutex design_mu_;
 };
 
 // ============================================================

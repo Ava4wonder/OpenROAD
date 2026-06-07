@@ -269,9 +269,18 @@ void F1Dispatcher::scanAndPushRepairs(int /*thread_id*/,
     return;
   }
 
-  const frCoord wide_halo
-      = cfg->DRCSAFEDIST + cfg->MTSAFEDIST + 4000;
-  const frCoord narrow_halo = cfg->DRCSAFEDIST;
+  // M4.1: snap repair-region routeBoxes to the GCell grid. createWorker
+  // accepts arbitrary boxes but pin-access initialization requires the
+  // box to coincide with whole GCells (DRT-1231 fires otherwise). Use
+  // the same getGCellBox(idx) pattern as seedInitialTiles.
+  auto gCellPatterns = topBlock->getGCellPatterns();
+  const int xgp_cnt = static_cast<int>(gCellPatterns.at(0).getCount());
+  const int ygp_cnt = static_cast<int>(gCellPatterns.at(1).getCount());
+
+  // Halo expressed in GCells rather than DBU — guarantees the snapped
+  // routeBox is a whole-GCell-multiple super-region of the cluster.
+  const int wide_halo_gcells = 2;    // ~CSR-style wide halo
+  const int narrow_halo_gcells = 1;  // tight interior halo
 
   int pushed_here = 0;
   for (auto& [key, group] : buckets) {
@@ -284,13 +293,29 @@ void F1Dispatcher::scanAndPushRepairs(int /*thread_id*/,
           || cluster_bb.xMax() >= region.route_box.xMax() - kBoundaryTol
           || cluster_bb.yMin() <= region.route_box.yMin() + kBoundaryTol
           || cluster_bb.yMax() >= region.route_box.yMax() - kBoundaryTol;
-    const frCoord halo = touches_boundary ? wide_halo : narrow_halo;
+    const int halo_gcells
+        = touches_boundary ? wide_halo_gcells : narrow_halo_gcells;
+
+    // Snap cluster_bb corners to GCell indices, then expand by halo.
+    const odb::Point lo_idx = topBlock->getGCellIdx(
+        odb::Point(cluster_bb.xMin(), cluster_bb.yMin()));
+    const odb::Point hi_idx = topBlock->getGCellIdx(
+        odb::Point(cluster_bb.xMax(), cluster_bb.yMax()));
+    const int i_lo = std::max(0, lo_idx.x() - halo_gcells);
+    const int j_lo = std::max(0, lo_idx.y() - halo_gcells);
+    const int i_hi = std::min(xgp_cnt - 1, hi_idx.x() + halo_gcells);
+    const int j_hi = std::min(ygp_cnt - 1, hi_idx.y() + halo_gcells);
+    const odb::Rect rb_lo
+        = topBlock->getGCellBox(odb::Point(i_lo, j_lo));
+    const odb::Rect rb_hi
+        = topBlock->getGCellBox(odb::Point(i_hi, j_hi));
+
     Region r;
-    r.route_box = odb::Rect(cluster_bb.xMin() - halo,
-                            cluster_bb.yMin() - halo,
-                            cluster_bb.xMax() + halo,
-                            cluster_bb.yMax() + halo);
-    r.halo_dbu = halo;
+    r.route_box = odb::Rect(rb_lo.xMin(),
+                            rb_lo.yMin(),
+                            rb_hi.xMax(),
+                            rb_hi.yMax());
+    r.halo_dbu = cfg->DRCSAFEDIST;  // worker's own extBox margin
     r.marker_count = static_cast<int>(group.size());
     r.priority = r.marker_count * (touches_boundary ? 10 : 1);
     r.wide_halo_for_repair = touches_boundary;
@@ -322,9 +347,21 @@ void F1Dispatcher::workerThreadMain(int thread_id)
 
     in_flight_count_.fetch_add(1);
     auto worker = pool_->acquire(region.route_box, args_);
-    const int rc = worker->main(parent_->getDesign());
-    if (rc == 0
-        && worker->getNumMarkers() < worker->getInitNumMarkers()) {
+    int rc = 0;
+    bool commit = false;
+    {
+      // M4.2: main() reads design DB extensively (initNetObjs,
+      // initFixedObjs, etc.). Take a shared lock so multiple workers
+      // can read in parallel but block while any end() is in flight.
+      std::shared_lock<std::shared_mutex> g(design_mu_);
+      rc = worker->main(parent_->getDesign());
+      commit = (rc == 0
+                && worker->getNumMarkers() < worker->getInitNumMarkers());
+    }
+    if (commit) {
+      // M4.2: end() mutates design DB; take exclusive lock so no
+      // concurrent reader sees a torn write.
+      std::unique_lock<std::shared_mutex> g(design_mu_);
       worker->end(parent_->getDesign());
     }
     pool_->returnToPool(std::move(worker));
