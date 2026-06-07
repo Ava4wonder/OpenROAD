@@ -78,6 +78,12 @@ struct FlexDRViaData
 
 class FlexDRFlow;
 class AdaptiveMarkerModel;  // outer_loop_plus Patch 1
+
+// F.1 Phase 2 forward decls — friended by FlexDR below.
+namespace f1 {
+class WorkerPool;
+class F1Dispatcher;
+}  // namespace f1
 class FlexDR
 {
  public:
@@ -230,6 +236,22 @@ class FlexDR
   // conflict policy at the worker-scheduling layer.
   void optimizationFlowF1(const SearchRepairArgs& args,
                           IterationProgress& iter_prog);
+
+ public:
+  // F.1 Phase 2 — accessors needed by ContinuousFlowF1's WorkerPool /
+  // dispatcher. RouterConfiguration setter already exists at line ~518
+  // for test plumbing; getter pattern matches getDesign / FlexDRWorker
+  // getLogger.
+  RouterConfiguration* getRouterCfg() const { return router_cfg_; }
+  utl::Logger* getLogger() const { return logger_; }
+
+  // F.1 Phase 2 — WorkerPool needs to call FlexDR::createWorker which
+  // is private. Friending it (and the dispatcher) is the least-invasive
+  // option vs making createWorker public.
+  friend class f1::WorkerPool;
+  friend class f1::F1Dispatcher;
+
+ private:
 };
 
 class FlexDRFlow

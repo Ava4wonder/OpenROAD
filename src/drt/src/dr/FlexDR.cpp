@@ -4,6 +4,7 @@
 #include "dr/FlexDR.h"
 
 #include "dr/AdaptiveMarkerModel.h"
+#include "dr/ContinuousFlowF1.h"  // F.1 Phase 2 — continuous-flow router
 #include "dr/ObjLocality.h"  // P4.0 BoundaryDiag — locality classifier
 
 #include <sys/stat.h>
@@ -3058,8 +3059,25 @@ void FlexDR::optimizationFlowF1(const SearchRepairArgs& args,
 void FlexDR::optimizationFlow(const SearchRepairArgs& args,
                               IterationProgress& iter_prog)
 {
-  // F.1 gate — when OPENROAD_DRT_F1_CONTINUOUS=1, dispatch to the
-  // continuous-flow router (bbox+halo MIS batching, no checkerboard).
+  // F.1 Phase 2 gate — when OPENROAD_DRT_F1_CONTINUOUS_QUEUE=1,
+  // dispatch to the continuous-flow dispatcher (routeBox-only MIS,
+  // priority queue, CSR-as-boundary-repair). M3 SKELETON: runs as
+  // a single "iter" — pops initial tiles, routes, no marker-driven
+  // repair yet (M4). Use for smoke validation only.
+  if (const char* f1q = std::getenv("OPENROAD_DRT_F1_CONTINUOUS_QUEUE");
+      f1q != nullptr && f1q[0] != '\0' && f1q[0] != '0') {
+    if (graphics_) {
+      graphics_->startIter(iter_, router_cfg_);
+    }
+    PerIterSeams::instance().snapshotAsPrev();
+    f1::runContinuousFlowF1(this, args);
+    if (!iter_) {
+      removeGCell2BoundaryPin();
+    }
+    return;
+  }
+  // F.1 Phase 1 gate — bbox-MIS variant (extBox / routeBox predicate,
+  // no queue, no continuous flow). Kept for A/B comparison.
   if (const char* f1v = std::getenv("OPENROAD_DRT_F1_CONTINUOUS");
       f1v != nullptr && f1v[0] != '\0' && f1v[0] != '0') {
     return optimizationFlowF1(args, iter_prog);
