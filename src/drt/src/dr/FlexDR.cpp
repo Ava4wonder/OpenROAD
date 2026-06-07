@@ -636,6 +636,96 @@ class CrossSeamRepair
   int last_iter_ = -1;
 };
 
+// E6 Phase 0 — trigger detector. Pure measurement; logs whether the
+// MILP/MWIS exact-repair trigger conditions are met at each iter end.
+// No actual solver call. Gated by OPENROAD_DRT_E6_TRIGGER_LOG=<path>.
+//
+// Trigger conditions (seam_band_e6_plan.md §3):
+//   (a) viols <= MAX_E6_VIOLS (default 300)
+//   (b) iter >= MIN_ITER (default 2)
+//   (c) viols(K) / viols(K-1) > MIN_CONV_RATIO (default 0.5; RRR slowing)
+//   (d) not already fired
+class E6TriggerDetector
+{
+ public:
+  static E6TriggerDetector& instance()
+  {
+    static E6TriggerDetector inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_E6_TRIGGER_LOG");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    log_path_ = v;
+    out_.open(log_path_);
+    if (!out_.is_open()) {
+      return;
+    }
+    enabled_ = true;
+    out_ << "iter,viols,prev_viols,conv_ratio,cond_a_size,cond_b_iter,"
+            "cond_c_slow,cond_d_idempotent,would_fire,reason\n";
+  }
+  bool enabled() const { return enabled_; }
+  void recordIterEnd(int iter, int viols)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    const int prev = last_viols_;
+    const bool a = viols <= 300;
+    const bool b = iter >= 2;
+    const double ratio
+        = (prev > 0) ? (static_cast<double>(viols) / prev) : 0.0;
+    const bool c = (prev > 0) && (ratio > 0.5);
+    const bool d = !fired_;
+    const bool will = a && b && c && d;
+    std::string reason;
+    if (will) {
+      reason = "FIRE";
+    } else {
+      reason = "miss ";
+      if (!a) {
+        reason += "a";
+      }
+      if (!b) {
+        reason += "b";
+      }
+      if (!c) {
+        reason += "c";
+      }
+      if (!d) {
+        reason += "d";
+      }
+    }
+    out_ << iter << "," << viols << "," << prev << "," << ratio << ","
+         << static_cast<int>(a) << "," << static_cast<int>(b) << ","
+         << static_cast<int>(c) << "," << static_cast<int>(d) << ","
+         << static_cast<int>(will) << "," << reason << "\n";
+    out_.flush();
+    last_viols_ = viols;
+    if (will) {
+      fired_ = true;
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::string log_path_;
+  std::ofstream out_;
+  int last_viols_ = -1;
+  bool fired_ = false;
+};
+
 // P4.0 — classify marker bbox centroid against routeBox edges. K=200 DBU
 // band; corner band returns a diagonal token. Pure function.
 const char* boundaryDiagRouteBoxSide(const odb::Rect& bb,
@@ -2179,6 +2269,8 @@ void FlexDR::processWorkersBatch(
   }
   // CSR E1 — init env-gate.
   CrossSeamRepair::instance().initFromEnv();
+  // E6 Phase 0 — trigger detector init (no-op if env var unset).
+  E6TriggerDetector::instance().initFromEnv();
   const int num_markers = getDesign()->getTopBlock()->getNumMarkers();
   // P4.0 BoundaryDiag — assign a per-worker monotonic id within this
   // batch and populate the global WorkerBoxRegistry so the per-marker
@@ -2705,6 +2797,14 @@ void FlexDR::stubbornTilesFlow(const SearchRepairArgs& args,
     batch.clear();
   }
   flow_state_machine_->setLastIterationEffective(changed);
+  // E6 Phase 0 — log post-iter viol count from this flow (stubborn or
+  // guides). Allows trigger detection in tail iters that don't go
+  // through optimizationFlow.
+  if (E6TriggerDetector::instance().enabled()) {
+    const int viols
+        = static_cast<int>(getDesign()->getTopBlock()->getMarkers().size());
+    E6TriggerDetector::instance().recordIterEnd(iter_, viols);
+  }
 }
 
 void FlexDR::guideTilesFlow(const SearchRepairArgs& args,
@@ -2789,6 +2889,14 @@ void FlexDR::guideTilesFlow(const SearchRepairArgs& args,
     batch.clear();
   }
   flow_state_machine_->setLastIterationEffective(changed);
+  // E6 Phase 0 — log post-iter viol count from this flow (stubborn or
+  // guides). Allows trigger detection in tail iters that don't go
+  // through optimizationFlow.
+  if (E6TriggerDetector::instance().enabled()) {
+    const int viols
+        = static_cast<int>(getDesign()->getTopBlock()->getMarkers().size());
+    E6TriggerDetector::instance().recordIterEnd(iter_, viols);
+  }
 }
 void FlexDR::optimizationFlow(const SearchRepairArgs& args,
                               IterationProgress& iter_prog)
@@ -2864,6 +2972,13 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   if (!iter_) {
     removeGCell2BoundaryPin();
   }
+  // E6 Phase 0 — record this iter's residual viol count + evaluate
+  // trigger conditions. Pure measurement; no solver invocation.
+  if (E6TriggerDetector::instance().enabled()) {
+    const int viols
+        = static_cast<int>(getDesign()->getTopBlock()->getMarkers().size());
+    E6TriggerDetector::instance().recordIterEnd(iter_, viols);
+  }
   // CSR E1 — selection-only analysis at iter end. ALWAYS runs when
   // OPENROAD_DRT_CSR_DIR is set; gated by enabled().
   if (CrossSeamRepair::instance().enabled()) {
@@ -2904,27 +3019,194 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       // CSR needs (targeted, marker-driven ripup of the involved nets).
       SearchRepairArgs repair_args = args;
       repair_args.ripupMode = RipUpMode::DRC;
-      for (const auto& job : jobs) {
-        auto worker = createWorker(0, 0, repair_args, job.box);
-        const int rc = worker->main(getDesign());
-        if (rc != 0) {
+      // CSR E4.1.par-mis — V2.4.c GreedyPriorityPolicy adapted for CSR.
+      // Two CSR jobs conflict if their route boxes, bloated by halo,
+      // intersect — that catches both geometric shape overlap and
+      // shared-net continuity within ~1 worker span.
+      //
+      // Algorithm: priority MIS by (descending marker count, ascending
+      // job index) → admit non-conflicting subset → repeat on remaining
+      // until empty. Each batch runs parallel main(); commits serially
+      // inside the batch.
+      const int n = static_cast<int>(jobs.size());
+      // Halo = DRCSAFEDIST + 1 GCell. Large enough that a net whose
+      // route fits inside one worker rarely spans an adjacent worker.
+      const frCoord kHalo
+          = router_cfg_->DRCSAFEDIST + router_cfg_->MTSAFEDIST + 4000;
+      std::vector<odb::Rect> bloated(n);
+      for (int i = 0; i < n; ++i) {
+        bloated[i] = odb::Rect(jobs[i].box.xMin() - kHalo,
+                               jobs[i].box.yMin() - kHalo,
+                               jobs[i].box.xMax() + kHalo,
+                               jobs[i].box.yMax() + kHalo);
+      }
+      // Build priority list: descending num_markers, ascending index.
+      auto by_prio = std::vector<int>(n);
+      std::iota(by_prio.begin(), by_prio.end(), 0);
+      std::sort(by_prio.begin(), by_prio.end(), [&](int a, int b) {
+        if (jobs[a].num_markers_in_cluster
+            != jobs[b].num_markers_in_cluster) {
+          return jobs[a].num_markers_in_cluster
+                 > jobs[b].num_markers_in_cluster;
+        }
+        return a < b;
+      });
+      // Iterated greedy MIS → vector of batches.
+      std::vector<std::vector<int>> batches;
+      std::vector<bool> placed(n, false);
+      int placed_total = 0;
+      while (placed_total < n) {
+        std::vector<int> batch;
+        for (int idx : by_prio) {
+          if (placed[idx]) {
+            continue;
+          }
+          bool conflicts = false;
+          for (int picked : batch) {
+            if (bloated[idx].intersects(bloated[picked])) {
+              conflicts = true;
+              break;
+            }
+          }
+          if (!conflicts) {
+            batch.push_back(idx);
+            placed[idx] = true;
+            ++placed_total;
+          }
+        }
+        batches.push_back(std::move(batch));
+      }
+      logger_->report(
+          "[CSR-MIS] iter 1: {} jobs in {} batches (avg {:.1f} jobs/batch)",
+          n, static_cast<int>(batches.size()),
+          static_cast<double>(n) / std::max(size_t{1}, batches.size()));
+      // Per-batch: parallel main(), then serial commit.
+      std::vector<std::unique_ptr<FlexDRWorker>> workers(n);
+      std::vector<int> rc_vec(n, -1);
+      std::vector<int> pre_vec(n, -1);
+      std::vector<int> post_vec(n, -1);
+      for (const auto& batch : batches) {
+        const int bn = static_cast<int>(batch.size());
+#pragma omp parallel for schedule(dynamic)
+        for (int k = 0; k < bn; ++k) {
+          const int i = batch[k];
+          workers[i] = createWorker(0, 0, repair_args, jobs[i].box);
+          rc_vec[i] = workers[i]->main(getDesign());
+          if (rc_vec[i] == 0) {
+            pre_vec[i] = workers[i]->getInitNumMarkers();
+            post_vec[i] = workers[i]->getNumMarkers();
+          }
+        }
+        // Serial commit phase within batch — bbox+halo MIS guarantees
+        // no two committed workers touch overlapping read/write region.
+        for (int i : batch) {
+          const auto& job = jobs[i];
+          if (rc_vec[i] != 0) {
+            CrossSeamRepair::instance().recordJobResult(
+                iter_, job.cluster_id, job.layer, job.box,
+                job.num_markers_in_cluster, -1, -1, false, job.crosses_seam);
+            continue;
+          }
+          bool committed = false;
+          if (post_vec[i] < pre_vec[i]) {
+            workers[i]->end(getDesign());
+            committed = true;
+          }
           CrossSeamRepair::instance().recordJobResult(
               iter_, job.cluster_id, job.layer, job.box,
-              job.num_markers_in_cluster, -1, -1, false, job.crosses_seam);
+              job.num_markers_in_cluster, pre_vec[i], post_vec[i],
+              committed, job.crosses_seam);
+        }
+      }
+    }
+  }
+  // E6 stand-in (Option B) — at iter 2, one aggressive single-pass
+  // cleanup of all remaining markers. NOT real MILP; spawns large
+  // per-cluster workers with RipUpMode::ALL to give "joint visibility"
+  // of all residuals to one worker per cluster. Composite test:
+  // CSR (iter 1 only, via E4.1) + E6 standin (iter 2) should converge
+  // in fewer iters than E4.1 alone if iter-tail is RRR-limited.
+  // Gated by OPENROAD_DRT_E6_STANDIN=1.
+  if (iter_ == 2) {
+    const char* e6v = std::getenv("OPENROAD_DRT_E6_STANDIN");
+    if (e6v != nullptr && e6v[0] != '\0' && e6v[0] != '0') {
+      auto* topBlock = getDesign()->getTopBlock();
+      // Cluster sizing scales with die span so small designs (e.g.
+      // asap7 ibex, ~77 µm) do not degenerate to single cluster covers
+      // the whole die. Caps at the original test9-tuned constants.
+      const odb::Rect die = topBlock->getBBox();
+      const frCoord die_span_min
+          = std::min<frCoord>(die.dx(), die.dy());
+      const frCoord kClusterT
+          = std::min<frCoord>(
+              50000,
+              std::max<frCoord>(2000, die_span_min / 30));
+      const frCoord kBloat
+          = std::min<frCoord>(
+              14000,
+              std::max<frCoord>(500, die_span_min / 80));
+      std::map<std::tuple<frLayerNum, int, int>, odb::Rect> clusters;
+      std::map<std::tuple<frLayerNum, int, int>, int> cluster_mk_count;
+      int marker_total = 0;
+      for (const auto& mu : topBlock->getMarkers()) {
+        const auto bb = mu->getBBox();
+        const frLayerNum ln = mu->getLayerNum();
+        const frCoord cx = (bb.xMin() + bb.xMax()) / 2;
+        const frCoord cy = (bb.yMin() + bb.yMax()) / 2;
+        const auto key
+            = std::make_tuple(ln, (int) (cx / kClusterT),
+                              (int) (cy / kClusterT));
+        auto it = clusters.find(key);
+        if (it == clusters.end()) {
+          clusters.emplace(key, bb);
+        } else {
+          it->second.merge(bb);
+        }
+        ++cluster_mk_count[key];
+        ++marker_total;
+      }
+      int commits = 0;
+      int total_pre = 0;
+      int total_post = 0;
+      const int num_clusters = static_cast<int>(clusters.size());
+      logger_->report(
+          "[E6 standin] iter 2 start: clusters={} markers={} "
+          "kClusterT={} kBloat={} die_span_min={}",
+          num_clusters, marker_total, kClusterT, kBloat, die_span_min);
+      int idx = 0;
+      for (auto& [key, cluster_bbox] : clusters) {
+        ++idx;
+        const odb::Rect mega(cluster_bbox.xMin() - kBloat,
+                             cluster_bbox.yMin() - kBloat,
+                             cluster_bbox.xMax() + kBloat,
+                             cluster_bbox.yMax() + kBloat);
+        SearchRepairArgs mega_args = args;
+        mega_args.ripupMode = RipUpMode::ALL;
+        mega_args.followGuide = false;
+        auto worker = createWorker(0, 0, mega_args, mega);
+        const int rc = worker->main(getDesign());
+        if (rc != 0) {
           continue;
         }
         const int pre = worker->getInitNumMarkers();
         const int post = worker->getNumMarkers();
-        bool committed = false;
+        total_pre += pre;
+        total_post += post;
         if (post < pre) {
           worker->end(getDesign());
-          committed = true;
+          ++commits;
         }
-        CrossSeamRepair::instance().recordJobResult(
-            iter_, job.cluster_id, job.layer, job.box,
-            job.num_markers_in_cluster, pre, post, committed,
-            job.crosses_seam);
+        if (idx % 25 == 0 || idx == num_clusters) {
+          logger_->report(
+              "[E6 standin] progress: {}/{} clusters, commits={} "
+              "running_pre={} running_post={}",
+              idx, num_clusters, commits, total_pre, total_post);
+        }
       }
+      logger_->report(
+          "[E6 standin] iter 2 done: clusters={} markers_seen={} "
+          "commits={} pre_local_sum={} post_local_sum={}",
+          num_clusters, marker_total, commits, total_pre, total_post);
     }
   }
 }
