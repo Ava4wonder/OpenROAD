@@ -424,8 +424,40 @@ void F1Dispatcher::scanAndPushRepairs(int /*thread_id*/,
   const int wide_halo_gcells = 2;    // ~CSR-style wide halo
   const int narrow_halo_gcells = 1;  // tight interior halo
 
+  // M7 throttling — heartbeat trace shows queue avalanche
+  // (~4 repair regions pushed per region processed → unbounded
+  // growth). Two throttles applied here:
+  //   (a) MIN_MARKERS_PER_CLUSTER — drop low-impact clusters that
+  //       waste worker dispatches; isolated single-marker clusters
+  //       almost never benefit from a wide-halo repair.
+  //   (b) MAX_REPAIRS_PER_REGION — cap how many new regions a single
+  //       parent worker can spawn. Caller can still re-emit on next
+  //       iter; this just prevents one source from saturating queue.
+  // M7.1 aggressive throttle — M7 (3, 4) still avalanche-grew on
+  // ibex 8t (queue 360→600 in 6min). Tighten to (10, 1) so each
+  // region pushes at most ONE repair, only when the cluster is
+  // dense. Expected outcome: queue strictly shrinks; F.1 actually
+  // terminates. Trade-off: misses small repair opportunities, will
+  // converge to more residual markers than UNSET's iter loop.
+  constexpr int kMinMarkers = 10;
+  constexpr int kMaxRepairsPerRegion = 1;
+  // Sort buckets by marker count desc so when we hit the cap we keep
+  // the highest-impact clusters.
+  std::vector<std::pair<std::tuple<frLayerNum, int, int>,
+                         std::vector<odb::Rect>>>
+      sorted_buckets(buckets.begin(), buckets.end());
+  std::sort(sorted_buckets.begin(), sorted_buckets.end(),
+            [](const auto& a, const auto& b) {
+              return a.second.size() > b.second.size();
+            });
   int pushed_here = 0;
-  for (auto& [key, group] : buckets) {
+  for (auto& [key, group] : sorted_buckets) {
+    if (pushed_here >= kMaxRepairsPerRegion) {
+      break;
+    }
+    if (static_cast<int>(group.size()) < kMinMarkers) {
+      continue;
+    }
     odb::Rect cluster_bb = group.front();
     for (const auto& bb : group) {
       cluster_bb.merge(bb);
@@ -476,17 +508,11 @@ void F1Dispatcher::workerThreadMain(int thread_id)
     }
     Region region = std::move(*region_opt);
 
-    // Attempt to claim. If conflicts with in-flight, re-queue with
-    // slightly-decremented priority (FIFO within same tier).
-    if (!inflight_.tryClaim(thread_id, region.route_box)) {
-      Region rq = region;
-      rq.priority = std::max(-1000, rq.priority - 1);
-      queue_.push(std::move(rq));
-      // Brief back-off to avoid hot spin on contention.
-      std::this_thread::sleep_for(std::chrono::microseconds(10));
-      continue;
-    }
-
+    // M7.2 — bypass InFlightConflictIndex routeBox MIS. Per-net locks
+    // (acquired below) are now the correctness primitive; routeBox
+    // overlap by itself is safe as long as the touched nets don't
+    // race. The bbox claim was diagnosed as the source of the
+    // 4232-popped-vs-311-processed spin loop in M7.1.
     in_flight_count_.fetch_add(1);
     auto worker = pool_->acquire(region.route_box, args_);
     // M6 — per-net mutex acquisition. Enumerate nets via queryDRObj
@@ -513,7 +539,6 @@ void F1Dispatcher::workerThreadMain(int thread_id)
     }
     net_locks_->releaseNets(held);
     pool_->returnToPool(std::move(worker));
-    inflight_.release(thread_id);
     regions_processed_.fetch_add(1);
 
     // M4 — scan + push BEFORE decrementing in_flight, so the
@@ -539,16 +564,30 @@ void F1Dispatcher::run()
     threads.emplace_back([this, t] { workerThreadMain(t); });
   }
 
-  // Termination: when queue is empty AND no workers in flight, no
-  // more regions can be pushed (scanAndPushRepairs is the only push
-  // path and it runs synchronously inside the worker loop).
-  //
-  // M3 SKELETON termination: poll every 100 ms; mark queue done when
-  // both conditions hold. M4 will refine with a condition variable on
-  // in-flight count drop.
+  // M7 DIAGNOSTIC — heartbeat every 10s so we can SEE the dispatcher
+  // state during the 25-min hangs. If queue grows unbounded:
+  // repair-avalanche. If queue is small but in_flight=0: deadlock.
+  // If processed is steady but slow: lock contention.
+  int hb_ticks = 0;
   while (true) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (queue_.size() == 0 && in_flight_count_.load() == 0) {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    ++hb_ticks;
+    const int proc = regions_processed_.load();
+    const int rep = regions_pushed_repairs_.load();
+    const int inflt = in_flight_count_.load();
+    const int qsz = static_cast<int>(queue_.size());
+    parent_->getLogger()->report(
+        "[F.1 cont HB] t={}s processed={} repair_pushes={} "
+        "queue={} in_flight={}",
+        hb_ticks * 10, proc, rep, qsz, inflt);
+    if (qsz == 0 && inflt == 0) {
+      queue_.markDone();
+      break;
+    }
+    if (hb_ticks > 60) {  // 10-minute safety bail (no progress -> stop)
+      parent_->getLogger()->report(
+          "[F.1 cont HB] 10-min cap reached; forcing shutdown");
+      shutdown_.store(true);
       queue_.markDone();
       break;
     }
