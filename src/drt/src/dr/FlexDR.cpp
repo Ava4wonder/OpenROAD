@@ -5,6 +5,7 @@
 
 #include "dr/AdaptiveMarkerModel.h"
 #include "dr/ContinuousFlowF1.h"  // F.1 Phase 2 — continuous-flow router
+#include "dr/McfExport.h"    // R2 MCF-DRT — instance export for GPU solver
 #include "dr/ObjLocality.h"  // P4.0 BoundaryDiag — locality classifier
 
 #include <sys/stat.h>
@@ -4106,6 +4107,14 @@ int FlexDR::main()
       "detailed routing", std::min(64, router_cfg_->END_ITERATION), {});
 
   init();
+  // R2 MCF-DRT — export the routing instance for the GPU PDHG solver.
+  // Guides + GCell patterns are populated by init(); pins come from
+  // the netlist. Export only — routing proceeds normally so the same
+  // run also produces the UNSET reference trajectory.
+  if (const char* mcf_dir = std::getenv("OPENROAD_DRT_MCF_EXPORT");
+      mcf_dir != nullptr && mcf_dir[0] != '\0') {
+    mcf::exportInstance(getDesign(), mcf_dir, logger_);
+  }
   frTime t;
   bool incremental = false;
   bool hasFixed = false;
