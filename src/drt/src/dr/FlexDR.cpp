@@ -3441,6 +3441,22 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
 
   getBatchInfo(batchStepX, batchStepY);
 
+  // TS.2.b — batch-collapse modes (OPENROAD_DRT_TS_BATCHMODE):
+  //   "color"  — merge BATCHSIZE-split chunks within each checkerboard
+  //              color. Same-color workers never touch, so this is pure
+  //              barrier removal (B_r: 2*colors -> colors), zero
+  //              coherence change.
+  //   "single" — ONE batch per iteration: all workers route in parallel
+  //              against the pre-iteration design state, then all
+  //              commit sequentially. Same-net seam crossings freeze
+  //              automatically (every worker clips the same snapshot),
+  //              removing intra-iteration churn; different-net seam
+  //              spacing conflicts become next-iter DRVs (measured;
+  //              TS.2.c seam-band reservation is the planned fix).
+  const char* ts_bm = std::getenv("OPENROAD_DRT_TS_BATCHMODE");
+  const bool ts_color = ts_bm != nullptr && std::string(ts_bm) == "color";
+  const bool ts_single = ts_bm != nullptr && std::string(ts_bm) == "single";
+
   std::vector<std::vector<std::vector<std::unique_ptr<FlexDRWorker>>>> workers(
       batchStepX * batchStepY);
 
@@ -3448,11 +3464,15 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   for (int i = offset; i < (int) xgp.getCount(); i += size) {
     for (int j = offset; j < (int) ygp.getCount(); j += size) {
       auto worker = createWorker(i, j, args);
-      int batch_idx = (xIdx % batchStepX) * batchStepY + yIdx % batchStepY;
+      int batch_idx = ts_single
+                          ? 0
+                          : (xIdx % batchStepX) * batchStepY
+                                + yIdx % batchStepY;
       const bool create_new_batch
           = workers[batch_idx].empty()
-            || (!dist_on_
-                && workers[batch_idx].back().size() >= router_cfg_->BATCHSIZE);
+            || (!dist_on_ && !ts_color && !ts_single
+                && workers[batch_idx].back().size()
+                       >= router_cfg_->BATCHSIZE);
       if (create_new_batch) {
         workers[batch_idx].push_back(
             std::vector<std::unique_ptr<FlexDRWorker>>());
