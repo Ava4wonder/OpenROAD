@@ -190,6 +190,161 @@ class SeamStateDump
   std::ofstream out_;
 };
 
+// TS.2.b — cross-worker seam-crossing alignment diagnostic. Gated by
+// OPENROAD_DRT_SEAM_ALIGN_DIR. Accumulates every worker's SeamCrossings
+// (single-threaded, in endWorkersBatch) and, at iteration end, joins
+// them on (frNet, x, y, layer):
+//   paired      — same crossing recorded by >=2 workers (the contract
+//                 held: both sides of the seam agree)
+//   misaligned  — recorded by ONE worker although a neighbor worker
+//                 covers the other side of that seam point. Because
+//                 batches run sequentially within an iteration, this
+//                 measures intra-iteration seam churn: the crossing
+//                 moved between the two workers' init times. This is
+//                 the population a portal contract must stabilize.
+//   no_neighbor — recorded by one worker and no other worker covers
+//                 the far side (design edge / sparse-worker iteration);
+//                 benign.
+class SeamAlignDump
+{
+ public:
+  static SeamAlignDump& instance()
+  {
+    static SeamAlignDump inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_SEAM_ALIGN_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    enabled_ = true;
+    mkdir(v, 0777);  // best-effort
+    sum_.open(std::string(v) + "/seam_align_summary.csv");
+    sum_ << "iter,n_workers,n_crossings,paired,churn,"
+            "participation_gap,no_neighbor\n";
+    det_.open(std::string(v) + "/seam_align_detail.csv");
+    det_ << "iter,net_id,net,x,y,layer,side\n";
+  }
+  bool enabled() const { return enabled_; }
+  void addWorker(int iter, const FlexDRWorker& w)
+  {
+    if (!enabled_) {
+      return;
+    }
+    const int box_idx = static_cast<int>(boxes_.size());
+    boxes_.push_back(w.getRouteBox());
+    for (const auto& c : w.getSeamState().crossings()) {
+      acc_.push_back({c.net, c.pt.x(), c.pt.y(), c.layer, c.side, box_idx});
+    }
+    cur_iter_ = iter;
+  }
+  void finalizeIter()
+  {
+    if (!enabled_ || acc_.empty()) {
+      return;
+    }
+    std::map<std::tuple<frNet*, int, int, frLayerNum>, int> counts;
+    // net -> set of box indices that recorded ANY crossing for it,
+    // to split temporal churn (neighbor processed the net but the
+    // crossing moved) from participation gaps (neighbor never ripped
+    // the net; its frozen half pins the interface — today's
+    // correctness mechanism under selective ripup).
+    std::map<frNet*, std::set<int>> net_boxes;
+    for (const auto& a : acc_) {
+      counts[std::make_tuple(a.net, a.x, a.y, a.layer)] += 1;
+      net_boxes[a.net].insert(a.box_idx);
+    }
+    int64_t paired = 0, churn = 0, participation_gap = 0,
+            no_neighbor = 0;
+    int detail_budget = 200000;
+    for (const auto& a : acc_) {
+      const int cnt
+          = counts[std::make_tuple(a.net, a.x, a.y, a.layer)];
+      if (cnt >= 2) {
+        ++paired;
+        continue;
+      }
+      // single: probe one DBU beyond the recorded side for a covering
+      // neighbor worker box.
+      int px = a.x, py = a.y;
+      switch (a.side) {
+        case 0:
+          px -= 1;
+          break;
+        case 1:
+          px += 1;
+          break;
+        case 2:
+          py -= 1;
+          break;
+        case 3:
+          py += 1;
+          break;
+        default:
+          break;
+      }
+      const odb::Point probe(px, py);
+      int covering = -1;
+      for (int bi = 0; bi < static_cast<int>(boxes_.size()); ++bi) {
+        if (bi != a.box_idx && boxes_[bi].intersects(probe)) {
+          covering = bi;
+          break;
+        }
+      }
+      if (covering < 0) {
+        ++no_neighbor;
+        continue;
+      }
+      const auto& nb = net_boxes[a.net];
+      if (nb.count(covering) != 0) {
+        // neighbor DID process this net this iter, but recorded a
+        // different crossing -> the seam interface moved: churn.
+        ++churn;
+        if (detail_budget > 0) {
+          --detail_budget;
+          det_ << cur_iter_ << ","
+               << (a.net != nullptr ? a.net->getId() : -1) << ","
+               << (a.net != nullptr ? a.net->getName() : "?") << ","
+               << a.x << "," << a.y << "," << a.layer << "," << a.side
+               << "\n";
+        }
+      } else {
+        ++participation_gap;
+      }
+    }
+    sum_ << cur_iter_ << "," << boxes_.size() << "," << acc_.size()
+         << "," << paired << "," << churn << "," << participation_gap
+         << "," << no_neighbor << "\n";
+    sum_.flush();
+    det_.flush();
+    acc_.clear();
+    boxes_.clear();
+  }
+
+ private:
+  struct AlignCrossing
+  {
+    frNet* net;
+    int x, y;
+    frLayerNum layer;
+    int side;
+    int box_idx;
+  };
+  bool initialized_ = false;
+  bool enabled_ = false;
+  int cur_iter_ = -1;
+  std::vector<AlignCrossing> acc_;
+  std::vector<odb::Rect> boxes_;
+  std::ofstream sum_;
+  std::ofstream det_;
+};
+
 // RAII phase timer for TS.1 — emits on destruction so early returns
 // are captured. No-op when the dump is disabled.
 class TsScopeTimer
@@ -2556,6 +2711,10 @@ void FlexDR::endWorkersBatch(
     // before cleanup() cleared markers_. The v4 lesson: emitting from
     // main() (pre-end) leaves the merge counters at 0; that's why this
     // dump lives in endWorkersBatch instead of the worker's main.
+    // TS.2.b — accumulate this worker's crossings for the per-iter
+    // cross-worker alignment join (no-op when env unset).
+    SeamAlignDump::instance().initFromEnv();
+    SeamAlignDump::instance().addWorker(iter_, *worker);
     // TS.2.a — seam-state validation row (independent of BoundaryDiag).
     SeamStateDump::instance().initFromEnv();
     if (SeamStateDump::instance().enabled()) {
@@ -3647,6 +3806,10 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
     case FlexDRFlow::State::SKIP:
       return;
   }
+
+  // TS.2.b — per-iter cross-worker seam-crossing join (no-op when
+  // OPENROAD_DRT_SEAM_ALIGN_DIR is unset).
+  SeamAlignDump::instance().finalizeIter();
 
   if (router_cfg_->VERBOSE > 0) {
     iter_prog.cnt_done_workers--;  // decrement 1 and increment again in
