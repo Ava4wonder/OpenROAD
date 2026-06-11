@@ -3485,6 +3485,75 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
     xIdx++;
   }
 
+  // TS.2.c — conflict-wave scheduling (single mode, iter>=1): pay the
+  // ordering invoice ONLY where load-bearing. Markers with >=2 net
+  // sources near a worker edge define cross-worker conflict pairs; the
+  // pair member with fewer design markers defers to wave 2, which
+  // re-inits AFTER wave 1 commits (sees wave-1 positions). B_r = 2-ish
+  // with a tiny wave 2, vs 8 geometric batches upstream.
+  if (ts_single && iter_ != 0 && !workers.empty() && !workers[0].empty()) {
+    auto& all = workers[0][0];
+    const int nw = static_cast<int>(all.size());
+    std::vector<odb::Rect> boxes(nw);
+    for (int i = 0; i < nw; ++i) {
+      boxes[i] = all[i]->getRouteBox();
+    }
+    auto find_worker = [&](int x, int y) {
+      for (int i = 0; i < nw; ++i) {
+        if (boxes[i].intersects(odb::Point(x, y))) {
+          return i;
+        }
+      }
+      return -1;
+    };
+    std::vector<int> mcount(nw, 0);
+    std::vector<std::pair<int, int>> edges;
+    for (auto& mptr : getDesign()->getTopBlock()->getMarkers()) {
+      const odb::Rect mb = mptr->getBBox();
+      const int cx = (mb.xMin() + mb.xMax()) / 2;
+      const int cy = (mb.yMin() + mb.yMax()) / 2;
+      const int w = find_worker(cx, cy);
+      if (w < 0) {
+        continue;
+      }
+      mcount[w] += 1;
+      const odb::Rect& b = boxes[w];
+      const int band = 4500;  // 1.5 GCells: seam-conflict zone
+      int px = cx, py = cy;
+      if (cx - b.xMin() < band) {
+        px = b.xMin() - 1000;
+      } else if (b.xMax() - cx < band) {
+        px = b.xMax() + 1000;
+      } else if (cy - b.yMin() < band) {
+        py = b.yMin() - 1000;
+      } else if (b.yMax() - cy < band) {
+        py = b.yMax() + 1000;
+      } else {
+        continue;  // interior marker — no cross-worker pair
+      }
+      const int n = find_worker(px, py);
+      if (n >= 0 && n != w) {
+        edges.emplace_back(w, n);
+      }
+    }
+    std::vector<char> defer(nw, 0);
+    for (const auto& [a, b2] : edges) {
+      defer[mcount[a] < mcount[b2] ? a : (mcount[b2] < mcount[a]
+                                              ? b2
+                                              : std::max(a, b2))] = 1;
+    }
+    std::vector<std::unique_ptr<FlexDRWorker>> wave1, wave2;
+    for (int i = 0; i < nw; ++i) {
+      (defer[i] ? wave2 : wave1).push_back(std::move(all[i]));
+    }
+    logger_->report("[TS.2.c] iter {}: conflict-wave split {} + {}",
+                    iter_, wave1.size(), wave2.size());
+    workers[0].clear();
+    workers[0].push_back(std::move(wave1));
+    if (!wave2.empty()) {
+      workers[0].push_back(std::move(wave2));
+    }
+  }
   TsTimingDump::instance().phaseRow(
       iter_,
       "create_workers",
