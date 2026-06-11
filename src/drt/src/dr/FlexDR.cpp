@@ -80,6 +80,139 @@ namespace drt {
 
 namespace {
 
+// TS.1 thread-scaling measurement — per-worker + per-phase timing CSVs.
+// Gated by OPENROAD_DRT_TS_TIMING_DIR=<dir>. worker_timing.csv has one
+// row per FlexDRWorker::main() call (iter,batch_id,thread,routeBox,
+// total_ms) — yields L_{r,b}, M_{r,b}, P_eff_{r,b} for the per-batch
+// scaling model. phase_timing.csv has one row per timed phase
+// (create_workers, batch_route, batch_end, conn_check, flow_total,
+// search_repair_total) — yields the T_serial decomposition.
+class TsTimingDump
+{
+ public:
+  static TsTimingDump& instance()
+  {
+    static TsTimingDump inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_TS_TIMING_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    dir_ = v;
+    enabled_ = true;
+    mkdir(dir_.c_str(), 0777);  // best-effort
+    worker_out_.open(dir_ + "/worker_timing.csv");
+    worker_out_ << "iter,batch_id,thread,xmin,ymin,xmax,ymax,total_ms\n";
+    phase_out_.open(dir_ + "/phase_timing.csv");
+    phase_out_ << "iter,phase,batch_id,ms\n";
+  }
+  bool enabled() const { return enabled_; }
+  int nextBatch() { return ++batch_id_; }
+  int currentBatch() const { return batch_id_; }
+  void workerRow(int iter,
+                 int batch,
+                 int thread,
+                 const odb::Rect& box,
+                 double ms)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    worker_out_ << iter << ',' << batch << ',' << thread << ','
+                << box.xMin() << ',' << box.yMin() << ',' << box.xMax()
+                << ',' << box.yMax() << ',' << ms << '\n';
+  }
+  void phaseRow(int iter, const char* phase, int batch, double ms)
+  {
+    if (!enabled_) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    phase_out_ << iter << ',' << phase << ',' << batch << ',' << ms
+               << '\n';
+    phase_out_.flush();
+    worker_out_.flush();
+  }
+
+ private:
+  std::mutex mutex_;
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::string dir_;
+  int batch_id_ = 0;
+  std::ofstream worker_out_;
+  std::ofstream phase_out_;
+};
+
+// TS.2.a validation dump — per-worker seam-state CSV, gated by
+// OPENROAD_DRT_SEAM_STATE_DIR. Emitted single-threaded from
+// FlexDR::endWorkersBatch(). Gate: n_crossings/n_nets must equal the
+// independently-maintained BoundaryDiagStats num_boundary_pins/
+// num_boundary_nets on every worker (the `match` column).
+class SeamStateDump
+{
+ public:
+  static SeamStateDump& instance()
+  {
+    static SeamStateDump inst;
+    return inst;
+  }
+  void initFromEnv()
+  {
+    if (initialized_) {
+      return;
+    }
+    initialized_ = true;
+    const char* v = std::getenv("OPENROAD_DRT_SEAM_STATE_DIR");
+    if (v == nullptr || v[0] == '\0') {
+      return;
+    }
+    enabled_ = true;
+    mkdir(v, 0777);  // best-effort
+    out_.open(std::string(v) + "/seam_state.csv");
+    out_ << "iter,xmin,ymin,xmax,ymax,n_crossings,n_nets,n_subnets,"
+            "bd_pins,bd_nets,match\n";
+  }
+  bool enabled() const { return enabled_; }
+  std::ofstream& out() { return out_; }
+
+ private:
+  bool initialized_ = false;
+  bool enabled_ = false;
+  std::ofstream out_;
+};
+
+// RAII phase timer for TS.1 — emits on destruction so early returns
+// are captured. No-op when the dump is disabled.
+class TsScopeTimer
+{
+ public:
+  TsScopeTimer(int iter, const char* phase)
+      : iter_(iter), phase_(phase), t0_(std::chrono::steady_clock::now())
+  {
+  }
+  ~TsScopeTimer()
+  {
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0_)
+                          .count();
+    TsTimingDump::instance().phaseRow(iter_, phase_, -1, ms);
+  }
+
+ private:
+  int iter_;
+  const char* phase_;
+  std::chrono::steady_clock::time_point t0_;
+};
+
 // P4.0 BoundaryDiag — per-worker boundary-diagnostics CSV writer.
 // Gated by OPENROAD_DRT_BOUNDARY_DIAG_DIR=<dir>; emits one CSV per
 // iteration (boundary_diag_iter<N>.csv) with one row per
@@ -2294,11 +2427,28 @@ void FlexDR::processWorkersBatch(
       PerIterSeams::instance().addRouteBox(workers_batch[i]->getRouteBox());
     }
   }
+  // TS.1 — per-worker wall capture for the per-batch scaling model.
+  TsTimingDump::instance().initFromEnv();
+  const int ts_batch = TsTimingDump::instance().enabled()
+                           ? TsTimingDump::instance().nextBatch()
+                           : -1;
+  const auto ts_batch_t0 = std::chrono::steady_clock::now();
   ThreadException exception;
 #pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < (int) workers_batch.size(); i++) {  // NOLINT
     try {
+      const auto ts_w0 = std::chrono::steady_clock::now();
       workers_batch[i]->main(getDesign());
+      if (ts_batch >= 0) {
+        const double ts_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - ts_w0)
+                                 .count();
+        TsTimingDump::instance().workerRow(iter_,
+                                           ts_batch,
+                                           omp_get_thread_num(),
+                                           workers_batch[i]->getRouteBox(),
+                                           ts_ms);
+      }
 #pragma omp critical
       {
         if (router_cfg_->VERBOSE > 0) {
@@ -2310,6 +2460,15 @@ void FlexDR::processWorkersBatch(
     }
   }
   exception.rethrow();
+  if (ts_batch >= 0) {
+    TsTimingDump::instance().phaseRow(
+        iter_,
+        "batch_route",
+        ts_batch,
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - ts_batch_t0)
+            .count());
+  }
 }
 
 void FlexDR::processWorkersBatchDistributed(
@@ -2397,6 +2556,21 @@ void FlexDR::endWorkersBatch(
     // before cleanup() cleared markers_. The v4 lesson: emitting from
     // main() (pre-end) leaves the merge counters at 0; that's why this
     // dump lives in endWorkersBatch instead of the worker's main.
+    // TS.2.a — seam-state validation row (independent of BoundaryDiag).
+    SeamStateDump::instance().initFromEnv();
+    if (SeamStateDump::instance().enabled()) {
+      const auto& ss = worker->getSeamState();
+      const auto& bd = worker->getBoundaryDiagStats();
+      const auto& rb = worker->getRouteBox();
+      const bool match = ss.numCrossings() == bd.num_boundary_pins
+                         && ss.numSubnets() == bd.num_boundary_nets;
+      SeamStateDump::instance().out()
+          << iter_ << "," << rb.xMin() << "," << rb.yMin() << ","
+          << rb.xMax() << "," << rb.yMax() << "," << ss.numCrossings()
+          << "," << ss.numNets() << "," << ss.numSubnets() << ","
+          << bd.num_boundary_pins << "," << bd.num_boundary_nets << ","
+          << (match ? 1 : 0) << "\n";
+    }
     if (BoundaryDiagDump::instance().enabled()) {
       const auto& bd = worker->getBoundaryDiagStats();
       if (bd.emit_pending) {
@@ -3083,6 +3257,10 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       f1v != nullptr && f1v[0] != '\0' && f1v[0] != '0') {
     return optimizationFlowF1(args, iter_prog);
   }
+  // TS.1 — flow-level phase timing (RAII covers early returns).
+  TsTimingDump::instance().initFromEnv();
+  TsScopeTimer ts_flow_total(iter_, "flow_total");
+  const auto ts_create_t0 = std::chrono::steady_clock::now();
   if (graphics_) {
     graphics_->startIter(iter_, router_cfg_);
   }
@@ -3128,6 +3306,13 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
     xIdx++;
   }
 
+  TsTimingDump::instance().phaseRow(
+      iter_,
+      "create_workers",
+      -1,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - ts_create_t0)
+          .count());
   omp_set_num_threads(router_cfg_->MAX_THREADS);
   int version = 0;
   increaseClipsize_ = false;
@@ -3147,7 +3332,17 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
           processWorkersBatch(workersInBatch, iter_prog);
         }
       }
-      endWorkersBatch(workersInBatch);
+      {
+        const auto ts_end_t0 = std::chrono::steady_clock::now();
+        endWorkersBatch(workersInBatch);
+        TsTimingDump::instance().phaseRow(
+            iter_,
+            "batch_end",
+            TsTimingDump::instance().currentBatch(),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - ts_end_t0)
+                .count());
+      }
     }
   }
 
@@ -3406,6 +3601,10 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
     return;
   }
   ProfileTask profile(fmt::format("DR:searchRepair{}", iter_).c_str());
+  // TS.1 — whole-iteration wall (captures post-flow serial work:
+  // connectivity check, maxSpacing fix, marker bookkeeping).
+  TsTimingDump::instance().initFromEnv();
+  TsScopeTimer ts_sr_total(iter_, "search_repair_total");
 
   if (dist_on_) {
     if ((iter_ % 10 == 0 && iter_ != 60) || iter_ == 3 || iter_ == 15) {
@@ -3457,7 +3656,10 @@ void FlexDR::searchRepair(const SearchRepairArgs& args)
   }
   FlexDRConnectivityChecker checker(
       router_, logger_, router_cfg_, graphics_.get(), dist_on_);
-  checker.check(iter_);
+  {
+    TsScopeTimer ts_conn(iter_, "conn_check");
+    checker.check(iter_);
+  }
   flow_state_machine_->setFixingMaxSpacing(false);
   if (getDesign()->getTopBlock()->getNumMarkers() == 0
       && getTech()->hasMaxSpacingConstraints()) {

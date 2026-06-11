@@ -1384,6 +1384,15 @@ void FlexDRWorker::initNet_boundary(
     bd.num_boundary_pins += static_cast<int>(extBounds.size());
     bd.num_boundary_nets += 1;
     boundary_crossing_nets_.insert(dNet->getFrNet());
+    // TS.2.a — record each crossing with its net/seam identity in the
+    // per-worker WorkerSeamState (same unconditional-cheap pattern as
+    // the bd counters above). This is the queryable form of the same
+    // extBounds data that becomes anonymous drPins in the loop above.
+    seam_state_.noteSubnet();
+    for (const auto& [pr, area] : extBounds) {
+      seam_state_.addCrossing(pr.first, pr.second, dNet->getFrNet(),
+                              gridBBox);
+    }
     for (const auto& [pr, area] : extBounds) {
       const auto lNum = pr.second;
       if (lNum < 0) {

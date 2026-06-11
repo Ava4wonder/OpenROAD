@@ -5,7 +5,9 @@
 
 #include "dr/McfExport.h"
 
+#include <algorithm>
 #include <fstream>
+#include <vector>
 
 #include "db/obj/frBTerm.h"
 #include "db/obj/frBlock.h"
@@ -13,6 +15,7 @@
 #include "db/obj/frInstTerm.h"
 #include "db/obj/frNet.h"
 #include "frDesign.h"
+#include "frRegionQuery.h"
 #include "utl/Logger.h"
 
 namespace drt::mcf {
@@ -47,6 +50,91 @@ int exportInstance(frDesign* design,
          << " " << dirc << " " << layer->getPitch() << "\n";
   }
   grid.close();
+
+  // --- blockage-aware edge capacities (R3.5b) -------------------------
+  // Per GCell-boundary capacity = tracks crossing the boundary minus
+  // tracks under fixed shapes (pins, obstructions, PG) intersecting a
+  // half-pitch band around it. Edge order matches drt_load.build_graph:
+  // x-major (gx outer, gy inner), H layers = +x edges, V layers = +y.
+  {
+    auto* rq = design->getRegionQuery();
+    std::ofstream caps(dir + "/mcf_caps.txt");
+    const int nx = xgp.getCount();
+    const int ny = ygp.getCount();
+    const int xs = xgp.getStartCoord();
+    const int ys = ygp.getStartCoord();
+    const int dxs = xgp.getSpacing();
+    const int dys = ygp.getSpacing();
+    frRegionQuery::Objects<frBlockObject> objs;
+    std::vector<std::pair<int, int>> iv;
+    for (const auto& layer : tech->getLayers()) {
+      if (layer->getType() != odb::dbTechLayerType::ROUTING
+          || !layer->isRoutable()) {
+        continue;
+      }
+      const int pitch = std::max(1, static_cast<int>(layer->getPitch()));
+      const int half = pitch / 2;
+      const bool horiz
+          = layer->getDir() == odb::dbTechLayerDir::HORIZONTAL;
+      const frLayerNum ln = layer->getLayerNum();
+      const int64_t n_edges = horiz ? static_cast<int64_t>(nx - 1) * ny
+                                    : static_cast<int64_t>(nx) * (ny - 1);
+      caps << "CAPS " << ln << " " << n_edges << "\n";
+      const int gx_end = horiz ? nx - 1 : nx;
+      const int gy_end = horiz ? ny : ny - 1;
+      for (int gx = 0; gx < gx_end; ++gx) {
+        for (int gy = 0; gy < gy_end; ++gy) {
+          int lo, hi, base;
+          odb::Rect qbox;
+          if (horiz) {  // +x edge: vertical boundary, horizontal tracks
+            const int bx = xs + (gx + 1) * dxs;
+            lo = ys + gy * dys;
+            hi = lo + dys;
+            base = std::max(1, dys / pitch);
+            qbox = odb::Rect(bx - half, lo, bx + half, hi);
+          } else {  // +y edge: horizontal boundary, vertical tracks
+            const int by = ys + (gy + 1) * dys;
+            lo = xs + gx * dxs;
+            hi = lo + dxs;
+            base = std::max(1, dxs / pitch);
+            qbox = odb::Rect(lo, by - half, hi, by + half);
+          }
+          objs.clear();
+          rq->query(qbox, ln, objs);
+          int cap = base;
+          if (!objs.empty()) {
+            iv.clear();
+            for (const auto& [r, obj] : objs) {
+              const int a = std::max(horiz ? r.yMin() : r.xMin(), lo);
+              const int b = std::min(horiz ? r.yMax() : r.xMax(), hi);
+              if (a < b) {
+                iv.emplace_back(a, b);
+              }
+            }
+            if (!iv.empty()) {
+              std::sort(iv.begin(), iv.end());
+              int64_t blocked = 0;
+              int ca = iv[0].first, cb = iv[0].second;
+              for (size_t i = 1; i < iv.size(); ++i) {
+                if (iv[i].first > cb) {
+                  blocked += cb - ca;
+                  ca = iv[i].first;
+                  cb = iv[i].second;
+                } else {
+                  cb = std::max(cb, iv[i].second);
+                }
+              }
+              blocked += cb - ca;
+              cap = std::max(
+                  0, base - static_cast<int>(blocked / pitch));
+            }
+          }
+          caps << cap << ' ';
+        }
+      }
+      caps << "\n";
+    }
+  }
 
   // --- nets + guides --------------------------------------------------
   std::ofstream nets(dir + "/mcf_nets.txt");

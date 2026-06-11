@@ -37,6 +37,7 @@
 #include "dr/FlexGridGraph.h"
 #include "dr/FlexMazeTypes.h"
 #include "dr/FlexWavefront.h"
+#include "dr/WorkerSeamState.h"
 #include "dst/JobMessage.h"
 #include "frBaseTypes.h"
 #include "frDesign.h"
@@ -692,9 +693,15 @@ class FlexDRWorker
   {
     return ext_connfig_nets_;
   }
+  // TS.2.a — per-worker seam-crossing ledger (WorkerSeamState.h).
+  // Populated unconditionally in initNet_boundary alongside the
+  // BoundaryDiagStats counters; foundation for TS.2.b/c contracts.
+  const WorkerSeamState& getSeamState() const { return seam_state_; }
+  WorkerSeamState& mutableSeamState() { return seam_state_; }
 
  private:
   BoundaryDiagStats boundary_stats_;
+  WorkerSeamState seam_state_;
   // P4.0 BoundaryDiag — per-worker net-membership sets used by the per-marker
   // dump to flag each marker's source nets. Populated unconditionally by the
   // initNet_boundary / initNets hooks (cheap; sets stay empty when no
