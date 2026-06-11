@@ -698,10 +698,17 @@ class FlexDRWorker
   // BoundaryDiagStats counters; foundation for TS.2.b/c contracts.
   const WorkerSeamState& getSeamState() const { return seam_state_; }
   WorkerSeamState& mutableSeamState() { return seam_state_; }
+  // TS.2.b-2 — per-net commit ownership for single-batch mode. A net
+  // rewritten by k workers in one all-route-then-all-commit iteration
+  // must be committed by exactly ONE of them (others' init-time object
+  // bookkeeping is stale once the owner's end() restructures the net).
+  std::set<frNet*> modifiedFrNets() const;
+  void addCommitSkipNet(frNet* n) { commit_skip_nets_.insert(n); }
 
  private:
   BoundaryDiagStats boundary_stats_;
   WorkerSeamState seam_state_;
+  std::set<frNet*> commit_skip_nets_;  // TS.2.b-2 ownership losers
   // P4.0 BoundaryDiag — per-worker net-membership sets used by the per-marker
   // dump to flag each marker's source nets. Populated unconditionally by the
   // initNet_boundary / initNets hooks (cheap; sets stay empty when no

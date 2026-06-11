@@ -24,11 +24,29 @@
 
 namespace drt {
 
+std::set<frNet*> FlexDRWorker::modifiedFrNets() const
+{
+  std::set<frNet*> nets;
+  for (auto& net : nets_) {
+    if (net->isModified()) {
+      nets.insert(net->getFrNet());
+    }
+  }
+  return nets;
+}
+
 void FlexDRWorker::endGetModNets(frOrderedIdSet<frNet*>& modNets)
 {
   for (auto& net : nets_) {
     if (net->isModified()) {
       auto fr_net = net->getFrNet();
+      // TS.2.b-2 — this worker lost the commit-ownership race for
+      // fr_net (another worker in the same single-batch iteration
+      // commits it); drop our rewrite, keep snapshot geometry here.
+      if (commit_skip_nets_.count(fr_net) != 0) {
+        net->setModified(false);
+        continue;
+      }
       fr_net->setModified(true);
       modNets.insert(fr_net);
     }

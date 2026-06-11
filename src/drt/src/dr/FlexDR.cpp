@@ -3511,6 +3511,35 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
           processWorkersBatch(workersInBatch, iter_prog);
         }
       }
+      // TS.2.b-2 — single-mode per-net commit ownership: first
+      // worker (deterministic spatial order) to claim a modified net
+      // commits it; later claimants drop their rewrite of that net.
+      // Iter 0 is pure-add (no pre-existing geometry): every worker
+      // must commit or its net portion is simply unrouted -> opens.
+      // Stale-pointer corruption only exists when commits REMOVE
+      // earlier shapes, i.e. iter >= 1.
+      if (ts_single && iter_ != 0) {
+        // Marker-priority ownership: the worker holding the net's DRC
+        // markers wins (its fix is the one that must land); spatial
+        // order only breaks ties. First-come ownership live-locked:
+        // an early no-marker worker outranked the marker-holder every
+        // iteration and its dropped fix never landed (~3.8k plateau).
+        std::map<frNet*, std::pair<int, FlexDRWorker*>> best;
+        for (auto& w : workersInBatch) {
+          const int prio = w->getInitNumMarkers();
+          for (frNet* n : w->modifiedFrNets()) {
+            auto it = best.find(n);
+            if (it == best.end()) {
+              best[n] = {prio, w.get()};
+            } else if (prio > it->second.first) {
+              it->second.second->addCommitSkipNet(n);
+              it->second = {prio, w.get()};
+            } else {
+              w->addCommitSkipNet(n);
+            }
+          }
+        }
+      }
       {
         const auto ts_end_t0 = std::chrono::steady_clock::now();
         endWorkersBatch(workersInBatch);
