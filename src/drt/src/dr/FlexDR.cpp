@@ -3491,7 +3491,9 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   // pair member with fewer design markers defers to wave 2, which
   // re-inits AFTER wave 1 commits (sees wave-1 positions). B_r = 2-ish
   // with a tiny wave 2, vs 8 geometric batches upstream.
-  if (ts_single && iter_ != 0 && !workers.empty() && !workers[0].empty()) {
+  const char* ts_wv = std::getenv("OPENROAD_DRT_TS_WAVES");
+  if (ts_single && ts_wv != nullptr && ts_wv[0] == '1' && iter_ != 0
+      && !workers.empty() && !workers[0].empty()) {
     auto& all = workers[0][0];
     const int nw = static_cast<int>(all.size());
     std::vector<odb::Rect> boxes(nw);
@@ -3561,6 +3563,40 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - ts_create_t0)
           .count());
+  // TS.2.c v2 — alternating-freeze net-pair arbitration (single mode):
+  // for each marker with >=2 source nets, freeze the parity-selected
+  // loser this iteration (commit-skipped everywhere). The winner then
+  // reroutes against the loser's REAL frozen position, so its fix is
+  // valid by construction; parity flips next iter so the loser moves
+  // against the winner's committed result. Pairwise ordering across
+  // iterations — no waves, no re-init complexity.
+  std::set<frNet*> ts_pair_losers;
+  if (ts_single && iter_ != 0) {
+    for (auto& mptr : getDesign()->getTopBlock()->getMarkers()) {
+      std::vector<frNet*> mnets;
+      for (auto* src : mptr->getSrcs()) {
+        if (src != nullptr && src->typeId() == frcNet) {
+          mnets.push_back(static_cast<frNet*>(src));
+        }
+      }
+      if (mnets.size() < 2) {
+        continue;
+      }
+      std::sort(mnets.begin(), mnets.end(),
+                [](frNet* a, frNet* b) { return a->getId() < b->getId(); });
+      // parity-rotated winner; all others frozen this iter
+      const size_t win = iter_ % mnets.size();
+      for (size_t k = 0; k < mnets.size(); ++k) {
+        if (k != win) {
+          ts_pair_losers.insert(mnets[k]);
+        }
+      }
+    }
+    if (!ts_pair_losers.empty()) {
+      logger_->report("[TS.2.c-v2] iter {}: {} pair-loser nets frozen",
+                      iter_, ts_pair_losers.size());
+    }
+  }
   omp_set_num_threads(router_cfg_->MAX_THREADS);
   int version = 0;
   increaseClipsize_ = false;
@@ -3597,6 +3633,10 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
         for (auto& w : workersInBatch) {
           const int prio = w->getInitNumMarkers();
           for (frNet* n : w->modifiedFrNets()) {
+            if (ts_pair_losers.count(n) != 0) {
+              w->addCommitSkipNet(n);  // frozen this iter (v2 parity)
+              continue;
+            }
             auto it = best.find(n);
             if (it == best.end()) {
               best[n] = {prio, w.get()};
