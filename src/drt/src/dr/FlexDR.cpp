@@ -3047,6 +3047,98 @@ std::vector<std::vector<int>> getWorkerBatchesBoxes(
   }
   return batches;
 }
+
+// ============================================================
+// M3.b — stub/guide tile sliver fix (env-gated, default OFF)
+// ============================================================
+// Gated by OPENROAD_DRT_TS_STUBFIX=1. Diagnosis on ispd18_test9 64t:
+// guideTilesFlow merges same-direction intersecting guide bboxes into
+// arbitrarily long slivers — iter-4 produced a 1 GCell x 108 GCell
+// vertical worker at the die west edge, routeBox
+// (100,984000)-(3100,1308000), 84 s = 45% of total wall. A 1-GCell-wide
+// box gives the maze no lateral freedom -> ripup oscillation.
+// stubbornTilesFlow can analogously emit sub-6-GCell tiles when
+// expandBox is clipped at die edges / neighboring rects.
+// Fix: (a) enforce a minimum tile side of 6 GCells, expanding away from
+// the die edge when one side is blocked; (b) split any box whose aspect
+// ratio exceeds 8:1 into segments of at most 12 GCells in the long
+// dimension, overlapping by 1 GCell so no seam between segments is
+// orphaned. Segments become separate workers; getWorkerBatchesBoxes
+// already places intersecting workers into different batches.
+constexpr int kStubFixMinDim = 6;     // GCells, minimum tile side
+constexpr int kStubFixMaxAspect = 8;  // split when long/short > 8
+constexpr int kStubFixSegLen = 12;    // GCells, max segment long side
+constexpr int kStubFixSegOverlap = 1;  // GCells of overlap between segments
+
+bool stubFixEnabled()
+{
+  const char* v = std::getenv("OPENROAD_DRT_TS_STUBFIX");
+  return v != nullptr && v[0] != '\0' && v[0] != '0';
+}
+
+/**
+ * @brief Widens a GCell-index box (inclusive coords) to at least
+ * kStubFixMinDim GCells per side.
+ *
+ * Expansion is symmetric; when clamped at a die edge the remainder is
+ * pushed to the opposite side.
+ */
+void widenToMinDim(odb::Rect& box, const int max_x_idx, const int max_y_idx)
+{
+  const auto widen_axis = [](int lo, int hi, const int max_idx) {
+    const int len = hi - lo + 1;
+    if (len < kStubFixMinDim) {
+      const int need = kStubFixMinDim - len;
+      lo -= need / 2;
+      hi += need - need / 2;
+      if (lo < 0) {  // blocked at the low die edge: push remainder high
+        hi = std::min(hi - lo, max_idx);
+        lo = 0;
+      } else if (hi > max_idx) {  // blocked high: push remainder low
+        lo = std::max(lo - (hi - max_idx), 0);
+        hi = max_idx;
+      }
+    }
+    return std::pair<int, int>(lo, hi);
+  };
+  const auto [xlo, xhi] = widen_axis(box.xMin(), box.xMax(), max_x_idx);
+  const auto [ylo, yhi] = widen_axis(box.yMin(), box.yMax(), max_y_idx);
+  box.init(xlo, ylo, xhi, yhi);
+}
+
+/**
+ * @brief Splits a GCell-index box (inclusive coords) whose aspect ratio
+ * exceeds kStubFixMaxAspect into segments of at most kStubFixSegLen
+ * GCells along the long dimension, each overlapping its neighbor by
+ * kStubFixSegOverlap GCells.
+ */
+std::vector<odb::Rect> splitHighAspect(const odb::Rect& box)
+{
+  const int width = box.dx() + 1;
+  const int height = box.dy() + 1;
+  const bool tall = height >= width;
+  const int long_len = tall ? height : width;
+  const int short_len = tall ? width : height;
+  if (long_len <= kStubFixMaxAspect * short_len) {
+    return {box};
+  }
+  std::vector<odb::Rect> segments;
+  const int step = kStubFixSegLen - kStubFixSegOverlap;
+  const int long_min = tall ? box.yMin() : box.xMin();
+  const int long_max = tall ? box.yMax() : box.xMax();
+  for (int lo = long_min;; lo += step) {
+    const int hi = std::min(lo + kStubFixSegLen - 1, long_max);
+    if (tall) {
+      segments.emplace_back(box.xMin(), lo, box.xMax(), hi);
+    } else {
+      segments.emplace_back(lo, box.yMin(), hi, box.yMax());
+    }
+    if (hi >= long_max) {
+      break;
+    }
+  }
+  return segments;
+}
 }  // namespace stub_tiles
 
 void FlexDR::stubbornTilesFlow(const SearchRepairArgs& args,
@@ -3062,6 +3154,25 @@ void FlexDR::stubbornTilesFlow(const SearchRepairArgs& args,
   }
   auto merged_boxes = stub_tiles::mergeBoxes(drv_boxes);
   auto expanded_boxes = stub_tiles::expandBoxes(merged_boxes);
+
+  // M3.b sliver fix — expandBox clips at die edges / neighboring rects
+  // and can leave sub-6-GCell tiles; enforce the minimum side here.
+  // Aspect-split is unnecessary: expanded boxes are capped at 7x7.
+  // Widening happens BEFORE getWorkerBatchesBoxes, which re-derives
+  // batch conflicts from the final boxes, so overlap stays safe.
+  if (stub_tiles::stubFixEnabled()) {
+    const auto g_patterns = getDesign()->getTopBlock()->getGCellPatterns();
+    const int max_x_idx = (int) g_patterns.at(0).getCount() - 1;
+    const int max_y_idx = (int) g_patterns.at(1).getCount() - 1;
+    for (auto& box_set : expanded_boxes) {
+      std::set<odb::Rect> widened;
+      for (auto box : box_set) {
+        stub_tiles::widenToMinDim(box, max_x_idx, max_y_idx);
+        widened.insert(box);
+      }
+      box_set = std::move(widened);
+    }
+  }
 
   // Convert gcell indices to actual coordinates
   std::vector<std::set<odb::Rect>> expanded_boxes_coords;
@@ -3180,6 +3291,31 @@ void FlexDR::guideTilesFlow(const SearchRepairArgs& args,
         itr2 = itr1;
       }
     }
+  }
+  // M3.b sliver fix — merged guide bboxes can be 1-GCell-wide chains
+  // spanning 100+ GCells (the 84 s monster worker on test9 64t iter 4).
+  // Widen to >= 6 GCells per side and split aspect > 8:1 boxes into
+  // <= 12-GCell segments (1-GCell overlap). Each segment becomes its own
+  // worker id; getWorkerBatchesBoxes serializes intersecting workers
+  // into different batches, so the overlap cannot race.
+  if (stub_tiles::stubFixEnabled()) {
+    auto* top_block = getDesign()->getTopBlock();
+    const auto g_patterns = top_block->getGCellPatterns();
+    const int max_x_idx = (int) g_patterns.at(0).getCount() - 1;
+    const int max_y_idx = (int) g_patterns.at(1).getCount() - 1;
+    std::vector<odb::Rect> fixed_workers;
+    fixed_workers.reserve(workers.size());
+    for (const auto& worker_box : workers) {
+      odb::Rect gcell_box(top_block->getGCellIdx(worker_box.ll()),
+                          top_block->getGCellIdx(worker_box.ur()));
+      stub_tiles::widenToMinDim(gcell_box, max_x_idx, max_y_idx);
+      for (const auto& seg : stub_tiles::splitHighAspect(gcell_box)) {
+        fixed_workers.emplace_back(
+            top_block->getGCellBox(seg.ll()).ll(),
+            top_block->getGCellBox(seg.ur()).ur());
+      }
+    }
+    workers = std::move(fixed_workers);
   }
   std::vector<std::set<odb::Rect>> boxes_set;
   boxes_set.reserve(workers.size());
