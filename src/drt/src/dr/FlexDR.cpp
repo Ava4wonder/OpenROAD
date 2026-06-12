@@ -3456,6 +3456,17 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   const char* ts_bm = std::getenv("OPENROAD_DRT_TS_BATCHMODE");
   const bool ts_color = ts_bm != nullptr && std::string(ts_bm) == "color";
   const bool ts_single = ts_bm != nullptr && std::string(ts_bm) == "single";
+  // M1 hybrid: concurrent bulk (iters 0-1, 75% of work, +5% noise
+  // tolerable) then upstream checkerboard from iter 2 — ordering's
+  // conflict-CREATION-prevention exactly where the conflict-graph
+  // measurement showed it is irreplaceable. Bounded regret: cleanup
+  // phase IS upstream.
+  const bool ts_hybrid = ts_bm != nullptr && std::string(ts_bm) == "hybrid";
+  // M1 fallback (pre-registered): bulk iter 0 ONLY — two concurrent
+  // iters compound noise past what the cleanup schedule absorbs
+  // (2116-state degraded to ~1970 plateau); iter 1 is full-ripup in
+  // the upstream schedule and absorbs iter-0's +5% noise entirely.
+  const bool ts_single_eff = ts_single || (ts_hybrid && iter_ < 1);
 
   std::vector<std::vector<std::vector<std::unique_ptr<FlexDRWorker>>>> workers(
       batchStepX * batchStepY);
@@ -3464,13 +3475,13 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   for (int i = offset; i < (int) xgp.getCount(); i += size) {
     for (int j = offset; j < (int) ygp.getCount(); j += size) {
       auto worker = createWorker(i, j, args);
-      int batch_idx = ts_single
+      int batch_idx = ts_single_eff
                           ? 0
                           : (xIdx % batchStepX) * batchStepY
                                 + yIdx % batchStepY;
       const bool create_new_batch
           = workers[batch_idx].empty()
-            || (!dist_on_ && !ts_color && !ts_single
+            || (!dist_on_ && !ts_color && !ts_single_eff
                 && workers[batch_idx].back().size()
                        >= router_cfg_->BATCHSIZE);
       if (create_new_batch) {
@@ -3571,7 +3582,28 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   // against the winner's committed result. Pairwise ordering across
   // iterations — no waves, no re-init complexity.
   std::set<frNet*> ts_pair_losers;
+  // TS.2.c measurement — conflict-graph dump (env OPENROAD_DRT_TS_CONFLICT_DIR):
+  // one row per multi-net marker: nets, position, distance to nearest
+  // worker edge (seam-pinned classification offline). Decides v3 vs
+  // stub-ownership vs offset-lever from DATA before building.
+  static std::ofstream ts_cg_out;
+  static bool ts_cg_init = false;
+  if (!ts_cg_init) {
+    ts_cg_init = true;
+    if (const char* d = std::getenv("OPENROAD_DRT_TS_CONFLICT_DIR");
+        d != nullptr && d[0] != '\0') {
+      mkdir(d, 0777);
+      ts_cg_out.open(std::string(d) + "/conflict_graph.csv");
+      ts_cg_out << "iter,cx,cy,layer,edge_dist,nets\n";
+    }
+  }
   if (ts_single && iter_ != 0) {
+    std::vector<odb::Rect> ts_cg_boxes;
+    if (ts_cg_out.is_open() && !workers.empty() && !workers[0].empty()) {
+      for (auto& w : workers[0][0]) {
+        ts_cg_boxes.push_back(w->getRouteBox());
+      }
+    }
     for (auto& mptr : getDesign()->getTopBlock()->getMarkers()) {
       std::vector<frNet*> mnets;
       for (auto* src : mptr->getSrcs()) {
@@ -3584,6 +3616,25 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       }
       std::sort(mnets.begin(), mnets.end(),
                 [](frNet* a, frNet* b) { return a->getId() < b->getId(); });
+      if (ts_cg_out.is_open()) {
+        const odb::Rect mb = mptr->getBBox();
+        const int cx = (mb.xMin() + mb.xMax()) / 2;
+        const int cy = (mb.yMin() + mb.yMax()) / 2;
+        int edist = -1;
+        for (const auto& b : ts_cg_boxes) {
+          if (b.intersects(odb::Point(cx, cy))) {
+            edist = std::min(std::min(cx - b.xMin(), b.xMax() - cx),
+                             std::min(cy - b.yMin(), b.yMax() - cy));
+            break;
+          }
+        }
+        ts_cg_out << iter_ << "," << cx << "," << cy << ","
+                  << mptr->getLayerNum() << "," << edist << ",";
+        for (size_t k = 0; k < mnets.size(); ++k) {
+          ts_cg_out << (k ? ";" : "") << mnets[k]->getId();
+        }
+        ts_cg_out << "\n";
+      }
       // parity-rotated winner; all others frozen this iter
       const size_t win = iter_ % mnets.size();
       for (size_t k = 0; k < mnets.size(); ++k) {
@@ -3595,6 +3646,9 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
     if (!ts_pair_losers.empty()) {
       logger_->report("[TS.2.c-v2] iter {}: {} pair-loser nets frozen",
                       iter_, ts_pair_losers.size());
+    }
+    if (ts_cg_out.is_open()) {
+      ts_cg_out.flush();
     }
   }
   omp_set_num_threads(router_cfg_->MAX_THREADS);
@@ -3623,7 +3677,7 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
       // must commit or its net portion is simply unrouted -> opens.
       // Stale-pointer corruption only exists when commits REMOVE
       // earlier shapes, i.e. iter >= 1.
-      if (ts_single && iter_ != 0) {
+      if (ts_single_eff && iter_ != 0) {
         // Marker-priority ownership: the worker holding the net's DRC
         // markers wins (its fix is the one that must land); spatial
         // order only breaks ties. First-come ownership live-locked:
