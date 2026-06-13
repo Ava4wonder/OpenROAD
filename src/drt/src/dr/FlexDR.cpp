@@ -3590,7 +3590,11 @@ void FlexDR::optimizationFlow(const SearchRepairArgs& args,
   //              spacing conflicts become next-iter DRVs (measured;
   //              TS.2.c seam-band reservation is the planned fix).
   const char* ts_bm = std::getenv("OPENROAD_DRT_TS_BATCHMODE");
-  const bool ts_color = ts_bm != nullptr && std::string(ts_bm) == "color";
+  const bool ts_hybrid_pre
+      = ts_bm != nullptr && std::string(ts_bm) == "hybrid";
+  // hybrid implies color-merged cleanup batches (proven quality-neutral)
+  const bool ts_color = (ts_bm != nullptr && std::string(ts_bm) == "color")
+                        || ts_hybrid_pre;
   const bool ts_single = ts_bm != nullptr && std::string(ts_bm) == "single";
   // M1 hybrid: concurrent bulk (iters 0-1, 75% of work, +5% noise
   // tolerable) then upstream checkerboard from iter 2 — ordering's
