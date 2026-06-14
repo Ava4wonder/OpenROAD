@@ -2695,6 +2695,8 @@ void FlexDR::endWorkersBatch(
     std::vector<std::unique_ptr<FlexDRWorker>>& workers_batch)
 {
   ProfileTask profile("DR:end_batch");
+  const bool ts3p = std::getenv("OPENROAD_DRT_TS3_PROFILE") != nullptr;
+  const auto ts3_loop0 = std::chrono::steady_clock::now();
   // single thread
   for (auto& worker : workers_batch) {
     if (worker->end(getDesign())) {
@@ -2754,7 +2756,40 @@ void FlexDR::endWorkersBatch(
       }
     }
   }
-  workers_batch.clear();
+  // TS.3 — parallel worker destruction. The dominant serial cost here is
+  // destroying the FlexDRWorker objects (freeing gcWorker, drNets, the
+  // worker region query, and residual gridGraph buffers). Each destructor
+  // frees only its own heap and runs AFTER end() has written results back
+  // to the global design, so there is no shared mutable state and routing
+  // is unaffected. Gated by OPENROAD_DRT_TS3 (default off -> identical).
+  const auto ts3_clear0 = std::chrono::steady_clock::now();
+  static const bool ts3_par_destroy
+      = std::getenv("OPENROAD_DRT_TS3") != nullptr;
+  if (ts3_par_destroy) {
+    const int nws = static_cast<int>(workers_batch.size());
+    ThreadException exception;
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < nws; i++) {  // NOLINT
+      try {
+        workers_batch[i].reset();  // destroy this worker in parallel
+      } catch (...) {
+        exception.capture();
+      }
+    }
+    exception.rethrow();
+  }
+  workers_batch.clear();  // frees the vector (cheap once pointees are gone)
+  if (ts3p) {
+    static double s_loop_ms = 0, s_clear_ms = 0;
+    s_loop_ms += std::chrono::duration<double, std::milli>(ts3_clear0
+                                                           - ts3_loop0)
+                     .count();
+    s_clear_ms += std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - ts3_clear0)
+                      .count();
+    std::cerr << "[TS3-batch] loop_cum=" << s_loop_ms
+              << " clear_cum=" << s_clear_ms << " ms\n";
+  }
 }
 
 odb::Rect FlexDR::getDRVBBox(const odb::Rect& drv_rect) const

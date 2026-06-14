@@ -2,6 +2,9 @@
 // Copyright (c) 2019-2025, The OpenROAD Authors
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -23,6 +26,33 @@
 #include "odb/geom.h"
 
 namespace drt {
+
+// TS.3 sub-phase profiler. Gated by OPENROAD_DRT_TS3_PROFILE. end() runs
+// single-threaded from FlexDR::endWorkersBatch(), so plain doubles suffice.
+namespace {
+struct Ts3Prof
+{
+  double getmod = 0, remove = 0, add = 0, rmark = 0, amark = 0;
+  long calls = 0;
+  ~Ts3Prof()
+  {
+    if (std::getenv("OPENROAD_DRT_TS3_PROFILE") != nullptr) {
+      const double tot = getmod + remove + add + rmark + amark;
+      std::fprintf(stderr,
+                   "[TS3-prof CUMULATIVE] calls=%ld getMod=%.1f removeNets=%.1f "
+                   "addNets=%.1f rmMarkers=%.1f addMarkers=%.1f total=%.1f ms\n",
+                   calls, getmod, remove, add, rmark, amark, tot);
+    }
+  }
+};
+Ts3Prof g_ts3prof;  // dumps at process exit when env set
+inline double nowMs()
+{
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
 
 std::set<frNet*> FlexDRWorker::modifiedFrNets() const
 {
@@ -735,15 +765,37 @@ bool FlexDRWorker::end(frDesign* design)
     return false;
   }
   save_updates_ = dist_on_;
+  const bool ts3prof = std::getenv("OPENROAD_DRT_TS3_PROFILE") != nullptr;
+  double t0 = ts3prof ? nowMs() : 0.0;
   frOrderedIdSet<frNet*> modNets;
   endGetModNets(modNets);
+  if (ts3prof) {
+    g_ts3prof.getmod += nowMs() - t0;
+    t0 = nowMs();
+  }
   // get lock
   frOrderedIdMap<frNet*, std::set<std::pair<odb::Point, frLayerNum>>> boundPts;
   endRemoveNets(design, modNets, boundPts);
+  if (ts3prof) {
+    g_ts3prof.remove += nowMs() - t0;
+    t0 = nowMs();
+  }
   endAddNets(design, boundPts);  // if two subnets have diff isModified()
                                  // status, then should always write back
+  if (ts3prof) {
+    g_ts3prof.add += nowMs() - t0;
+    t0 = nowMs();
+  }
   endRemoveMarkers(design);
+  if (ts3prof) {
+    g_ts3prof.rmark += nowMs() - t0;
+    t0 = nowMs();
+  }
   endAddMarkers(design);
+  if (ts3prof) {
+    g_ts3prof.amark += nowMs() - t0;
+    ++g_ts3prof.calls;
+  }
   // release lock
   return true;
 }
